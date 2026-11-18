@@ -46,8 +46,23 @@ add_compile_definitions(
 set(PORT_FLAGS "-sUSE_SDL=2" "-sUSE_ZLIB=1" "-sUSE_VORBIS=1" "-sUSE_OGG=1")
 # The engine reports errors with C++ throw/catch: use native wasm exceptions.
 set(EH_FLAGS -fwasm-exceptions -sSUPPORT_LONGJMP=wasm)
+
+# Build flavours:
+#   SE1_DEV=ON  (default): -sASSERTIONS, function names in stacks, no LTO -> fast iteration
+#   SE1_DEV=OFF          : release, LTO, no runtime checks (what players get)
+#   SE1_PROFILE=ON       : keep function names in a release build (for the JS Self-Profiling API)
+option(SE1_DEV "Developer build (assertions, no LTO)" ON)
+option(SE1_PROFILE "Keep function names (profiling)" OFF)
+option(SE1_SIMD "Enable wasm SIMD (-msimd128)" ON)
+set(OPT_FLAGS "")
+if(SE1_SIMD)
+  list(APPEND OPT_FLAGS -msimd128)
+endif()
+if(NOT SE1_DEV)
+  list(APPEND OPT_FLAGS -O3 -flto)
+endif()
 add_compile_options(
-  ${PORT_FLAGS} ${EH_FLAGS}
+  ${PORT_FLAGS} ${EH_FLAGS} ${OPT_FLAGS}
   -fsigned-char -fms-extensions -fno-strict-aliasing
   -Wno-everything
 )
@@ -108,8 +123,10 @@ if(SE1_RUSTMOD)
   target_link_libraries(serioussam "${RUSTMOD_LIB}")
 endif()
 target_link_options(serioussam PRIVATE
-  ${PORT_FLAGS} ${EH_FLAGS}
-  -sASSERTIONS=1 --profiling-funcs
+  ${PORT_FLAGS} ${EH_FLAGS} ${OPT_FLAGS}
+  $<$<BOOL:${SE1_DEV}>:-sASSERTIONS=1>
+  $<$<OR:$<BOOL:${SE1_DEV}>,$<BOOL:${SE1_PROFILE}>>:--profiling-funcs>
+  "--pre-js" "${ROOT}/port/web/pre.js" "--post-js" "${ROOT}/port/web/bench.js"
   -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=256MB -sSTACK_SIZE=4MB
   -sFULL_ES3=1 -sMAX_WEBGL_VERSION=2 -sMIN_WEBGL_VERSION=2
   -sJSPI=1
@@ -120,3 +137,6 @@ if(DATA_DIR)
   target_link_options(serioussam PRIVATE "--preload-file" "${DATA_DIR}@/" "--exclude-file" "*.DS_Store")
 endif()
 set_target_properties(serioussam PROPERTIES SUFFIX ".html")
+# --pre-js/--post-js files are link inputs: relink when they change
+set_property(TARGET serioussam APPEND PROPERTY LINK_DEPENDS
+  "${ROOT}/port/web/pre.js" "${ROOT}/port/web/bench.js")

@@ -46,3 +46,18 @@ Measure first (tools/devserver.py + JS Self-Profiling API), then:
 3. Engine hot spots from profiles (portable C paths replaced x86 asm: SIMD rewrites where it matters).
 4. Threads (PROXY_TO_PTHREAD + OffscreenCanvas, COOP/COEP) and/or a WebGPU backend for the renderer.
 5. Data: lazy fetch + OPFS cache instead of a 117 MB preload; compressed textures where supported.
+- Background tabs: today the game pauses when hidden (no rAF, 1 s timer throttling). For MP keep the
+  loop alive while hidden (MessageChannel yield, skip rendering), honouring sam_bPauseOnMinimize.
+
+### Perf log (2026-11-18)
+Benchmark: `node tools/bench.mjs <url> 3` (headless Chrome, GPU, muted, Auto-Demo0001 timedemo, uncapped:
+fps = frames rendered while the demo plays in real time; CPU ms/frame from port/common/WebFrame.cpp).
+Measure only headless: the shared pane gets hidden/throttled, and headless follows the display refresh
+(30 Hz when the Mac display is on another desktop) -> always use uncapped mode for comparisons.
+- -O3/LTO vs dev build: no difference -> cost is not in engine C++ but in wasm<->JS WebGL call overhead.
+- Profile (release, vsync): bufferData per array per draw, redundant uniform/attrib/bind calls, glFinish
+  every frame, failing depth readPixels, per-sample audio conversion.
+- Lesson: a bufferSubData ring is a trap on ANGLE/Metal (whole-buffer hazard tracking -> stall or full
+  buffer copy): 9 fps, 500 ms frames. Use one bufferData per draw with all arrays packed instead.
+- Lesson: without vsync backpressure, dropping glFinish lets the GPU queue grow unbounded (hangs);
+  the timedemo does one GPU sync per frame for both builds to stay comparable.

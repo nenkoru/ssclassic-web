@@ -133,7 +133,7 @@ static struct {
   int inBegin; GLenum beginMode;
   float *imm; int immCount, immCap;
   /* GL objects */
-  GLuint vao, vboVtx, vboCol, vboTc[MAXUNITS], vboImm, ibo, iboQuads;
+  GLuint vao, iboQuads;
   int quadsCap;
   /* GLES caps we track for glIsEnabled */
   int capBlend, capCull, capDepth, capScissor, capDither, capPolyOffset;
@@ -150,6 +150,52 @@ static TexInfo *tex_info(GLuint t, int create) {
   TexInfo *ti = &_texInfo[_ctTexInfo++]; memset(ti, 0, sizeof *ti); ti->tex = t; return ti;
 }
 
+
+/* ---- WebGL state caches: every WebGL call crosses wasm->JS, so skip the ones that change
+   nothing. The engine never touches buffers/VAOs/programs itself, so the shim owns them. ---- */
+static GLuint _curProgram, _boundArrayBuf, _boundElemBuf;
+static uint32_t _attribEnabled, _attribConstValid;
+static float _attribConst[2 + MAXUNITS][4];
+static int _activeTexUnit = 0;
+
+static void bind_array_buffer(GLuint b) { if (_boundArrayBuf != b) { glBindBuffer(GL_ARRAY_BUFFER, b); _boundArrayBuf = b; } }
+static void bind_elem_buffer(GLuint b) { if (_boundElemBuf != b) { glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, b); _boundElemBuf = b; } }
+static void use_program(GLuint p) { if (_curProgram != p) { glUseProgram(p); _curProgram = p; } }
+static void attrib_enable(int loc, int on) {
+  uint32_t bit = 1u << loc;
+  if (on) { if (!(_attribEnabled & bit)) { glEnableVertexAttribArray(loc); _attribEnabled |= bit; } }
+  else if (_attribEnabled & bit) { glDisableVertexAttribArray(loc); _attribEnabled &= ~bit; }
+}
+static void attrib_const(int loc, const float v[4]) {
+  attrib_enable(loc, 0);
+  uint32_t bit = 1u << loc;
+  if (!(_attribConstValid & bit) || memcmp(_attribConst[loc], v, 16) != 0) {
+    glVertexAttrib4fv(loc, v); memcpy(_attribConst[loc], v, 16); _attribConstValid |= bit;
+  }
+}
+
+/* ---- streaming uploads: one bufferData per draw (all arrays packed together).
+   Not a bufferSubData ring: ANGLE tracks GPU use per whole buffer, so writing a region of a
+   buffer that earlier draws still read makes it stall or copy ("ghost") the entire buffer --
+   measured 9 fps / 500 ms frames. bufferData with data always gets fresh storage (fast path).
+   Vertex and index data need separate buffers in WebGL. ---- */
+typedef struct { GLenum target; GLuint buf; } Ring;
+static Ring _vring = { GL_ARRAY_BUFFER, 0 }, _iring = { GL_ELEMENT_ARRAY_BUFFER, 0 };
+static void ring_bind(Ring *r) { if (r->target == GL_ARRAY_BUFFER) bind_array_buffer(r->buf); else bind_elem_buffer(r->buf); }
+static void ring_init(void) { glGenBuffers(1, &_vring.buf); glGenBuffers(1, &_iring.buf); }
+/* upload n bytes into fresh storage of the stream buffer (left bound); returns their offset */
+static GLintptr ring_upload(Ring *r, const void *data, GLsizeiptr n) {
+  ring_bind(r);
+  glBufferData(r->target, n, data, GL_STREAM_DRAW);
+  return 0;
+}
+/* CPU staging area: all arrays of one draw are packed here, then uploaded at once */
+static uint8_t *_stage; static size_t _stageCap;
+static uint8_t *stage_reserve(size_t n) {
+  if (n > _stageCap) { _stageCap = _stageCap ? _stageCap : 1 << 20; while (_stageCap < n) _stageCap *= 2; _stage = realloc(_stage, _stageCap); }
+  return _stage;
+}
+
 static void shim_init(void) {
   if (S.inited) return;
   S.inited = 1;
@@ -164,15 +210,18 @@ static void shim_init(void) {
   S.curColor[0] = S.curColor[1] = S.curColor[2] = S.curColor[3] = 1.0f;
   S.capDither = 1;
   glGenVertexArrays(1, &S.vao);
-  glBindVertexArray(S.vao);
-  glGenBuffers(1, &S.vboVtx); glGenBuffers(1, &S.vboCol); glGenBuffers(MAXUNITS, S.vboTc);
-  glGenBuffers(1, &S.vboImm); glGenBuffers(1, &S.ibo); glGenBuffers(1, &S.iboQuads);
+  glBindVertexArray(S.vao);   /* the only VAO, bound for good */
+  glGenBuffers(1, &S.iboQuads);
+  ring_init();
 }
 
 /* ---- shader cache ---- */
 typedef struct {
   uint32_t key; GLuint prog;
   GLint uMVP, uMV, uTexMat[MAXUNITS], uSampler[MAXUNITS], uEnvColor[MAXUNITS], uAlphaRef, uClip;
+  /* last values sent, so unchanged uniforms are skipped */
+  float cMVP[16], cMV[16], cClip[4], cAlphaRef, cTexMat[MAXUNITS][16], cEnv[MAXUNITS][4];
+  uint32_t cValid;
 } Prog;
 static Prog _progs[256]; static int _ctProgs;
 
@@ -282,23 +331,46 @@ static Prog *get_prog(uint32_t key) {
     snprintf(name, sizeof name, "uS%d", i); pr->uSampler[i] = glGetUniformLocation(p, name);
     snprintf(name, sizeof name, "uEnv%d", i); pr->uEnvColor[i] = glGetUniformLocation(p, name);
   }
-  glUseProgram(p);
+  pr->cValid = 0;
+  use_program(p);
   for (int i = 0; i < MAXUNITS; i++) if (pr->uSampler[i] >= 0) glUniform1i(pr->uSampler[i], i);
   return pr;
 }
 
+enum { CV_MVP = 1, CV_MV = 2, CV_CLIP = 4, CV_ALPHA = 8, CV_TEX = 16, CV_ENV = 16 << MAXUNITS };
+#define UNIFORM_CHANGED(p, bit, cache, val, n) \
+  (!((p)->cValid & (bit)) || memcmp((cache), (val), (n) * sizeof(float)) != 0)
+
+static Prog *_lastProg; static uint32_t _lastKey = 0xFFFFFFFFu;
 static void apply_program(void) {
-  Prog *p = get_prog(state_key());
-  glUseProgram(p->prog);
+  uint32_t key = state_key();
+  Prog *p = (key == _lastKey && _lastProg) ? _lastProg : get_prog(key);
+  _lastKey = key; _lastProg = p;
+  use_program(p->prog);
   Mat4 mvp; mat_mul(&mvp, &S.projection, &S.modelview);
-  glUniformMatrix4fv(p->uMVP, 1, GL_FALSE, mvp.m);
-  if (S.clipPlane) { glUniformMatrix4fv(p->uMV, 1, GL_FALSE, S.modelview.m); glUniform4fv(p->uClip, 1, S.clipEye); }
-  if (S.alphaTest) glUniform1f(p->uAlphaRef, S.alphaRef);
+  if (UNIFORM_CHANGED(p, CV_MVP, p->cMVP, mvp.m, 16)) {
+    glUniformMatrix4fv(p->uMVP, 1, GL_FALSE, mvp.m); memcpy(p->cMVP, mvp.m, 64); p->cValid |= CV_MVP;
+  }
+  if (S.clipPlane) {
+    if (UNIFORM_CHANGED(p, CV_MV, p->cMV, S.modelview.m, 16)) {
+      glUniformMatrix4fv(p->uMV, 1, GL_FALSE, S.modelview.m); memcpy(p->cMV, S.modelview.m, 64); p->cValid |= CV_MV;
+    }
+    if (UNIFORM_CHANGED(p, CV_CLIP, p->cClip, S.clipEye, 4)) {
+      glUniform4fv(p->uClip, 1, S.clipEye); memcpy(p->cClip, S.clipEye, 16); p->cValid |= CV_CLIP;
+    }
+  }
+  if (S.alphaTest && UNIFORM_CHANGED(p, CV_ALPHA, &p->cAlphaRef, &S.alphaRef, 1)) {
+    glUniform1f(p->uAlphaRef, S.alphaRef); p->cAlphaRef = S.alphaRef; p->cValid |= CV_ALPHA;
+  }
   for (int i = 0; i < MAXUNITS; i++) {
     if (!S.u[i].enabled) continue;
-    glUniformMatrix4fv(p->uTexMat[i], 1, GL_FALSE, S.u[i].texMat.m);
+    if (UNIFORM_CHANGED(p, CV_TEX << i, p->cTexMat[i], S.u[i].texMat.m, 16)) {
+      glUniformMatrix4fv(p->uTexMat[i], 1, GL_FALSE, S.u[i].texMat.m); memcpy(p->cTexMat[i], S.u[i].texMat.m, 64); p->cValid |= CV_TEX << i;
+    }
     float env[4] = { S.u[i].envColor[0], S.u[i].envColor[1], S.u[i].envColor[2], S.u[i].rgbScale };
-    glUniform4fv(p->uEnvColor[i], 1, env);
+    if (UNIFORM_CHANGED(p, CV_ENV << i, p->cEnv[i], env, 4)) {
+      glUniform4fv(p->uEnvColor[i], 1, env); memcpy(p->cEnv[i], env, 16); p->cValid |= CV_ENV << i;
+    }
   }
 }
 
@@ -383,7 +455,10 @@ static void shim_glClipPlane(GLenum p, const GLdouble *eq) {
 }
 
 /* ---- texture units & env ---- */
-static void shim_glActiveTexture(GLenum t) { shim_init(); S.activeUnit = (int)(t - GL_TEXTURE0) & (MAXUNITS - 1); glActiveTexture(t); }
+static void shim_glActiveTexture(GLenum t) {
+  shim_init(); S.activeUnit = (int)(t - GL_TEXTURE0) & (MAXUNITS - 1);
+  if (_activeTexUnit != S.activeUnit) { glActiveTexture(t); _activeTexUnit = S.activeUnit; }
+}
 static void shim_glClientActiveTexture(GLenum t) { shim_init(); S.clientUnit = (int)(t - GL_TEXTURE0) & (MAXUNITS - 1); }
 static void shim_glTexEnvi(GLenum target, GLenum pname, GLint v) {
   shim_init();
@@ -412,7 +487,11 @@ static void shim_glGetTexEnviv(GLenum target, GLenum pname, GLint *out) {
 }
 
 /* ---- textures ---- */
-static void shim_glBindTexture(GLenum target, GLuint t) { shim_init(); S.boundTex[S.activeUnit] = t; glBindTexture(target, t); }
+static void shim_glBindTexture(GLenum target, GLuint t) {
+  shim_init();
+  if (S.boundTex[S.activeUnit] == t) return;
+  S.boundTex[S.activeUnit] = t; glBindTexture(target, t);
+}
 static void shim_glTexImage2D(GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border,
                               GLenum fmt, GLenum type, const void *data) {
   shim_init();
@@ -444,7 +523,10 @@ static void shim_glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pna
   }
 }
 static void shim_glDeleteTextures(GLsizei n, const GLuint *t) {
-  for (int i = 0; i < n; i++) { TexInfo *ti = tex_info(t[i], 0); if (ti) *ti = _texInfo[--_ctTexInfo]; }
+  for (int i = 0; i < n; i++) {
+    TexInfo *ti = tex_info(t[i], 0); if (ti) *ti = _texInfo[--_ctTexInfo];
+    for (int u = 0; u < MAXUNITS; u++) if (S.boundTex[u] == t[i]) S.boundTex[u] = 0; /* GL unbinds deleted textures */
+  }
   glDeleteTextures(n, t);
 }
 
@@ -511,32 +593,50 @@ static void shim_glTexCoordPointer(GLint size, GLenum type, GLsizei stride, cons
 static void shim_glLockArraysEXT(GLint first, GLsizei count) { shim_init(); S.lockedCount = first + count; }
 static void shim_glUnlockArraysEXT(void) { shim_init(); S.lockedCount = 0; }
 
-static void upload_array(GLuint vbo, GLuint loc, const ClientArray *a, int ctVerts, int normalized) {
-  int ts = a->type == GL_FLOAT ? 4 : a->type == GL_UNSIGNED_BYTE ? 1 : a->type == GL_SHORT ? 2 : 4;
-  int elem = a->size * ts;
-  int stride = a->stride ? a->stride : elem;
-  glBindBuffer(GL_ARRAY_BUFFER, vbo);
-  glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(ctVerts - 1) * stride + elem, a->ptr, GL_STREAM_DRAW);
-  glEnableVertexAttribArray(loc);
-  glVertexAttribPointer(loc, a->size, a->type, normalized ? GL_TRUE : GL_FALSE, stride, 0);
-}
+static int type_size(GLenum t) { return t == GL_FLOAT ? 4 : t == GL_UNSIGNED_BYTE ? 1 : t == GL_SHORT ? 2 : 4; }
 
-/* bind client arrays covering vertices [0, ctVerts) */
+/* Pack every enabled client array covering vertices [0, ctVerts) into the staging area,
+   upload once, and point the attributes into the ring. */
 static void bind_client_arrays(int ctVerts) {
-  glBindVertexArray(S.vao);
-  if (S.vtx.enabled) upload_array(S.vboVtx, 0, &S.vtx, ctVerts, 0);
-  else { glDisableVertexAttribArray(0); glVertexAttrib4f(0, 0, 0, 0, 1); }
-  if (S.col.enabled) upload_array(S.vboCol, 1, &S.col, ctVerts, S.col.type == GL_UNSIGNED_BYTE);
-  else { glDisableVertexAttribArray(1); glVertexAttrib4fv(1, S.curColor); }
-  for (int i = 0; i < MAXUNITS; i++) {
-    if (S.u[i].enabled && S.u[i].tc.enabled) upload_array(S.vboTc[i], 2 + i, &S.u[i].tc, ctVerts, 0);
-    else { glDisableVertexAttribArray(2 + i); glVertexAttrib4fv(2 + i, S.u[i].curTex); }
+  const ClientArray *arr[2 + MAXUNITS] = { 0 };
+  if (S.vtx.enabled) arr[0] = &S.vtx;
+  if (S.col.enabled) arr[1] = &S.col;
+  for (int i = 0; i < MAXUNITS; i++) if (S.u[i].enabled && S.u[i].tc.enabled) arr[2 + i] = &S.u[i].tc;
+
+  size_t off[2 + MAXUNITS], total = 0, len[2 + MAXUNITS];
+  int stride[2 + MAXUNITS];
+  for (int l = 0; l < 2 + MAXUNITS; l++) {
+    if (!arr[l]) continue;
+    int elem = arr[l]->size * type_size(arr[l]->type);
+    stride[l] = arr[l]->stride ? arr[l]->stride : elem;
+    len[l] = (size_t)(ctVerts - 1) * stride[l] + elem;
+    off[l] = total; total += (len[l] + 15) & ~(size_t)15;
+  }
+  GLintptr base = 0;
+  if (total) {
+    uint8_t *st = stage_reserve(total);
+    for (int l = 0; l < 2 + MAXUNITS; l++) if (arr[l]) memcpy(st + off[l], arr[l]->ptr, len[l]);
+    base = ring_upload(&_vring, st, (GLsizeiptr)total);
+  }
+  for (int l = 0; l < 2 + MAXUNITS; l++) {
+    if (arr[l]) {
+      attrib_enable(l, 1);
+      glVertexAttribPointer(l, arr[l]->size, arr[l]->type,
+                            (l == 1 && arr[l]->type == GL_UNSIGNED_BYTE) ? GL_TRUE : GL_FALSE,
+                            stride[l], (const void *)(uintptr_t)(base + off[l]));
+    } else if (l == 0) {
+      static const float zero[4] = { 0, 0, 0, 1 }; attrib_const(0, zero);
+    } else if (l == 1) {
+      attrib_const(1, S.curColor);
+    } else {
+      attrib_const(l, S.u[l - 2].curTex);
+    }
   }
 }
 
 /* index buffer that turns quads (0,1,2,3) into triangles (0,1,2, 0,2,3) */
 static void bind_quad_indices(int ctQuads) {
-  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, S.iboQuads);
+  bind_elem_buffer(S.iboQuads);
   if (ctQuads > S.quadsCap) {
     int cap = 1024; while (cap < ctQuads) cap *= 2;
     uint32_t *idx = malloc((size_t)cap * 6 * 4);
@@ -574,9 +674,8 @@ static void shim_glDrawElements(GLenum mode, GLsizei count, GLenum type, const v
   apply_program();
   bind_client_arrays(maxIdx + 1);
   int isz = type == GL_UNSIGNED_INT ? 4 : type == GL_UNSIGNED_SHORT ? 2 : 1;
-  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, S.ibo);
-  glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)count * isz, indices, GL_STREAM_DRAW);
-  glDrawElements(mode, count, type, 0);
+  GLintptr ioff = ring_upload(&_iring, indices, (GLsizeiptr)count * isz);
+  glDrawElements(mode, count, type, (const void *)(uintptr_t)ioff);
 }
 
 /* ---- immediate mode ---- */
@@ -587,19 +686,40 @@ static void shim_glEnd(void) {
   int n = S.immCount;
   if (n == 0) return;
   apply_program();
-  glBindVertexArray(S.vao);
-  glBindBuffer(GL_ARRAY_BUFFER, S.vboImm);
-  glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)n * IMM_FLOATS * 4, S.imm, GL_STREAM_DRAW);
   const int st = IMM_FLOATS * 4;
-  glEnableVertexAttribArray(0); glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, st, (void *)0);
-  glEnableVertexAttribArray(1); glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, st, (void *)16);
-  for (int i = 0; i < MAXUNITS; i++) { glEnableVertexAttribArray(2 + i); glVertexAttribPointer(2 + i, 4, GL_FLOAT, GL_FALSE, st, (void *)(uintptr_t)(32 + 16 * i)); }
+  GLintptr base = ring_upload(&_vring, S.imm, (GLsizeiptr)n * st);
+  for (int l = 0; l < 2 + MAXUNITS; l++) {
+    attrib_enable(l, 1);
+    glVertexAttribPointer(l, 4, GL_FLOAT, GL_FALSE, st, (const void *)(uintptr_t)(base + 16 * l));
+  }
   switch (S.beginMode) {
   case GL1_QUADS: bind_quad_indices(n / 4); glDrawElements(GL_TRIANGLES, n / 4 * 6, GL_UNSIGNED_INT, 0); break;
   case GL1_QUAD_STRIP: glDrawArrays(GL_TRIANGLE_STRIP, 0, n); break;
   case GL1_POLYGON: glDrawArrays(GL_TRIANGLE_FAN, 0, n); break;
   default: glDrawArrays(S.beginMode, 0, n); break;
   }
+}
+
+/* ---- read-back / sync ---- */
+/* The browser presents frames itself: an explicit GPU sync only stalls the main thread. */
+static void shim_glFinish(void) {}
+static void shim_glFlush(void) {}
+static void shim_glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum fmt, GLenum type, void *px) {
+  if (fmt == GL_DEPTH_COMPONENT) {
+    /* WebGL2 can't read the depth buffer. Used for lens-flare/corona visibility (DepthCheck.cpp):
+       report "far" so they stay visible. TODO: occlusion queries. */
+    if (type == GL_FLOAT) { float *f = px; for (int i = 0; i < w * h; i++) f[i] = 1.0f; }
+    return;
+  }
+  if (fmt == GL_RGB && type == GL_UNSIGNED_BYTE) {
+    /* WebGL2 only guarantees RGBA/UNSIGNED_BYTE: read that, repack to RGB (screenshots) */
+    uint8_t *tmp = malloc((size_t)w * h * 4), *o = px;
+    glReadPixels(x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
+    for (int i = 0; i < w * h; i++) { o[i * 3] = tmp[i * 4]; o[i * 3 + 1] = tmp[i * 4 + 1]; o[i * 3 + 2] = tmp[i * 4 + 2]; }
+    free(tmp);
+    return;
+  }
+  glReadPixels(x, y, w, h, fmt, type, px);
 }
 
 /* ---- misc GL1 calls ---- */
@@ -645,6 +765,7 @@ static const Entry _entries[] = {
   E(glNormalPointer), E(glTexCoordPointer), E(glLockArraysEXT), E(glUnlockArraysEXT),
   E(glDrawArrays), E(glDrawElements), E(glClearDepth), E(glDepthRange), E(glShadeModel),
   E(glDrawBuffer), E(glPolygonMode), E(glPointSize), E(glHint), E(glGetString), E(glGetIntegerv),
+  E(glFinish), E(glFlush), E(glReadPixels),
 #undef E
   { "glActiveTextureARB", (void *)shim_glActiveTexture },
   { "glActiveTexture", (void *)shim_glActiveTexture },

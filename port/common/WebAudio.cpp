@@ -50,7 +50,9 @@ EM_JS(void, se1_wa_init, (int rate, int channels, double targetSec), {
   A.ctx.audioWorklet.addModule(url).then(function() {
     A.node = new AudioWorkletNode(A.ctx, 'se1-player',
       { numberOfInputs: 0, outputChannelCount: [2], processorOptions: { ch: A.ch, rate: A.rate } });  /* current values: init may have run again */
-    A.node.connect(A.ctx.destination);
+    /* ?mute=1 (and the ?bench=1 benchmark): keep the whole audio path running, just silent */
+    var q = new URLSearchParams(location.search);
+    if (!q.has('mute') && !q.has('bench')) A.node.connect(A.ctx.destination);
   }).catch(function(e) { console.error('se1 audio: worklet failed', e); });
   /* autoplay policy: resume on the first user gesture */
   var resume = function() { if (A.ctx.state !== 'running') A.ctx.resume(); };
@@ -75,8 +77,9 @@ EM_JS(int, se1_wa_wanted, (void), {
 EM_JS(void, se1_wa_push, (const int16_t *pcm, int frames), {
   var A = Module.se1Audio;
   if (!A || !A.node || frames <= 0) return;
-  var n = frames * A.ch, f = new Float32Array(n), s = pcm >> 1;
-  for (var i = 0; i < n; i++) f[i] = HEAP16[s + i] / 32768;
+  var n = frames * A.ch, f = new Float32Array(n);
+  var src = HEAP16.subarray(pcm >> 1, (pcm >> 1) + n);   /* view, no copy */
+  for (var i = 0; i < n; i++) f[i] = src[i] * (1 / 32768);
   A.node.port.postMessage(f, [f.buffer]);
   A.framesSent += frames;
   A.totalPushed += frames;
