@@ -54,9 +54,11 @@ set(EH_FLAGS -fwasm-exceptions -sSUPPORT_LONGJMP=wasm)
 option(SE1_DEV "Developer build (assertions, no LTO)" ON)
 option(SE1_PROFILE "Keep function names (profiling)" OFF)
 option(SE1_SIMD "Enable wasm SIMD (-msimd128)" ON)
-# Engine in a worker (render plan phase 3): pthreads + PROXY_TO_PTHREAD, frames handed to the
-# page's main thread through shared memory. Needs COOP/COEP (tools/devserver.py --isolate).
-option(SE1_THREADS "Run the engine in a worker thread" OFF)
+# Engine in a worker (render plan phase 3, the default): pthreads + PROXY_TO_PTHREAD, frames handed
+# to the page's main thread through shared memory. Needs a cross-origin isolated page: COOP/COEP
+# headers (tools/devserver.py sends them), or coi-sw.js on static hosts (port/web/isolate.js).
+# -DSE1_THREADS=OFF: the single-threaded JSPI build, which runs anywhere.
+option(SE1_THREADS "Run the engine in a worker thread" ON)
 set(OPT_FLAGS "")
 if(SE1_SIMD)
   list(APPEND OPT_FLAGS -msimd128)
@@ -152,6 +154,7 @@ target_link_options(serioussam PRIVATE
   ${PORT_FLAGS} ${EH_FLAGS} ${OPT_FLAGS}
   $<$<BOOL:${SE1_DEV}>:-sASSERTIONS=1>
   $<$<OR:$<BOOL:${SE1_DEV}>,$<BOOL:${SE1_PROFILE}>>:--profiling-funcs>
+  "$<$<BOOL:${SE1_THREADS}>:SHELL:--pre-js ${ROOT}/port/web/isolate.js>"
   "SHELL:--pre-js ${ROOT}/port/web/pre.js" "SHELL:--pre-js ${ROOT}/port/web/audio.js" "SHELL:--pre-js ${ROOT}/port/web/gfx.js" "SHELL:--pre-js ${ROOT}/port/web/gfx-webgpu.js" "SHELL:--post-js ${ROOT}/port/web/bench.js"
   # (SHELL: keeps each flag with its argument; target_link_options would de-duplicate "--pre-js")
   -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=256MB -sSTACK_SIZE=4MB
@@ -168,6 +171,12 @@ if(DATA_DIR)
   target_link_options(serioussam PRIVATE "--preload-file" "${DATA_DIR}@/" "--exclude-file" "*.DS_Store")
 endif()
 set_target_properties(serioussam PROPERTIES SUFFIX ".html")
+if(SE1_THREADS)
+  # cross-origin isolation for hosts that can't send COOP/COEP (registered by port/web/isolate.js)
+  add_custom_command(TARGET serioussam POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ROOT}/port/web/coi-sw.js" "$<TARGET_FILE_DIR:serioussam>/coi-sw.js")
+  set_property(TARGET serioussam APPEND PROPERTY LINK_DEPENDS "${ROOT}/port/web/isolate.js")
+endif()
 # --pre-js/--post-js files are link inputs: relink when they change
 set_property(TARGET serioussam APPEND PROPERTY LINK_DEPENDS
   "${ROOT}/port/web/pre.js" "${ROOT}/port/web/audio.js" "${ROOT}/port/web/gfx.js" "${ROOT}/port/web/gfx-webgpu.js" "${ROOT}/port/web/bench.js")

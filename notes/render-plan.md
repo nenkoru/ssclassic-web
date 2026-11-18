@@ -267,3 +267,15 @@ phase must also pass the visual regression test from phase 0 before it lands.
   The single-threaded build still uses stable Rust.
 - Verified in normal play: config.toml's HUD time and clock show up in the threaded build.
   Captures are unchanged (shots.ini pins those cvars).
+
+### Threaded build is the default
+- `SE1_THREADS` defaults to ON. `-DSE1_THREADS=OFF` gives the single-threaded JSPI build, which
+  runs on any page.
+- `tools/devserver.py` sends COOP/COEP by default; `--no-isolate` turns them off (`--isolate` is
+  still accepted).
+- Static hosts that can't send headers: `port/web/isolate.js` (first --pre-js, threaded build only)
+  registers `coi-sw.js` (copied next to the page by CMake), which adds the headers. The page reloads
+  once. It's guarded against reload loops (sessionStorage) and shows a message when isolation is
+  impossible (no service workers, not a secure context).
+- Verified: a server with no COOP/COEP → one reload → `crossOriginIsolated`, the game runs; with
+  headers the script is a no-op (captures 8/8).
