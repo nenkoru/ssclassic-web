@@ -190,7 +190,7 @@ phase must also pass the visual regression test from phase 0 before it lands.
 - Next:
   - asynchronous double-buffered frame hand-off (worker records frame N+1 while main replays N);
   - ~~worker-local file access~~ (done, milestone 2);
-  - SAB audio ring;
+  - ~~SAB audio ring~~ (done, milestone 4);
   - Rust with build-std.
 
 ### Phase 3, milestone 2: WASMFS + frame/capture fixes
@@ -240,3 +240,19 @@ phase must also pass the visual regression test from phase 0 before it lands.
 - Perf (timedemo, WebGL2, median of 3): threaded 1856 fps, 0.54 ms mean, p99 1.0 ms, max 2.8 ms
   (was 1541 fps / max 11 ms); single-threaded 2453 fps.
   - Headless vsync runs at 30 fps for both builds (the headless rAF rate), with no late frames.
+
+### Phase 3, milestone 4: shared-memory audio ring (threaded build)
+- The engine worker writes interleaved int16 PCM into a ring in shared wasm memory (32768 frames)
+  and publishes a write index. The AudioWorklet reads the ring directly and publishes a read index
+  (Atomics). This replaces two synchronous main-thread round trips per mix (`wanted` + `push`).
+  - The backlog is write − read, exact, instead of being estimated from AudioContext.currentTime.
+  - Target backlog: 150 ms.
+  - Flushes and format changes bump a generation counter that the worklet watches.
+- `?mute=1` and the benchmark play through a zero-gain node, so the worklet keeps consuming.
+- Measured: the read index advances at exactly 44.1 kHz (220,672 frames in 5.004 s) and the backlog
+  holds at 138 ms.
+- Headless timedemo throughput is unchanged (no running AudioContext there). The win is in real
+  play: the worker never stalls on the main thread to mix.
+- A one-off 11–15 ms frame shows up in most timedemo runs with or without audio (first-use compile
+  or GC); not yet investigated.
+- The single-threaded build keeps its clock-based worklet path (no SharedArrayBuffer without COOP/COEP).

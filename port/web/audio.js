@@ -2,6 +2,7 @@
 // Lives in a pre-js module so both builds can reach it: the single-threaded build calls it from
 // EM_JS, the SE1_THREADS build from the engine worker via MAIN_THREAD_EM_ASM (an AudioContext
 // only exists on the page's main thread). PCM pointers are into (shared) wasm memory.
+// The SE1_THREADS build uses initRing instead of init/wanted/push: see below.
 Module['se1audio'] = {
   init: function (rate, channels, targetSec) {
     if (Module.se1Audio) {          // re-init (e.g. sound format changed): retune, keep context
@@ -79,5 +80,52 @@ Module['se1audio'] = {
     if (!A || !A.node) return;
     A.node.port.postMessage('flush');
     A.started = false;
+  },
+
+  // SE1_THREADS: the engine worker writes interleaved int16 PCM into a ring in shared wasm memory
+  // and the worklet reads it directly, so mixing needs no main-thread round trip
+  // (port/common/WebAudio.cpp). ctl (int32 x4): [0] write index, [1] read index (frames,
+  // wrapping), [2] flush generation, [3] channels. Called once per sound format, synchronously.
+  initRing: function (rate, channels, ring, capFrames, ctl) {
+    var A = Module.se1AudioRing;
+    if (A) {                         // format change: retune the running worklet, keep the context
+      if (A.node) A.node.port.postMessage({ rate: rate });
+      return;
+    }
+    A = Module.se1AudioRing = { ctx: null, node: null, ctl: ctl, ring: ring, cap: capFrames, rate: rate };   // ctl/ring: for debugging
+    try { A.ctx = new AudioContext({ sampleRate: rate, latencyHint: 'interactive' }); }
+    catch (e) { A.ctx = new AudioContext(); }
+    var src =
+      "class SE1RingPlayer extends AudioWorkletProcessor {" +
+      " constructor(o){ super(); var p=o.processorOptions;" +
+      "   this.pcm=new Int16Array(p.mem, p.ring, p.cap*2); this.ctl=new Int32Array(p.mem, p.ctl, 4);" +
+      "   this.cap=p.cap; this.step=p.rate/sampleRate; this.pos=0; this.gen=Atomics.load(this.ctl,2);" +
+      "   this.l=0; this.r=0;" +
+      "   this.port.onmessage=(e)=>{ if(e.data&&e.data.rate) this.step=e.data.rate/sampleRate; }; }" +
+      " process(_, outs){ var out=outs[0], L=out[0], R=out[1]||out[0], c=this.ctl;" +
+      "   var w=Atomics.load(c,0), rd=Atomics.load(c,1), g=Atomics.load(c,2), ch=Atomics.load(c,3)||2;" +
+      "   if(g!==this.gen){ this.gen=g; rd=w; }" +
+      "   var avail=(w-rd)|0, k=0;" +
+      "   for(var i=0;i<L.length;i++){" +
+      "     this.pos+=this.step;" +
+      "     while(this.pos>=1){ this.pos-=1;" +
+      "       if(avail>0){ var o=((rd%this.cap+this.cap)%this.cap)*2;" +
+      "         this.l=this.pcm[o]*(1/32768); this.r=ch>1?this.pcm[o+1]*(1/32768):this.l; rd=(rd+1)|0; avail--; }" +
+      "       else { this.l=0; this.r=0; } }" +
+      "     L[i]=this.l; R[i]=this.r; }" +
+      "   Atomics.store(c,1,rd); return true; } }" +
+      "registerProcessor('se1-ring-player', SE1RingPlayer);";
+    var url = URL.createObjectURL(new Blob([src], { type: 'application/javascript' }));
+    A.ctx.audioWorklet.addModule(url).then(function () {
+      A.node = new AudioWorkletNode(A.ctx, 'se1-ring-player', { numberOfInputs: 0, outputChannelCount: [2],
+        processorOptions: { mem: HEAP8.buffer, ring: ring, cap: capFrames, ctl: ctl, rate: rate } });
+      // ?mute=1 / ?bench=1: silent through a zero gain, so the worklet still consumes the ring
+      // (a node with no path to the destination may not be processed, and the engine would stop mixing)
+      var q = new URLSearchParams(location.search), out = A.ctx.destination;
+      if (q.has('mute') || q.has('bench')) { var g = A.ctx.createGain(); g.gain.value = 0; g.connect(out); out = g; }
+      A.node.connect(out);
+    }).catch(function (e) { console.error('se1 audio: ring worklet failed', e); });
+    var resume = function () { if (A.ctx.state !== 'running') A.ctx.resume(); };
+    ['pointerdown', 'keydown', 'touchstart'].forEach(function (ev) { window.addEventListener(ev, resume, true); });
   }
 };
