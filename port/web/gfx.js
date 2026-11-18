@@ -10,6 +10,7 @@
 // handles (index into the tables below; 0 = none). OPCODES MUST MATCH the OP_* enum in gl1shim.c.
 Module['se1gfx'] = (function () {
   var gl = null, vao, vbuf, ibuf, qbuf, qcap = 0;
+  var sb = [0, 0, 0, 0, 0, 0];   // this batch's vertex stream bases in vbuf (OP_VSTREAMS)
   // render scale (dynamic resolution): the engine keeps its logical size (SDL's canvas size, HUD
   // layout, input coordinates); we draw into a smaller backing store and scale viewport/scissor.
   // The canvas keeps its CSS size, so the browser stretches the result to fill it.
@@ -166,7 +167,7 @@ Module['se1gfx'] = (function () {
         case 27: gl.enableVertexAttribArray(I[c + 1]); c += 2; break;
         case 28: gl.disableVertexAttribArray(I[c + 1]); c += 2; break;
         case 29: gl.vertexAttrib4f(I[c + 1], F[c + 2], F[c + 3], F[c + 4], F[c + 5]); c += 6; break;
-        case 30: gl.vertexAttribPointer(I[c + 1], I[c + 2], I[c + 3], !!I[c + 4], I[c + 5], I[c + 6]); c += 7; break;
+        case 30: gl.vertexAttribPointer(I[c + 1], I[c + 2], I[c + 3], !!I[c + 4], I[c + 5], sb[I[c + 1]] + I[c + 6]); c += 7; break;
         case 31: gl.drawElements(I[c + 1], I[c + 2], I[c + 3], I[c + 4]); c += 5; break; // mode count type off
         case 32:                                                                        // DRAW_QUADS count off
           gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, qbuf);
@@ -179,6 +180,18 @@ Module['se1gfx'] = (function () {
                         I[c + 10] >= 0 ? dp + I[c + 10] : 0, I[c + 11]);
           c += 12; break;
         case 35: gl.pixelStorei(I[c + 1], I[c + 2]); c += 3; break;                    // PIXELSTORE
+        case 36: {                                                                      // VSTREAMS (ptr len) x6
+          var tot = 0, k;
+          for (k = 0; k < 6; k++) { sb[k] = tot; tot += (I[c + 2 + 2 * k] + 15) & ~15; }
+          if (tot) {
+            gl.bufferData(gl.ARRAY_BUFFER, tot, gl.STREAM_DRAW);
+            for (k = 0; k < 6; k++) {
+              var sp = I[c + 1 + 2 * k] >>> 0, sn = I[c + 2 + 2 * k];
+              if (sn) gl.bufferSubData(gl.ARRAY_BUFFER, sb[k], HEAPU8.subarray(sp, sp + sn));
+            }
+          }
+          c += 13; break;
+        }
         default:
           console.error('gl1shim replay: bad opcode ' + I[c] + ' at word ' + (c - (cp >> 2)));
           return;

@@ -85,6 +85,7 @@
       return true;
     };
     var vbuf = new GrowBuf(GPUBufferUsage.VERTEX, 4 << 20);
+    var sb = [0, 0, 0, 0, 0, 0];   // this batch's vertex stream bases in vbuf (OP_VSTREAMS)
     var ibuf = new GrowBuf(GPUBufferUsage.INDEX, 1 << 20);
     var qbuf = null, qcap = 0;
 
@@ -572,7 +573,7 @@
             if (at.size !== I[c + 2] || at.type !== I[c + 3] || at.norm !== I[c + 4] || at.stride !== I[c + 5]) {
               at.size = I[c + 2]; at.type = I[c + 3]; at.norm = I[c + 4]; at.stride = I[c + 5]; pipeDirty = true;
             }
-            at.off = I[c + 6];
+            at.off = sb[I[c + 1]] + I[c + 6];
             c += 7; break;
           }
           case 31: {                                                           // DRAW_ELEMENTS mode count type off
@@ -608,6 +609,16 @@
             texDirty = true;
             c += 12; break;
           case 35: c += 3; break;                                              // PIXELSTORE: n/a
+          case 36: {                                                           // VSTREAMS (ptr len) x6
+            var tot = 0, k;
+            for (k = 0; k < 6; k++) { sb[k] = tot; tot += (I[c + 2 + 2 * k] + 15) & ~15; }
+            if (tot && vbuf.ensure(tot)) vbOff = [-1, -1, -1, -1, -1, -1];   // new buffer: rebind
+            for (k = 0; k < 6; k++) {
+              var sp = I[c + 1 + 2 * k] >>> 0, sn = I[c + 2 + 2 * k];
+              if (sn) dev.queue.writeBuffer(vbuf.buf, sb[k], HEAPU8, sp, (sn + 3) & ~3);
+            }
+            c += 13; break;
+          }
           default:
             console.error('se1gfx webgpu replay: bad opcode ' + I[c]);
             c = end;

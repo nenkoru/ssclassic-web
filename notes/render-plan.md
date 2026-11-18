@@ -312,3 +312,23 @@ phase must also pass the visual regression test from phase 0 before it lands.
   - Touches both replayers.
 - Worker hot spots (engine visibility code): ScanOneLine 16%, AddActiveSector 10%, Render 7.5%,
   ClipToOnePlane 5%, MakeSpan 5%. ScanOneLine scales with the engine's resolution height.
+
+### Index rebasing: fixed per-attribute vertex streams
+- gl1shim keeps one vertex stream per attribute (position, color, 4 texcoord units) instead of one
+  arena with every draw's arrays packed back to back.
+  - Each draw's vertices go to a shared vertex cursor `v0`. Indices are copied with `v0` added
+    (always as 32-bit); `glDrawArrays` uses `first + v0`. `v0` stays a multiple of 4 so quads line
+    up with the quad index buffer.
+  - The shim caches each attribute's pointer (format, stride, base) per batch and records
+    `vertexAttribPointer` only when the format changes.
+  - If a new pointer would leave a hole over 256 KB in a stream, the cursor restarts at 0.
+- Every batch starts with `OP_VSTREAMS` (ptr, length per stream). WebGL2 uploads with one
+  bufferData plus one bufferSubData per stream; WebGPU with one writeBuffer per stream. Both add the
+  stream base to ATTRIB_PTR offsets.
+- Immediate mode (glBegin/glEnd: HUD text...) uses the same streams, compacted to vec4 per
+  attribute. Its per-call synchronous quad-capacity call got the grow-only fix too.
+- Results:
+  - WebGL calls per frame 1636 → 972 (−41%; vertexAttribPointer no longer in the top list);
+  - timedemo: single-threaded 2522 → 2700 fps; threaded ~2870 (worker-bound, unchanged);
+  - potato ×8: replay 1.09 → 0.51 ms per frame, worker 4.4 → 0.94 ms (with the quad and qsort fixes).
+  - Captures bit-identical (both builds; WebGPU matches WebGL2).

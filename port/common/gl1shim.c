@@ -163,11 +163,14 @@ enum {
   OP_USEPROG = 22, OP_UNIFORM1I = 23, OP_UNIFORM1F = 24, OP_UNIFORM4F = 25, OP_UNIFORMMAT4 = 26,
   OP_ATTRIB_ON = 27, OP_ATTRIB_OFF = 28, OP_ATTRIB_CONST = 29, OP_ATTRIB_PTR = 30,
   OP_DRAW_ELEMENTS = 31, OP_DRAW_QUADS = 32, OP_DRAW_ARRAYS = 33,
-  OP_TEXIMAGE = 34, OP_PIXELSTORE = 35
+  OP_TEXIMAGE = 34, OP_PIXELSTORE = 35, OP_VSTREAMS = 36
 };
 typedef union { int32_t i; float f; } Word;
 static Word *_cmd; static size_t _ncmd, _capcmd;
+static int _batchOpen;
+static void batch_open(void);
 static Word *cmd(int op, int nargs) {
+  if (!_batchOpen) { _batchOpen = 1; batch_open(); }   /* every batch starts with OP_VSTREAMS */
   if (_ncmd + 1 + nargs > _capcmd) {
     _capcmd = _capcmd ? _capcmd : 1 << 16;
     while (_ncmd + 1 + nargs > _capcmd) _capcmd *= 2;
@@ -189,7 +192,14 @@ static void cmd_loc_fv(int op, int loc, const float *v, int n) {
 }
 
 typedef struct { uint8_t *p; size_t n, cap; } Arena;
-static Arena _va, _ia;   /* vertex / index data of the current flush */
+/* Vertex data: one stream per attribute (position, color, 4 texcoord units). Every draw puts its
+   vertices at a shared vertex cursor (_v0) and adds it to its indices / first vertex, so an
+   attribute's pointer stays valid from draw to draw while its format is unchanged: the shim
+   records vertexAttribPointer only when it must ("index rebasing"). The streams are listed in the
+   batch's first command (OP_VSTREAMS); the replayer uploads them one after another and adds each
+   stream's base to the attribute offsets. */
+#define NSTREAMS (2 + MAXUNITS)
+static Arena _vs[NSTREAMS], _ia;   /* vertex streams / index data of the current batch */
 static Arena _da;        /* texture upload data of the current flush (OP_TEXIMAGE) */
 static size_t arena_alloc(Arena *a, size_t n, size_t align) {
   size_t off = (a->n + align - 1) & ~(align - 1);
@@ -200,6 +210,39 @@ static size_t arena_alloc(Arena *a, size_t n, size_t align) {
   }
   a->n = off + n;
   return off;
+}
+/* make room for n bytes at offset off (>= the arena's end) and move the end there */
+static uint8_t *arena_at(Arena *a, size_t off, size_t n) {
+  if (off + n > a->cap) {
+    a->cap = a->cap ? a->cap : 1 << 20;
+    while (off + n > a->cap) a->cap *= 2;
+    a->p = realloc(a->p, a->cap);
+  }
+  a->n = off + n;
+  return a->p + off;
+}
+typedef struct { int valid, size, type, norm, stride; size_t base; } PtrCache;
+static PtrCache _ap[NSTREAMS];   /* attribute pointers recorded in this batch */
+static uint32_t _v0;             /* vertex cursor of this batch */
+static size_t _vstreamsAt;       /* word index of this batch's OP_VSTREAMS */
+static void batch_open(void) {
+  _vstreamsAt = _ncmd;
+  Word *w = cmd(OP_VSTREAMS, 2 * NSTREAMS);
+  for (int l = 0; l < 2 * NSTREAMS; l++) w[l].i = 0;
+  _v0 = 0;
+  memset(_ap, 0, sizeof(_ap));
+}
+/* before a batch is handed over: list the streams in its OP_VSTREAMS (ptr, length) */
+static void batch_close(void) {
+  if (!_batchOpen) return;
+  Word *w = _cmd + _vstreamsAt + 1;
+  for (int l = 0; l < NSTREAMS; l++) { w[2 * l].i = (int32_t)(uintptr_t)_vs[l].p; w[2 * l + 1].i = (int32_t)_vs[l].n; }
+}
+static int batch_has_work(void) { return _batchOpen && (_ncmd > _vstreamsAt + 1 + 2 * NSTREAMS || _ia.n); }
+static void batch_reset(void) {
+  _ncmd = 0; _ia.n = 0; _da.n = 0;
+  for (int l = 0; l < NSTREAMS; l++) _vs[l].n = 0;
+  _batchOpen = 0;
 }
 
 #ifdef SE1_THREADS
@@ -242,8 +285,8 @@ EM_JS(void, gfx_pixel_store, (int p, int v), { Module['se1gfx'].pixelStore(p, v)
 /* hand everything recorded so far to the replayer (exported: also called before every swap) */
 void SE1_GL1Shim_Flush(void);
 void SE1_GL1Shim_Flush(void) {
-  if (_ncmd || _va.n || _ia.n) gfx_replay(_cmd, (int)_ncmd, _va.p, (int)_va.n, _ia.p, (int)_ia.n, _da.p, (int)_da.n);
-  _ncmd = 0; _va.n = 0; _ia.n = 0; _da.n = 0;
+  if (batch_has_work()) { batch_close(); gfx_replay(_cmd, (int)_ncmd, 0, 0, _ia.p, (int)_ia.n, _da.p, (int)_da.n); }
+  batch_reset();
 }
 #else
 /* SE1_THREADS: asynchronous, double-buffered hand-off. A flush gives the current command buffer
@@ -253,18 +296,20 @@ void SE1_GL1Shim_Flush(void) {
    only waits when it laps the replayer. Synchronous calls (createProgram, readPixels...) use the
    same FIFO proxy queue, so they still run after every batch handed over before them. */
 #include <emscripten/atomic.h>
-typedef struct { Word *cmd; size_t capcmd; Arena va, ia, da; int32_t busy; } Batch;
+typedef struct { Word *cmd; size_t capcmd; Arena vs[NSTREAMS], ia, da; int32_t busy; } Batch;
 static Batch _batch[2];
 static int _curBatch;
 static void batch_switch(void) {
   Batch *b = &_batch[_curBatch];          /* save the current buffers into their slot */
-  b->cmd = _cmd; b->capcmd = _capcmd; b->va = _va; b->ia = _ia; b->da = _da;
+  b->cmd = _cmd; b->capcmd = _capcmd; b->ia = _ia; b->da = _da;
+  memcpy(b->vs, _vs, sizeof(_vs));
   _curBatch ^= 1;
   b = &_batch[_curBatch];                 /* wait until the replayer is done with the other one */
   while (emscripten_atomic_load_u32((void *)&b->busy))
     emscripten_futex_wait((void *)&b->busy, 1, 1000.0);
-  _cmd = b->cmd; _capcmd = b->capcmd; _va = b->va; _ia = b->ia; _da = b->da;
-  _ncmd = 0; _va.n = 0; _ia.n = 0; _da.n = 0;
+  _cmd = b->cmd; _capcmd = b->capcmd; _ia = b->ia; _da = b->da;
+  memcpy(_vs, b->vs, sizeof(_vs));
+  batch_reset();
 }
 float SE1_DemoTime(void);   /* port/common/WebFrame.cpp */
 static void hand_off(int present) {
@@ -272,13 +317,14 @@ static void hand_off(int present) {
   /* the frame's own demo time goes along: by the time the page replays this frame, the engine
      is already simulating the next one (the ?shots= capture picks frames by demo time) */
   double tDemo = present ? SE1_DemoTime() : -1.0;
+  batch_close();
   emscripten_atomic_store_u32((void *)&b->busy, 1);
   MAIN_THREAD_ASYNC_EM_ASM({ Module['se1ReplayBatch']($0, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10); },
-                           &b->busy, present, _cmd, (int)_ncmd, _va.p, (int)_va.n, _ia.p, (int)_ia.n, _da.p, (int)_da.n, tDemo);
+                           &b->busy, present, _cmd, (int)_ncmd, 0, 0, _ia.p, (int)_ia.n, _da.p, (int)_da.n, tDemo);
   batch_switch();
 }
 void SE1_GL1Shim_Flush(void);
-void SE1_GL1Shim_Flush(void) { if (_ncmd || _va.n || _ia.n) hand_off(0); }
+void SE1_GL1Shim_Flush(void) { if (batch_has_work()) hand_off(0); }
 /* end of frame: replay the rest of the frame, run the ?shots= capture and end the frame as ONE
    main-thread task (between two tasks the browser may present, and clear, the canvas) */
 void SE1_GL1Shim_FlushFrame(void);
@@ -724,54 +770,95 @@ static int type_size(GLenum t) { return t == GL_FLOAT ? 4 : t == GL_UNSIGNED_BYT
 
 /* Copy every enabled client array covering vertices [0, ctVerts) into the vertex arena and
    point the attributes at it. */
-static void bind_client_arrays(int ctVerts) {
-  const ClientArray *arr[2 + MAXUNITS] = { 0 };
-  if (S.vtx.enabled) arr[0] = &S.vtx;
-  if (S.col.enabled) arr[1] = &S.col;
-  for (int i = 0; i < MAXUNITS; i++) if (S.u[i].enabled && S.u[i].tc.enabled) arr[2 + i] = &S.u[i].tc;
+/* the replayer's quad index buffer only grows (doubling from 1024 quads): mirror its capacity
+   here, so the (synchronous, in the threaded build) call happens only when it must grow */
+static void ensure_quad_capacity(int ctQuads) {
+  static int quadCap;
+  if (ctQuads <= quadCap) return;
+  int cap = 1024; while (cap < ctQuads) cap *= 2;
+  gfx_quad_capacity(cap);
+  quadCap = cap;
+}
 
-  size_t off[2 + MAXUNITS], total = 0, len[2 + MAXUNITS];
-  int stride[2 + MAXUNITS];
-  for (int l = 0; l < 2 + MAXUNITS; l++) {
-    if (!arr[l]) continue;
-    int elem = arr[l]->size * type_size(arr[l]->type);
-    stride[l] = arr[l]->stride ? arr[l]->stride : elem;
-    len[l] = (size_t)(ctVerts - 1) * stride[l] + elem;
-    off[l] = total; total += (len[l] + 15) & ~(size_t)15;
+typedef struct { const uint8_t *ptr; int size; GLenum type; int norm; int stride; } VSrc;   /* stride: source */
+/* copy ctVerts vertices of every enabled attribute into its stream at the vertex cursor, record
+   attribute pointers only where needed; returns the base vertex to add to this draw's indices */
+static uint32_t put_vertices(const VSrc *src, int ctVerts) {
+  int elem[NSTREAMS], dst[NSTREAMS];
+  for (int l = 0; l < NSTREAMS; l++) {
+    if (!src[l].ptr) continue;
+    elem[l] = src[l].size * type_size(src[l].type);
+    int st = src[l].stride ? src[l].stride : elem[l];
+    dst[l] = st > 2 * elem[l] ? elem[l] : st;       /* widely interleaved (immediate mode): compact */
+    if (dst[l] & 3) dst[l] = (elem[l] + 3) & ~3;    /* keep offsets 4-aligned (WebGPU) */
   }
-  size_t base = total ? arena_alloc(&_va, total, 16) : 0;
-  for (int l = 0; l < 2 + MAXUNITS; l++) {
-    if (arr[l]) {
-      memcpy(_va.p + base + off[l], arr[l]->ptr, len[l]);
-      attrib_pointer(l, arr[l]->size, arr[l]->type, l == 1 && arr[l]->type == GL_UNSIGNED_BYTE, stride[l], base + off[l]);
-    } else if (l == 0) {
-      static const float zero[4] = { 0, 0, 0, 1 }; attrib_const(0, zero);
-    } else if (l == 1) {
-      attrib_const(1, S.curColor);
+  for (int pass = 0; pass < 2; pass++) {             /* pass 1: after restarting the vertex cursor */
+    int restart = 0;
+    for (int l = 0; l < NSTREAMS && !restart; l++) {
+      if (!src[l].ptr) continue;
+      PtrCache *c = &_ap[l];
+      int same = c->valid && c->size == src[l].size && c->type == (int)src[l].type && c->norm == src[l].norm && c->stride == dst[l];
+      if (same) continue;
+      size_t at = (size_t)_v0 * (size_t)dst[l], end = (_vs[l].n + 15) & ~(size_t)15;
+      if (at < end) continue;                        /* new pointer just below the stream's end: no gap */
+      if (at - end > (256u << 10)) restart = 1;      /* would leave a big hole: restart the cursor */
+    }
+    if (_v0 > (1u << 20)) restart = 1;
+    if (!restart || pass) break;
+    _v0 = 0;
+    for (int l = 0; l < NSTREAMS; l++) _ap[l].valid = 0;
+  }
+  uint32_t v0 = _v0;
+  for (int l = 0; l < NSTREAMS; l++) {
+    if (!src[l].ptr) {
+      if (l == 0) { static const float zero[4] = { 0, 0, 0, 1 }; attrib_const(0, zero); }
+      else if (l == 1) attrib_const(1, S.curColor);
+      else attrib_const(l, S.u[l - 2].curTex);
+      continue;
+    }
+    PtrCache *c = &_ap[l];
+    int st = dst[l];
+    if (!(c->valid && c->size == src[l].size && c->type == (int)src[l].type && c->norm == src[l].norm && c->stride == st)) {
+      size_t at = (size_t)v0 * (size_t)st, end = (_vs[l].n + 15) & ~(size_t)15;
+      c->base = end > at ? ((end - at + 15) & ~(size_t)15) : 0;    /* base + v0 * stride >= end */
+      c->valid = 1; c->size = src[l].size; c->type = (int)src[l].type; c->norm = src[l].norm; c->stride = st;
+      attrib_pointer(l, src[l].size, src[l].type, src[l].norm, st, c->base);
     } else {
-      attrib_const(l, S.u[l - 2].curTex);
+      attrib_enable(l, 1);
+    }
+    size_t off = c->base + (size_t)v0 * (size_t)st;
+    int sst = src[l].stride ? src[l].stride : elem[l];
+    if (sst == st) {                                 /* same layout: one block copy */
+      size_t len = (size_t)(ctVerts - 1) * st + elem[l];
+      memcpy(arena_at(&_vs[l], off, len), src[l].ptr, len);
+    } else {                                         /* gather into the compact layout */
+      uint8_t *d = arena_at(&_vs[l], off, (size_t)ctVerts * st);
+      for (int k = 0; k < ctVerts; k++) memcpy(d + (size_t)k * st, src[l].ptr + (size_t)k * sst, elem[l]);
     }
   }
+  _v0 = (v0 + (uint32_t)ctVerts + 3) & ~3u;        /* quads need a base vertex that's a multiple of 4 */
+  return v0;
+}
+
+static uint32_t bind_client_arrays(int ctVerts) {
+  VSrc src[NSTREAMS] = { { 0 } };
+  if (S.vtx.enabled) src[0] = (VSrc){ S.vtx.ptr, S.vtx.size, S.vtx.type, 0, S.vtx.stride };
+  if (S.col.enabled) src[1] = (VSrc){ S.col.ptr, S.col.size, S.col.type, S.col.type == GL_UNSIGNED_BYTE, S.col.stride };
+  for (int i = 0; i < MAXUNITS; i++)
+    if (S.u[i].enabled && S.u[i].tc.enabled) src[2 + i] = (VSrc){ S.u[i].tc.ptr, S.u[i].tc.size, S.u[i].tc.type, 0, S.u[i].tc.stride };
+  return put_vertices(src, ctVerts);
 }
 
 static void shim_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
   shim_init();
   if (count <= 0) return;
   apply_program();
-  bind_client_arrays(first + count);
+  uint32_t v0 = bind_client_arrays(first + count);
   if (mode == GL1_QUADS) {
-    /* the replayer's quad index buffer only grows (doubling from 1024 quads): mirror its capacity
-       here, so the (synchronous, in the threaded build) call happens only when it must grow */
-    static int quadCap;
-    int ctQuads = (first + count) / 4;
-    if (ctQuads > quadCap) {
-      int cap = 1024; while (cap < ctQuads) cap *= 2;
-      gfx_quad_capacity(cap);
-      quadCap = cap;
-    }
-    cmd_ii(OP_DRAW_QUADS, count / 4 * 6, first / 4 * 6 * 4);
+    ensure_quad_capacity((int)((v0 + first + count) / 4));
+    cmd_ii(OP_DRAW_QUADS, count / 4 * 6, (int)((v0 + first) / 4 * 6 * 4));
   } else {
-    cmd_iii(OP_DRAW_ARRAYS, (int)(mode == GL1_POLYGON ? GL_TRIANGLE_FAN : mode), first, count);
+    cmd_iii(OP_DRAW_ARRAYS, (int)(mode == GL1_POLYGON ? GL_TRIANGLE_FAN : mode), (int)(first + v0), count);
   }
 }
 
@@ -784,11 +871,14 @@ static void shim_glDrawElements(GLenum mode, GLsizei count, GLenum type, const v
   else if (type == GL_UNSIGNED_SHORT) { const uint16_t *ix = indices; for (int i = 0; i < count; i++) if (ix[i] > maxIdx) maxIdx = ix[i]; }
   else { const uint8_t *ix = indices; for (int i = 0; i < count; i++) if (ix[i] > maxIdx) maxIdx = ix[i]; }
   apply_program();
-  bind_client_arrays(maxIdx + 1);
-  int isz = type == GL_UNSIGNED_INT ? 4 : type == GL_UNSIGNED_SHORT ? 2 : 1;
-  size_t ioff = arena_alloc(&_ia, (size_t)count * isz, 4);
-  memcpy(_ia.p + ioff, indices, (size_t)count * isz);
-  cmd_iiii(OP_DRAW_ELEMENTS, (int)mode, count, (int)type, (int)ioff);
+  uint32_t v0 = bind_client_arrays(maxIdx + 1);
+  /* indices are rebased onto the vertex cursor, always as 32-bit */
+  size_t ioff = arena_alloc(&_ia, (size_t)count * 4, 4);
+  uint32_t *o = (uint32_t *)(_ia.p + ioff);
+  if (type == GL_UNSIGNED_INT) { const uint32_t *ix = indices; for (int i = 0; i < count; i++) o[i] = ix[i] + v0; }
+  else if (type == GL_UNSIGNED_SHORT) { const uint16_t *ix = indices; for (int i = 0; i < count; i++) o[i] = ix[i] + v0; }
+  else { const uint8_t *ix = indices; for (int i = 0; i < count; i++) o[i] = ix[i] + v0; }
+  cmd_iiii(OP_DRAW_ELEMENTS, (int)mode, count, GL_UNSIGNED_INT, (int)ioff);
 }
 
 /* ---- immediate mode ---- */
@@ -799,15 +889,14 @@ static void shim_glEnd(void) {
   int n = S.immCount;
   if (n == 0) return;
   apply_program();
-  const int st = IMM_FLOATS * 4;
-  size_t base = arena_alloc(&_va, (size_t)n * st, 16);
-  memcpy(_va.p + base, S.imm, (size_t)n * st);
-  for (int l = 0; l < 2 + MAXUNITS; l++) attrib_pointer(l, 4, GL_FLOAT, 0, st, base + 16 * l);
+  VSrc src[NSTREAMS];
+  for (int l = 0; l < NSTREAMS; l++) src[l] = (VSrc){ (const uint8_t *)(S.imm + 4 * l), 4, GL_FLOAT, 0, IMM_FLOATS * 4 };
+  uint32_t v0 = put_vertices(src, n);
   switch (S.beginMode) {
-  case GL1_QUADS: gfx_quad_capacity(n / 4); cmd_ii(OP_DRAW_QUADS, n / 4 * 6, 0); break;
-  case GL1_QUAD_STRIP: cmd_iii(OP_DRAW_ARRAYS, GL_TRIANGLE_STRIP, 0, n); break;
-  case GL1_POLYGON: cmd_iii(OP_DRAW_ARRAYS, GL_TRIANGLE_FAN, 0, n); break;
-  default: cmd_iii(OP_DRAW_ARRAYS, (int)S.beginMode, 0, n); break;
+  case GL1_QUADS: ensure_quad_capacity((int)((v0 + n) / 4)); cmd_ii(OP_DRAW_QUADS, n / 4 * 6, (int)(v0 / 4 * 6 * 4)); break;
+  case GL1_QUAD_STRIP: cmd_iii(OP_DRAW_ARRAYS, GL_TRIANGLE_STRIP, (int)v0, n); break;
+  case GL1_POLYGON: cmd_iii(OP_DRAW_ARRAYS, GL_TRIANGLE_FAN, (int)v0, n); break;
+  default: cmd_iii(OP_DRAW_ARRAYS, (int)S.beginMode, (int)v0, n); break;
   }
 }
 
