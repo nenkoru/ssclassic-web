@@ -75,3 +75,9 @@ Measure only headless: the shared pane gets hidden/throttled, and headless follo
     scale option, WebGPU.
   - Caveat: SwiftShader on a fast CPU overstates per-draw cost vs a real weak iGPU, so treat it as a
     pessimistic bound.
+- Draw merging ruled out (?glstats=1, Auto-Demo0001): 205 draws/frame, only 9 mergeable (4%) — bindTexture
+  runs ~once per draw (world polygons are drawn per texture group). ~2000 WebGL calls/frame, ~10 per draw
+  (vertexAttribPointer 689, bufferData 389, bindTexture 205, activeTexture 173, ...).
+  Real options for per-draw cost: render in a worker via OffscreenCanvas (command-buffer stalls stop
+  blocking the game loop), WebGPU backend (render bundles for static world), texture arrays/atlases (risky).
+  Cheap: render-scale option (640x480 halves potato p95/p99).

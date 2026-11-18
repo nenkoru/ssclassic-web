@@ -20,6 +20,30 @@
       if (new URLSearchParams(location.search).get('profile') && typeof Profiler !== 'undefined') {
         B.profiler = new Profiler({ sampleInterval: 1, maxBufferSize: 1000000 });
       }
+      // ?glstats=1: count WebGL draws and how many could merge with the previous draw
+      // (only vertex/index upload calls in between, no state change)
+      if (new URLSearchParams(location.search).get('glstats') && GL.currentContext) {
+        var gl = GL.currentContext.GLctx;
+        var G = B.gl = { draws: 0, mergeable: 0, calls: 0, byName: {}, cleanSinceDraw: false, drawsWhileLastWasDraw: 0 };
+        var neutral = { bufferData: 1, bufferSubData: 1, bindBuffer: 1, vertexAttribPointer: 1,
+                        enableVertexAttribArray: 1, disableVertexAttribArray: 1 };
+        for (var k in gl) {
+          if (typeof gl[k] !== 'function') continue;
+          (function (name, fn) {
+            gl[name] = function () {
+              G.calls++; G.byName[name] = (G.byName[name] || 0) + 1;
+              if (name === 'drawElements' || name === 'drawArrays') {
+                G.draws++;
+                if (G.cleanSinceDraw) G.mergeable++;
+                G.cleanSinceDraw = true;
+              } else if (!neutral[name]) {
+                G.cleanSinceDraw = false;
+              }
+              return fn.apply(gl, arguments);
+            };
+          })(k, gl[k]);
+        }
+      }
     }
     else if (B.state === 'running' && log.slice(B.logAt).indexOf('stopping game') >= 0) {
       var P = Module.se1Perf, n = Math.min(P.n, 65536);
@@ -30,6 +54,13 @@
         p50: +q(0.5).toFixed(2), p95: +q(0.95).toFixed(2), p99: +q(0.99).toFixed(2), max: +a[a.length - 1].toFixed(1),
         over16_7: a.filter(function (x) { return x > 16.7; }).length, hiddenMs: Math.round(B.hiddenMs + (document.hidden ? now - lastVis : 0)) };
       clearInterval(t);
+      if (B.gl) {
+        var G = B.gl, fr = Math.max(1, P.n);
+        var top = Object.keys(G.byName).sort(function (a, b) { return G.byName[b] - G.byName[a]; }).slice(0, 15)
+          .map(function (n) { return n + ' ' + (G.byName[n] / fr).toFixed(1); });
+        B.stats.gl = { drawsPerFrame: +(G.draws / fr).toFixed(1), mergeablePerFrame: +(G.mergeable / fr).toFixed(1),
+                       callsPerFrame: +(G.calls / fr).toFixed(1), topCallsPerFrame: top };
+      }
       if (B.profiler) {
         B.state = 'profiling';
         B.profiler.stop().then(function (tr) {
