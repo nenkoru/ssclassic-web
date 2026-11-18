@@ -19,6 +19,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <Engine/Graphics/GfxLibrary.h>
 #ifdef __EMSCRIPTEN__
 extern "C" void SE1_YieldToBrowser(void);
+extern "C" void SE1_BeforeSwap(void);
 #endif
 
 #include <Engine/Base/Translation.h>
@@ -2038,6 +2039,9 @@ void CGfxLibrary::SwapBuffers(CViewPort *pvp)
     CTempDC tdc(pvp->vp_hWnd);
     pwglSwapBuffers(tdc.hdc);
 #else
+    #ifdef __EMSCRIPTEN__
+    SE1_BeforeSwap(); // port/common/WebFrame.cpp: frame capture for visual regression tests
+    #endif
     SDL_GL_SwapWindow((SDL_Window *) pvp->vp_hWnd);
     #ifdef __EMSCRIPTEN__
     SE1_YieldToBrowser(); // port/common/WebFrame.cpp: let the browser present this frame

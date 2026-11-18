@@ -8,6 +8,13 @@
   if (q.get('args')) args = args.concat(q.get('args').split(' ').filter(Boolean));
   if (args.length) Module['arguments'] = args;
   if (q.get('uncapped') === '1') Module['se1Uncapped'] = true;   // timedemo: no vsync wait (port/common/WebFrame.cpp)
+  // ?shots=<label>: deterministic demo replay, capture frames at fixed demo times and POST them
+  // to the dev server (tools/devserver.py saves them under data/shots/<label>/). Starts at 3 s:
+  // lens flares fade on wall-clock time, so the first second varies run to run.
+  if (q.get('shots')) {
+    Module['arguments'] = (Module['arguments'] || []).concat(['+script', 'SE1Mod/shots.ini']);
+    Module['se1Shots'] = { label: q.get('shots'), times: [3, 5, 7, 9, 11, 13, 15, 17], i: 0, pending: 0, done: false };
+  }
 })();
 
 // Windows file-name semantics: Croteam's code, scripts and every community mod assume

@@ -4,6 +4,7 @@
 // No npm dependencies: DevTools protocol over Node's built-in WebSocket.
 //
 //   node tools/bench.mjs http://127.0.0.1:8092/serioussam.html [runs=3] [--software-gl] [--vsync]
+//   node tools/bench.mjs http://127.0.0.1:8092/serioussam.html --shots <label>   (visual regression frames)
 //
 // --software-gl uses SwiftShader instead of the GPU: a rough "potato GPU" stand-in.
 import { spawn } from 'node:child_process';
@@ -15,7 +16,11 @@ const CHROME = process.env.CHROME || '/Applications/Google Chrome.app/Contents/M
 const args = process.argv.slice(2);
 const softwareGL = args.includes('--software-gl');
 const capped = args.includes('--vsync');   // default: uncapped timedemo (fps = throughput)
-const pos = args.filter((a) => !a.startsWith('--'));
+// --shots <label>: instead of benchmarking, capture the visual-regression frames
+// (port/data/SE1Mod/shots.ini, saved by tools/devserver.py under data/shots/<label>/)
+const shotsIdx = args.indexOf('--shots');
+const shotsLabel = shotsIdx >= 0 ? args[shotsIdx + 1] : null;
+const pos = args.filter((a, i) => !a.startsWith('--') && !(shotsIdx >= 0 && i === shotsIdx + 1));
 const base = pos[0];
 const runs = Number(pos[1] || 3);
 if (!base) { console.error('usage: bench.mjs <url> [runs] [--software-gl]'); process.exit(2); }
@@ -50,9 +55,17 @@ async function runOnce(i) {
     const send = (method, params = {}) => new Promise((r) => { const n = ++id; pending.set(n, r); ws.send(JSON.stringify({ id: n, method, params })); });
     const evaluate = async (expr) => (await send('Runtime.evaluate', { expression: expr, returnByValue: true })).result?.result?.value;
 
-    const url = base + (base.includes('?') ? '&' : '?') + `bench=1&uncapped=${capped ? 0 : 1}&run=${Date.now()}`;
+    const url = base + (base.includes('?') ? '&' : '?') +
+      (shotsLabel ? `shots=${encodeURIComponent(shotsLabel)}&mute=1&uncapped=1` : `bench=1&uncapped=${capped ? 0 : 1}`) + `&run=${Date.now()}`;
     await send('Page.navigate', { url });
     const t0 = Date.now();
+    if (shotsLabel) {
+      while (Date.now() - t0 < 120000) {
+        await sleep(500);
+        if (await evaluate('window.__shotsDone === true')) return { shots: shotsLabel };
+      }
+      throw new Error('timed out waiting for shots');
+    }
     while (Date.now() - t0 < 120000) {
       await sleep(1000);
       const s = await evaluate("window.__bench && window.__bench.state === 'done' && JSON.stringify(window.__bench.stats)");
@@ -64,6 +77,10 @@ async function runOnce(i) {
   }
 }
 
+if (shotsLabel) {
+  console.log(JSON.stringify(await runOnce(0)));
+  process.exit(0);
+}
 const results = [];
 for (let i = 0; i < runs; i++) {
   const r = await runOnce(i);
