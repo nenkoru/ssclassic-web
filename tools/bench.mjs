@@ -7,9 +7,13 @@
 //   node tools/bench.mjs http://127.0.0.1:8092/serioussam.html --shots <label>   (visual regression frames)
 //
 // --software-gl uses SwiftShader instead of the GPU: a rough "potato GPU" stand-in.
+// --android runs on Chrome on an Android phone over adb (USB, or Wi-Fi after `adb tcpip 5555` +
+// `adb connect <ip>`): DevTools is forwarded with `adb forward`, and the page's port is mapped back
+// to this Mac with `adb reverse`, so the phone loads http://127.0.0.1:<port> (a secure context).
+// Set ADB_SERIAL to pick a device when several are attached.
 // --cpu-throttle <N> slows the page's CPU N times (DevTools CPU throttling, applies to workers
 // too): with --software-gl --vsync, a rough "potato device" (e.g. --cpu-throttle 4).
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,6 +21,9 @@ import { join } from 'node:path';
 const CHROME = process.env.CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const args = process.argv.slice(2);
 const softwareGL = args.includes('--software-gl');
+const android = args.includes('--android');
+const ADB = process.env.ADB || 'adb';
+const adb = (...a) => execFileSync(ADB, [...(process.env.ADB_SERIAL ? ['-s', process.env.ADB_SERIAL] : []), ...a], { encoding: 'utf8' }).trim();
 const capped = args.includes('--vsync');   // default: uncapped timedemo (fps = throughput)
 // --shots <label>: instead of benchmarking, capture the visual-regression frames
 // (port/data/SE1Mod/shots.ini, saved by tools/devserver.py under data/shots/<label>/)
@@ -31,7 +38,33 @@ if (!base) { console.error('usage: bench.mjs <url> [runs] [--software-gl]'); pro
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Android: one DevTools forward for the whole session, the page port mapped back to this Mac
+const ANDROID_PORT = 9222;
+let androidInfo = null;
+if (android) {
+  adb('forward', `tcp:${ANDROID_PORT}`, 'localabstract:chrome_devtools_remote');
+  const pagePort = new URL(base).port || '80';
+  adb('reverse', `tcp:${pagePort}`, `tcp:${pagePort}`);
+  let ver = {};
+  try { ver = await (await fetch(`http://127.0.0.1:${ANDROID_PORT}/json/version`)).json(); } catch {
+    console.error('Chrome DevTools not reachable on the phone: is Chrome open, and USB debugging allowed?'); process.exit(1);
+  }
+  androidInfo = { device: adb('shell', 'getprop', 'ro.product.model'), android: adb('shell', 'getprop', 'ro.build.version.release'), chrome: ver.Browser };
+  console.log('android: ' + JSON.stringify(androidInfo));
+}
+
+// open a fresh tab on the phone's Chrome; returns its WebSocket and a cleanup function
+async function openAndroidTab() {
+  const t = await (await fetch(`http://127.0.0.1:${ANDROID_PORT}/json/new?about:blank`, { method: 'PUT' })).json();
+  const ws = new WebSocket(t.webSocketDebuggerUrl);
+  return { ws, close: () => fetch(`http://127.0.0.1:${ANDROID_PORT}/json/close/${t.id}`).catch(() => {}) };
+}
+
 async function runOnce(i) {
+  if (android) {
+    const tab = await openAndroidTab();
+    try { return await drive(tab.ws); } finally { await tab.close(); }
+  }
   const port = 9300 + i;
   const profile = mkdtempSync(join(tmpdir(), 'se1bench-'));
   const flags = [
@@ -53,6 +86,14 @@ async function runOnce(i) {
       } catch { await sleep(200); }
     }
     if (!ws) throw new Error('chrome did not start');
+    return await drive(ws);
+  } finally {
+    chrome.kill();
+  }
+}
+
+async function drive(ws) {
+  try {
     await new Promise((r, j) => { ws.onopen = r; ws.onerror = j; });
     let id = 0; const pending = new Map();
     ws.onmessage = (m) => { const d = JSON.parse(m.data); if (d.id && pending.has(d.id)) { pending.get(d.id)(d); pending.delete(d.id); } };
@@ -78,7 +119,7 @@ async function runOnce(i) {
     }
     throw new Error('timed out waiting for benchmark (state: ' + (await evaluate('window.__bench && window.__bench.state')) + ')');
   } finally {
-    chrome.kill();
+    ws.close();
   }
 }
 
