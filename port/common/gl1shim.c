@@ -132,9 +132,6 @@ static struct {
   /* immediate mode */
   int inBegin; GLenum beginMode;
   float *imm; int immCount, immCap;
-  /* GL objects */
-  GLuint vao, iboQuads;
-  int quadsCap;
   /* GLES caps we track for glIsEnabled */
   int capBlend, capCull, capDepth, capScissor, capDither, capPolyOffset;
   /* texture info for glGetTexLevelParameteriv */
@@ -151,49 +148,104 @@ static TexInfo *tex_info(GLuint t, int create) {
 }
 
 
-/* ---- WebGL state caches: every WebGL call crosses wasm->JS, so skip the ones that change
-   nothing. The engine never touches buffers/VAOs/programs itself, so the shim owns them. ---- */
-static GLuint _curProgram, _boundArrayBuf, _boundElemBuf;
+/* ---- command stream (render plan phase 1, notes/render-plan.md) ----
+   The shim records WebGL work instead of calling WebGL: state changes and draws go into a command
+   buffer, vertex/index data into two per-flush arenas. SE1_GL1Shim_Flush() (before every swap, and
+   before any call that needs WebGL right away: texture uploads, read-backs, queries) hands it all
+   to port/web/gfx.js, which uploads each arena once and replays the commands on raw WebGL2.
+   JS owns every WebGL object; C refers to them by integer handles.
+   OPCODES MUST MATCH port/web/gfx.js. */
+enum {
+  OP_ENABLE = 1, OP_DISABLE = 2, OP_BLENDFUNC = 3, OP_DEPTHFUNC = 4, OP_DEPTHMASK = 5, OP_COLORMASK = 6,
+  OP_CULLFACE = 7, OP_FRONTFACE = 8, OP_POLYOFFSET = 9, OP_VIEWPORT = 10, OP_SCISSOR = 11,
+  OP_CLEARCOLOR = 12, OP_CLEARDEPTH = 13, OP_CLEARSTENCIL = 14, OP_CLEAR = 15, OP_DEPTHRANGE = 16,
+  OP_ACTIVETEX = 17, OP_BINDTEX = 18, OP_TEXPARAMI = 19, OP_TEXPARAMF = 20, OP_DELTEX = 21,
+  OP_USEPROG = 22, OP_UNIFORM1I = 23, OP_UNIFORM1F = 24, OP_UNIFORM4F = 25, OP_UNIFORMMAT4 = 26,
+  OP_ATTRIB_ON = 27, OP_ATTRIB_OFF = 28, OP_ATTRIB_CONST = 29, OP_ATTRIB_PTR = 30,
+  OP_DRAW_ELEMENTS = 31, OP_DRAW_QUADS = 32, OP_DRAW_ARRAYS = 33
+};
+typedef union { int32_t i; float f; } Word;
+static Word *_cmd; static size_t _ncmd, _capcmd;
+static Word *cmd(int op, int nargs) {
+  if (_ncmd + 1 + nargs > _capcmd) {
+    _capcmd = _capcmd ? _capcmd : 1 << 16;
+    while (_ncmd + 1 + nargs > _capcmd) _capcmd *= 2;
+    _cmd = realloc(_cmd, _capcmd * sizeof(Word));
+  }
+  Word *w = _cmd + _ncmd; w[0].i = op; _ncmd += 1 + nargs;
+  return w + 1;
+}
+static void cmd_i(int op, int a) { cmd(op, 1)[0].i = a; }
+static void cmd_ii(int op, int a, int b) { Word *w = cmd(op, 2); w[0].i = a; w[1].i = b; }
+static void cmd_iii(int op, int a, int b, int c) { Word *w = cmd(op, 3); w[0].i = a; w[1].i = b; w[2].i = c; }
+static void cmd_iiii(int op, int a, int b, int c, int d) { Word *w = cmd(op, 4); w[0].i = a; w[1].i = b; w[2].i = c; w[3].i = d; }
+static void cmd_ff(int op, float a, float b) { Word *w = cmd(op, 2); w[0].f = a; w[1].f = b; }
+static void cmd_ffff(int op, float a, float b, float c, float d) { Word *w = cmd(op, 4); w[0].f = a; w[1].f = b; w[2].f = c; w[3].f = d; }
+/* op loc v[0..n-1] */
+static void cmd_loc_fv(int op, int loc, const float *v, int n) {
+  Word *w = cmd(op, 1 + n); w[0].i = loc;
+  for (int i = 0; i < n; i++) w[1 + i].f = v[i];
+}
+
+typedef struct { uint8_t *p; size_t n, cap; } Arena;
+static Arena _va, _ia;   /* vertex / index data of the current flush */
+static size_t arena_alloc(Arena *a, size_t n, size_t align) {
+  size_t off = (a->n + align - 1) & ~(align - 1);
+  if (off + n > a->cap) {
+    a->cap = a->cap ? a->cap : 1 << 20;
+    while (off + n > a->cap) a->cap *= 2;
+    a->p = realloc(a->p, a->cap);
+  }
+  a->n = off + n;
+  return off;
+}
+
+EM_JS(void, gfx_replay, (const void *c, int n, const void *v, int nv, const void *ix, int ni),
+      { Module['se1gfx'].replay(c, n, v, nv, ix, ni); });
+EM_JS(int, gfx_create_program, (const char *vs, const char *fs),
+      { return Module['se1gfx'].createProgram(UTF8ToString(vs), UTF8ToString(fs)); });
+EM_JS(int, gfx_uniform_location, (int prog, const char *name),
+      { return Module['se1gfx'].uniformLocation(prog, UTF8ToString(name)); });
+EM_JS(int, gfx_gen_texture, (void), { return Module['se1gfx'].genTexture(); });
+EM_JS(void, gfx_quad_capacity, (int ctQuads), { Module['se1gfx'].quadCapacity(ctQuads); });
+EM_JS(void, gfx_tex_image, (int sub, int target, int level, int x, int y, int w, int h, int fmt, int type, const void *data, int len),
+      { Module['se1gfx'].texImage(sub, target, level, x, y, w, h, fmt, type, data, len); });
+EM_JS(void, gfx_read_pixels, (int x, int y, int w, int h, int fmt, int type, void *out, int len),
+      { Module['se1gfx'].readPixels(x, y, w, h, fmt, type, out, len); });
+EM_JS(int, gfx_get_param, (int pname, void *out, int isFloat), { return Module['se1gfx'].getParam(pname, out, isFloat); });
+EM_JS(void, gfx_pixel_store, (int p, int v), { Module['se1gfx'].pixelStore(p, v); });
+
+/* hand everything recorded so far to the replayer (exported: also called before every swap) */
+void SE1_GL1Shim_Flush(void) {
+  if (_ncmd || _va.n || _ia.n) gfx_replay(_cmd, (int)_ncmd, _va.p, (int)_va.n, _ia.p, (int)_ia.n);
+  _ncmd = 0; _va.n = 0; _ia.n = 0;
+}
+
+/* ---- state caches: skip recording commands that change nothing (WebGL state persists
+   across flushes; the engine never touches programs/buffers/attributes itself) ---- */
+static int _curProgram = -1;
 static uint32_t _attribEnabled, _attribConstValid;
 static float _attribConst[2 + MAXUNITS][4];
 static int _activeTexUnit = 0;
 
-static void bind_array_buffer(GLuint b) { if (_boundArrayBuf != b) { glBindBuffer(GL_ARRAY_BUFFER, b); _boundArrayBuf = b; } }
-static void bind_elem_buffer(GLuint b) { if (_boundElemBuf != b) { glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, b); _boundElemBuf = b; } }
-static void use_program(GLuint p) { if (_curProgram != p) { glUseProgram(p); _curProgram = p; } }
+static void use_program(int p) { if (_curProgram != p) { cmd_i(OP_USEPROG, p); _curProgram = p; } }
 static void attrib_enable(int loc, int on) {
   uint32_t bit = 1u << loc;
-  if (on) { if (!(_attribEnabled & bit)) { glEnableVertexAttribArray(loc); _attribEnabled |= bit; } }
-  else if (_attribEnabled & bit) { glDisableVertexAttribArray(loc); _attribEnabled &= ~bit; }
+  if (on) { if (!(_attribEnabled & bit)) { cmd_i(OP_ATTRIB_ON, loc); _attribEnabled |= bit; } }
+  else if (_attribEnabled & bit) { cmd_i(OP_ATTRIB_OFF, loc); _attribEnabled &= ~bit; }
 }
 static void attrib_const(int loc, const float v[4]) {
   attrib_enable(loc, 0);
   uint32_t bit = 1u << loc;
   if (!(_attribConstValid & bit) || memcmp(_attribConst[loc], v, 16) != 0) {
-    glVertexAttrib4fv(loc, v); memcpy(_attribConst[loc], v, 16); _attribConstValid |= bit;
+    cmd_loc_fv(OP_ATTRIB_CONST, loc, v, 4); memcpy(_attribConst[loc], v, 16); _attribConstValid |= bit;
   }
 }
-
-/* ---- streaming uploads: one bufferData per draw (all arrays packed together).
-   Not a bufferSubData ring: ANGLE tracks GPU use per whole buffer, so writing a region of a
-   buffer that earlier draws still read makes it stall or copy ("ghost") the entire buffer --
-   measured 9 fps / 500 ms frames. bufferData with data always gets fresh storage (fast path).
-   Vertex and index data need separate buffers in WebGL. ---- */
-typedef struct { GLenum target; GLuint buf; } Ring;
-static Ring _vring = { GL_ARRAY_BUFFER, 0 }, _iring = { GL_ELEMENT_ARRAY_BUFFER, 0 };
-static void ring_bind(Ring *r) { if (r->target == GL_ARRAY_BUFFER) bind_array_buffer(r->buf); else bind_elem_buffer(r->buf); }
-static void ring_init(void) { glGenBuffers(1, &_vring.buf); glGenBuffers(1, &_iring.buf); }
-/* upload n bytes into fresh storage of the stream buffer (left bound); returns their offset */
-static GLintptr ring_upload(Ring *r, const void *data, GLsizeiptr n) {
-  ring_bind(r);
-  glBufferData(r->target, n, data, GL_STREAM_DRAW);
-  return 0;
-}
-/* CPU staging area: all arrays of one draw are packed here, then uploaded at once */
-static uint8_t *_stage; static size_t _stageCap;
-static uint8_t *stage_reserve(size_t n) {
-  if (n > _stageCap) { _stageCap = _stageCap ? _stageCap : 1 << 20; while (_stageCap < n) _stageCap *= 2; _stage = realloc(_stage, _stageCap); }
-  return _stage;
+/* offsets are into this flush's vertex arena (uploaded at replay start) */
+static void attrib_pointer(int l, int size, GLenum type, int norm, int stride, size_t off) {
+  attrib_enable(l, 1);
+  Word *w = cmd(OP_ATTRIB_PTR, 6);
+  w[0].i = l; w[1].i = size; w[2].i = (int)type; w[3].i = norm; w[4].i = stride; w[5].i = (int)off;
 }
 
 static void shim_init(void) {
@@ -209,15 +261,12 @@ static void shim_init(void) {
   S.alphaFunc = GL_ALWAYS;
   S.curColor[0] = S.curColor[1] = S.curColor[2] = S.curColor[3] = 1.0f;
   S.capDither = 1;
-  glGenVertexArrays(1, &S.vao);
-  glBindVertexArray(S.vao);   /* the only VAO, bound for good */
-  glGenBuffers(1, &S.iboQuads);
-  ring_init();
+  /* VAO and stream buffers live in port/web/gfx.js */
 }
 
 /* ---- shader cache ---- */
 typedef struct {
-  uint32_t key; GLuint prog;
+  uint32_t key; int prog;
   GLint uMVP, uMV, uTexMat[MAXUNITS], uSampler[MAXUNITS], uEnvColor[MAXUNITS], uAlphaRef, uClip;
   /* last values sent, so unchanged uniforms are skipped */
   float cMVP[16], cMV[16], cClip[4], cAlphaRef, cTexMat[MAXUNITS][16], cEnv[MAXUNITS][4];
@@ -249,15 +298,6 @@ static uint32_t state_key(void) {
   k |= af << 16;
   k |= (uint32_t)(S.clipPlane ? 1 : 0) << 20;
   return k;
-}
-
-static GLuint compile(GLenum type, const char *src) {
-  GLuint s = glCreateShader(type);
-  glShaderSource(s, 1, &src, NULL);
-  glCompileShader(s);
-  GLint ok = 0; glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
-  if (!ok) { char log[2048]; glGetShaderInfoLog(s, sizeof log, NULL, log); fprintf(stderr, "gl1shim: shader error: %s\n%s\n", log, src); }
-  return s;
 }
 
 static Prog *get_prog(uint32_t key) {
@@ -310,30 +350,24 @@ static Prog *get_prog(uint32_t key) {
   n += snprintf(fs + n, sizeof fs - n, " oColor = c; }\n");
 
   double tmStart = emscripten_get_now();
-  GLuint p = glCreateProgram();
-  GLuint v = compile(GL_VERTEX_SHADER, vs), f = compile(GL_FRAGMENT_SHADER, fs);
-  glAttachShader(p, v); glAttachShader(p, f);
-  glLinkProgram(p);
-  glDeleteShader(v); glDeleteShader(f);
-  GLint ok = 0; glGetProgramiv(p, GL_LINK_STATUS, &ok);
-  if (!ok) { char log[2048]; glGetProgramInfoLog(p, sizeof log, NULL, log); fprintf(stderr, "gl1shim: link error: %s\n", log); }
+  int p = gfx_create_program(vs, fs);   /* compile/link errors are logged by gfx.js */
 
   fprintf(stderr, "gl1shim: compiled program %d (key %06x) in %.1f ms\n", _ctProgs, key, emscripten_get_now() - tmStart);
   Prog *pr = &_progs[_ctProgs++];
   pr->key = key; pr->prog = p;
-  pr->uMVP = glGetUniformLocation(p, "uMVP");
-  pr->uMV = glGetUniformLocation(p, "uMV");
-  pr->uClip = glGetUniformLocation(p, "uClip");
-  pr->uAlphaRef = glGetUniformLocation(p, "uAlphaRef");
+  pr->uMVP = gfx_uniform_location(p, "uMVP");
+  pr->uMV = gfx_uniform_location(p, "uMV");
+  pr->uClip = gfx_uniform_location(p, "uClip");
+  pr->uAlphaRef = gfx_uniform_location(p, "uAlphaRef");
   char name[32];
   for (int i = 0; i < MAXUNITS; i++) {
-    snprintf(name, sizeof name, "uTexMat[%d]", i); pr->uTexMat[i] = glGetUniformLocation(p, name);
-    snprintf(name, sizeof name, "uS%d", i); pr->uSampler[i] = glGetUniformLocation(p, name);
-    snprintf(name, sizeof name, "uEnv%d", i); pr->uEnvColor[i] = glGetUniformLocation(p, name);
+    snprintf(name, sizeof name, "uTexMat[%d]", i); pr->uTexMat[i] = gfx_uniform_location(p, name);
+    snprintf(name, sizeof name, "uS%d", i); pr->uSampler[i] = gfx_uniform_location(p, name);
+    snprintf(name, sizeof name, "uEnv%d", i); pr->uEnvColor[i] = gfx_uniform_location(p, name);
   }
   pr->cValid = 0;
   use_program(p);
-  for (int i = 0; i < MAXUNITS; i++) if (pr->uSampler[i] >= 0) glUniform1i(pr->uSampler[i], i);
+  for (int i = 0; i < MAXUNITS; i++) if (pr->uSampler[i] >= 0) cmd_ii(OP_UNIFORM1I, pr->uSampler[i], i);
   return pr;
 }
 
@@ -349,27 +383,27 @@ static void apply_program(void) {
   use_program(p->prog);
   Mat4 mvp; mat_mul(&mvp, &S.projection, &S.modelview);
   if (UNIFORM_CHANGED(p, CV_MVP, p->cMVP, mvp.m, 16)) {
-    glUniformMatrix4fv(p->uMVP, 1, GL_FALSE, mvp.m); memcpy(p->cMVP, mvp.m, 64); p->cValid |= CV_MVP;
+    if (p->uMVP >= 0) cmd_loc_fv(OP_UNIFORMMAT4, p->uMVP, mvp.m, 16); memcpy(p->cMVP, mvp.m, 64); p->cValid |= CV_MVP;
   }
   if (S.clipPlane) {
     if (UNIFORM_CHANGED(p, CV_MV, p->cMV, S.modelview.m, 16)) {
-      glUniformMatrix4fv(p->uMV, 1, GL_FALSE, S.modelview.m); memcpy(p->cMV, S.modelview.m, 64); p->cValid |= CV_MV;
+      if (p->uMV >= 0) cmd_loc_fv(OP_UNIFORMMAT4, p->uMV, S.modelview.m, 16); memcpy(p->cMV, S.modelview.m, 64); p->cValid |= CV_MV;
     }
     if (UNIFORM_CHANGED(p, CV_CLIP, p->cClip, S.clipEye, 4)) {
-      glUniform4fv(p->uClip, 1, S.clipEye); memcpy(p->cClip, S.clipEye, 16); p->cValid |= CV_CLIP;
+      if (p->uClip >= 0) cmd_loc_fv(OP_UNIFORM4F, p->uClip, S.clipEye, 4); memcpy(p->cClip, S.clipEye, 16); p->cValid |= CV_CLIP;
     }
   }
   if (S.alphaTest && UNIFORM_CHANGED(p, CV_ALPHA, &p->cAlphaRef, &S.alphaRef, 1)) {
-    glUniform1f(p->uAlphaRef, S.alphaRef); p->cAlphaRef = S.alphaRef; p->cValid |= CV_ALPHA;
+    if (p->uAlphaRef >= 0) cmd_loc_fv(OP_UNIFORM1F, p->uAlphaRef, &S.alphaRef, 1); p->cAlphaRef = S.alphaRef; p->cValid |= CV_ALPHA;
   }
   for (int i = 0; i < MAXUNITS; i++) {
     if (!S.u[i].enabled) continue;
     if (UNIFORM_CHANGED(p, CV_TEX << i, p->cTexMat[i], S.u[i].texMat.m, 16)) {
-      glUniformMatrix4fv(p->uTexMat[i], 1, GL_FALSE, S.u[i].texMat.m); memcpy(p->cTexMat[i], S.u[i].texMat.m, 64); p->cValid |= CV_TEX << i;
+      if (p->uTexMat[i] >= 0) cmd_loc_fv(OP_UNIFORMMAT4, p->uTexMat[i], S.u[i].texMat.m, 16); memcpy(p->cTexMat[i], S.u[i].texMat.m, 64); p->cValid |= CV_TEX << i;
     }
     float env[4] = { S.u[i].envColor[0], S.u[i].envColor[1], S.u[i].envColor[2], S.u[i].rgbScale };
     if (UNIFORM_CHANGED(p, CV_ENV << i, p->cEnv[i], env, 4)) {
-      glUniform4fv(p->uEnvColor[i], 1, env); memcpy(p->cEnv[i], env, 16); p->cValid |= CV_ENV << i;
+      if (p->uEnvColor[i] >= 0) cmd_loc_fv(OP_UNIFORM4F, p->uEnvColor[i], env, 4); memcpy(p->cEnv[i], env, 16); p->cValid |= CV_ENV << i;
     }
   }
 }
@@ -426,7 +460,7 @@ static void set_cap(GLenum c, int on) {
   case GL_DITHER: S.capDither = on; break;
   case GL_POLYGON_OFFSET_FILL: S.capPolyOffset = on; break;
   }
-  if (is_gles_cap(c)) { if (on) glEnable(c); else glDisable(c); }
+  if (is_gles_cap(c)) cmd_i(on ? OP_ENABLE : OP_DISABLE, (int)c);
   /* everything else (POLYGON_OFFSET_POINT/LINE, PN_TRIANGLES, MULTISAMPLE_3DFX, ...) is ignored */
 }
 static void shim_glEnable(GLenum c) { set_cap(c, 1); }
@@ -442,7 +476,16 @@ static GLboolean shim_glIsEnabled(GLenum c) {
   case GL1_NORMAL_ARRAY: return S.nor.enabled;
   case GL1_TEXTURE_COORD_ARRAY: return S.u[S.clientUnit].tc.enabled;
   }
-  return is_gles_cap(c) ? glIsEnabled(c) : GL_FALSE;
+  /* answered from shadow state: WebGL lags the recorded stream */
+  switch (c) {
+  case GL_BLEND: return S.capBlend;
+  case GL_CULL_FACE: return S.capCull;
+  case GL_DEPTH_TEST: return S.capDepth;
+  case GL_SCISSOR_TEST: return S.capScissor;
+  case GL_DITHER: return S.capDither;
+  case GL_POLYGON_OFFSET_FILL: return S.capPolyOffset;
+  }
+  return GL_FALSE;
 }
 static void shim_glAlphaFunc(GLenum f, GLclampf ref) { shim_init(); S.alphaFunc = f; S.alphaRef = ref; }
 static void shim_glClipPlane(GLenum p, const GLdouble *eq) {
@@ -457,7 +500,7 @@ static void shim_glClipPlane(GLenum p, const GLdouble *eq) {
 /* ---- texture units & env ---- */
 static void shim_glActiveTexture(GLenum t) {
   shim_init(); S.activeUnit = (int)(t - GL_TEXTURE0) & (MAXUNITS - 1);
-  if (_activeTexUnit != S.activeUnit) { glActiveTexture(t); _activeTexUnit = S.activeUnit; }
+  if (_activeTexUnit != S.activeUnit) { cmd_i(OP_ACTIVETEX, (int)t); _activeTexUnit = S.activeUnit; }
 }
 static void shim_glClientActiveTexture(GLenum t) { shim_init(); S.clientUnit = (int)(t - GL_TEXTURE0) & (MAXUNITS - 1); }
 static void shim_glTexEnvi(GLenum target, GLenum pname, GLint v) {
@@ -490,7 +533,7 @@ static void shim_glGetTexEnviv(GLenum target, GLenum pname, GLint *out) {
 static void shim_glBindTexture(GLenum target, GLuint t) {
   shim_init();
   if (S.boundTex[S.activeUnit] == t) return;
-  S.boundTex[S.activeUnit] = t; glBindTexture(target, t);
+  S.boundTex[S.activeUnit] = t; cmd_ii(OP_BINDTEX, (int)target, (int)t);
 }
 static void shim_glTexImage2D(GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border,
                               GLenum fmt, GLenum type, const void *data) {
@@ -498,15 +541,23 @@ static void shim_glTexImage2D(GLenum target, GLint level, GLint ifmt, GLsizei w,
   if (level == 0) { TexInfo *ti = tex_info(S.boundTex[S.activeUnit], 1); ti->ifmt = ifmt; ti->w = w; ti->h = h; }
   /* the engine always supplies RGBA8 pixels; GL1 internal formats (RGB5_A1, LUMINANCE8, ...) → RGBA8 */
   (void)border;
-  glTexImage2D(target, level, GL_RGBA8, w, h, 0, fmt == GL_RGBA ? GL_RGBA : fmt, type, data);
+  SE1_GL1Shim_Flush();   /* uploads run now; binding/order must match what was recorded */
+  gfx_tex_image(0, (int)target, level, 0, 0, w, h, (int)fmt, (int)type, data, data ? w * h * 4 : 0);
 }
+static void shim_glTexSubImage2D(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h,
+                                 GLenum fmt, GLenum type, const void *data) {
+  shim_init();
+  SE1_GL1Shim_Flush();
+  gfx_tex_image(1, (int)target, level, x, y, w, h, (int)fmt, (int)type, data, data ? w * h * 4 : 0);
+}
+static void shim_glGenTextures(GLsizei n, GLuint *t) { shim_init(); for (int i = 0; i < n; i++) t[i] = (GLuint)gfx_gen_texture(); }
 static void shim_glTexParameteri(GLenum target, GLenum pname, GLint v) {
   if ((pname == GL_TEXTURE_WRAP_S || pname == GL_TEXTURE_WRAP_T) && v == GL1_CLAMP) v = GL_CLAMP_TO_EDGE;
-  glTexParameteri(target, pname, v);
+  cmd_iii(OP_TEXPARAMI, (int)target, (int)pname, v);
 }
 static void shim_glTexParameterf(GLenum target, GLenum pname, GLfloat v) {
   if (pname == GL_TEXTURE_WRAP_S || pname == GL_TEXTURE_WRAP_T) { shim_glTexParameteri(target, pname, (GLint)v); return; }
-  glTexParameterf(target, pname, v);
+  Word *w = cmd(OP_TEXPARAMF, 3); w[0].i = (int)target; w[1].i = (int)pname; w[2].f = v;
 }
 static void shim_glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname, GLint *out) {
   shim_init(); (void)target;
@@ -526,8 +577,8 @@ static void shim_glDeleteTextures(GLsizei n, const GLuint *t) {
   for (int i = 0; i < n; i++) {
     TexInfo *ti = tex_info(t[i], 0); if (ti) *ti = _texInfo[--_ctTexInfo];
     for (int u = 0; u < MAXUNITS; u++) if (S.boundTex[u] == t[i]) S.boundTex[u] = 0; /* GL unbinds deleted textures */
+    if (t[i]) cmd_i(OP_DELTEX, (int)t[i]);
   }
-  glDeleteTextures(n, t);
 }
 
 /* ---- current vertex attributes ---- */
@@ -595,8 +646,8 @@ static void shim_glUnlockArraysEXT(void) { shim_init(); S.lockedCount = 0; }
 
 static int type_size(GLenum t) { return t == GL_FLOAT ? 4 : t == GL_UNSIGNED_BYTE ? 1 : t == GL_SHORT ? 2 : 4; }
 
-/* Pack every enabled client array covering vertices [0, ctVerts) into the staging area,
-   upload once, and point the attributes into the ring. */
+/* Copy every enabled client array covering vertices [0, ctVerts) into the vertex arena and
+   point the attributes at it. */
 static void bind_client_arrays(int ctVerts) {
   const ClientArray *arr[2 + MAXUNITS] = { 0 };
   if (S.vtx.enabled) arr[0] = &S.vtx;
@@ -612,18 +663,11 @@ static void bind_client_arrays(int ctVerts) {
     len[l] = (size_t)(ctVerts - 1) * stride[l] + elem;
     off[l] = total; total += (len[l] + 15) & ~(size_t)15;
   }
-  GLintptr base = 0;
-  if (total) {
-    uint8_t *st = stage_reserve(total);
-    for (int l = 0; l < 2 + MAXUNITS; l++) if (arr[l]) memcpy(st + off[l], arr[l]->ptr, len[l]);
-    base = ring_upload(&_vring, st, (GLsizeiptr)total);
-  }
+  size_t base = total ? arena_alloc(&_va, total, 16) : 0;
   for (int l = 0; l < 2 + MAXUNITS; l++) {
     if (arr[l]) {
-      attrib_enable(l, 1);
-      glVertexAttribPointer(l, arr[l]->size, arr[l]->type,
-                            (l == 1 && arr[l]->type == GL_UNSIGNED_BYTE) ? GL_TRUE : GL_FALSE,
-                            stride[l], (const void *)(uintptr_t)(base + off[l]));
+      memcpy(_va.p + base + off[l], arr[l]->ptr, len[l]);
+      attrib_pointer(l, arr[l]->size, arr[l]->type, l == 1 && arr[l]->type == GL_UNSIGNED_BYTE, stride[l], base + off[l]);
     } else if (l == 0) {
       static const float zero[4] = { 0, 0, 0, 1 }; attrib_const(0, zero);
     } else if (l == 1) {
@@ -634,32 +678,16 @@ static void bind_client_arrays(int ctVerts) {
   }
 }
 
-/* index buffer that turns quads (0,1,2,3) into triangles (0,1,2, 0,2,3) */
-static void bind_quad_indices(int ctQuads) {
-  bind_elem_buffer(S.iboQuads);
-  if (ctQuads > S.quadsCap) {
-    int cap = 1024; while (cap < ctQuads) cap *= 2;
-    uint32_t *idx = malloc((size_t)cap * 6 * 4);
-    for (int q = 0; q < cap; q++) {
-      uint32_t b = q * 4; uint32_t *o = idx + q * 6;
-      o[0] = b; o[1] = b + 1; o[2] = b + 2; o[3] = b; o[4] = b + 2; o[5] = b + 3;
-    }
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)cap * 6 * 4, idx, GL_STATIC_DRAW);
-    free(idx);
-    S.quadsCap = cap;
-  }
-}
-
 static void shim_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
   shim_init();
   if (count <= 0) return;
   apply_program();
   bind_client_arrays(first + count);
   if (mode == GL1_QUADS) {
-    bind_quad_indices((first + count) / 4);
-    glDrawElements(GL_TRIANGLES, count / 4 * 6, GL_UNSIGNED_INT, (const void *)(uintptr_t)(first / 4 * 6 * 4));
+    gfx_quad_capacity((first + count) / 4);
+    cmd_ii(OP_DRAW_QUADS, count / 4 * 6, first / 4 * 6 * 4);
   } else {
-    glDrawArrays(mode == GL1_POLYGON ? GL_TRIANGLE_FAN : mode, first, count);
+    cmd_iii(OP_DRAW_ARRAYS, (int)(mode == GL1_POLYGON ? GL_TRIANGLE_FAN : mode), first, count);
   }
 }
 
@@ -674,8 +702,9 @@ static void shim_glDrawElements(GLenum mode, GLsizei count, GLenum type, const v
   apply_program();
   bind_client_arrays(maxIdx + 1);
   int isz = type == GL_UNSIGNED_INT ? 4 : type == GL_UNSIGNED_SHORT ? 2 : 1;
-  GLintptr ioff = ring_upload(&_iring, indices, (GLsizeiptr)count * isz);
-  glDrawElements(mode, count, type, (const void *)(uintptr_t)ioff);
+  size_t ioff = arena_alloc(&_ia, (size_t)count * isz, 4);
+  memcpy(_ia.p + ioff, indices, (size_t)count * isz);
+  cmd_iiii(OP_DRAW_ELEMENTS, (int)mode, count, (int)type, (int)ioff);
 }
 
 /* ---- immediate mode ---- */
@@ -687,16 +716,14 @@ static void shim_glEnd(void) {
   if (n == 0) return;
   apply_program();
   const int st = IMM_FLOATS * 4;
-  GLintptr base = ring_upload(&_vring, S.imm, (GLsizeiptr)n * st);
-  for (int l = 0; l < 2 + MAXUNITS; l++) {
-    attrib_enable(l, 1);
-    glVertexAttribPointer(l, 4, GL_FLOAT, GL_FALSE, st, (const void *)(uintptr_t)(base + 16 * l));
-  }
+  size_t base = arena_alloc(&_va, (size_t)n * st, 16);
+  memcpy(_va.p + base, S.imm, (size_t)n * st);
+  for (int l = 0; l < 2 + MAXUNITS; l++) attrib_pointer(l, 4, GL_FLOAT, 0, st, base + 16 * l);
   switch (S.beginMode) {
-  case GL1_QUADS: bind_quad_indices(n / 4); glDrawElements(GL_TRIANGLES, n / 4 * 6, GL_UNSIGNED_INT, 0); break;
-  case GL1_QUAD_STRIP: glDrawArrays(GL_TRIANGLE_STRIP, 0, n); break;
-  case GL1_POLYGON: glDrawArrays(GL_TRIANGLE_FAN, 0, n); break;
-  default: glDrawArrays(S.beginMode, 0, n); break;
+  case GL1_QUADS: gfx_quad_capacity(n / 4); cmd_ii(OP_DRAW_QUADS, n / 4 * 6, 0); break;
+  case GL1_QUAD_STRIP: cmd_iii(OP_DRAW_ARRAYS, GL_TRIANGLE_STRIP, 0, n); break;
+  case GL1_POLYGON: cmd_iii(OP_DRAW_ARRAYS, GL_TRIANGLE_FAN, 0, n); break;
+  default: cmd_iii(OP_DRAW_ARRAYS, (int)S.beginMode, 0, n); break;
   }
 }
 
@@ -705,6 +732,7 @@ static void shim_glEnd(void) {
 static void shim_glFinish(void) {}
 static void shim_glFlush(void) {}
 static void shim_glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum fmt, GLenum type, void *px) {
+  shim_init();
   if (fmt == GL_DEPTH_COMPONENT) {
     /* WebGL2 can't read the depth buffer. Used for lens-flare/corona visibility (DepthCheck.cpp):
        report "far" so they stay visible. TODO: occlusion queries. */
@@ -714,22 +742,24 @@ static void shim_glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum fmt
   if (fmt == GL_RGB && type == GL_UNSIGNED_BYTE) {
     /* WebGL2 only guarantees RGBA/UNSIGNED_BYTE: read that, repack to RGB (screenshots) */
     uint8_t *tmp = malloc((size_t)w * h * 4), *o = px;
-    glReadPixels(x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
+    SE1_GL1Shim_Flush();
+    gfx_read_pixels(x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, tmp, w * h * 4);
     for (int i = 0; i < w * h; i++) { o[i * 3] = tmp[i * 4]; o[i * 3 + 1] = tmp[i * 4 + 1]; o[i * 3 + 2] = tmp[i * 4 + 2]; }
     free(tmp);
     return;
   }
-  glReadPixels(x, y, w, h, fmt, type, px);
+  SE1_GL1Shim_Flush();
+  gfx_read_pixels(x, y, w, h, (int)fmt, (int)type, px, w * h * 4);   /* RGBA/UNSIGNED_BYTE */
 }
 
 /* ---- misc GL1 calls ---- */
-static void shim_glClearDepth(GLdouble d) { glClearDepthf((float)d); }
-static void shim_glDepthRange(GLdouble n, GLdouble f) { glDepthRangef((float)n, (float)f); }
+static void shim_glClearDepth(GLdouble d) { shim_init(); cmd(OP_CLEARDEPTH, 1)[0].f = (float)d; }
+static void shim_glDepthRange(GLdouble n, GLdouble f) { shim_init(); cmd_ff(OP_DEPTHRANGE, (float)n, (float)f); }
 static void shim_glShadeModel(GLenum m) { (void)m; }
 static void shim_glDrawBuffer(GLenum m) { (void)m; }
 static void shim_glPolygonMode(GLenum f, GLenum m) { (void)f; (void)m; } /* wireframe: unsupported */
 static void shim_glPointSize(GLfloat s) { (void)s; }
-static void shim_glHint(GLenum t, GLenum m) { if (t == GL_GENERATE_MIPMAP_HINT || t == GL_FRAGMENT_SHADER_DERIVATIVE_HINT) glHint(t, m); }
+static void shim_glHint(GLenum t, GLenum m) { (void)t; (void)m; } /* mipmaps are uploaded by the engine */
 static void shim_nop(void) {}
 
 static char _strExtensions[512];
@@ -748,8 +778,27 @@ static const GLubyte *shim_glGetString(GLenum name) {
 }
 static void shim_glGetIntegerv(GLenum p, GLint *out) {
   if (p == GL1_MAX_TEXTURE_UNITS) { *out = MAXUNITS; return; }
-  glGetIntegerv(p, out);
+  shim_init();
+  SE1_GL1Shim_Flush();
+  gfx_get_param((int)p, out, 0);
 }
+
+/* ---- core GL calls the engine makes directly: recorded too, so they stay in order ---- */
+static void shim_glGetFloatv(GLenum p, GLfloat *out) { shim_init(); SE1_GL1Shim_Flush(); gfx_get_param((int)p, out, 1); }
+static GLenum shim_glGetError(void) { return GL_NO_ERROR; }  /* WebGL reports errors in the console */
+static void shim_glPixelStorei(GLenum p, GLint v) { shim_init(); SE1_GL1Shim_Flush(); gfx_pixel_store((int)p, v); }
+static void shim_glBlendFunc(GLenum s, GLenum d) { shim_init(); cmd_ii(OP_BLENDFUNC, (int)s, (int)d); }
+static void shim_glDepthFunc(GLenum f) { shim_init(); cmd_i(OP_DEPTHFUNC, (int)f); }
+static void shim_glDepthMask(GLboolean f) { shim_init(); cmd_i(OP_DEPTHMASK, f ? 1 : 0); }
+static void shim_glColorMask(GLboolean r, GLboolean g, GLboolean b, GLboolean a) { shim_init(); cmd_iiii(OP_COLORMASK, !!r, !!g, !!b, !!a); }
+static void shim_glCullFace(GLenum m) { shim_init(); cmd_i(OP_CULLFACE, (int)m); }
+static void shim_glFrontFace(GLenum m) { shim_init(); cmd_i(OP_FRONTFACE, (int)m); }
+static void shim_glPolygonOffset(GLfloat f, GLfloat u) { shim_init(); cmd_ff(OP_POLYOFFSET, f, u); }
+static void shim_glViewport(GLint x, GLint y, GLsizei w, GLsizei h) { shim_init(); cmd_iiii(OP_VIEWPORT, x, y, w, h); }
+static void shim_glScissor(GLint x, GLint y, GLsizei w, GLsizei h) { shim_init(); cmd_iiii(OP_SCISSOR, x, y, w, h); }
+static void shim_glClearColor(GLclampf r, GLclampf g, GLclampf b, GLclampf a) { shim_init(); cmd_ffff(OP_CLEARCOLOR, r, g, b, a); }
+static void shim_glClearStencil(GLint s) { shim_init(); cmd_i(OP_CLEARSTENCIL, s); }
+static void shim_glClear(GLbitfield m) { shim_init(); cmd_i(OP_CLEAR, (int)m); }
 
 /* ---- proc address table ---- */
 typedef struct { const char *name; void *fn; } Entry;
@@ -766,6 +815,9 @@ static const Entry _entries[] = {
   E(glDrawArrays), E(glDrawElements), E(glClearDepth), E(glDepthRange), E(glShadeModel),
   E(glDrawBuffer), E(glPolygonMode), E(glPointSize), E(glHint), E(glGetString), E(glGetIntegerv),
   E(glFinish), E(glFlush), E(glReadPixels),
+  E(glTexSubImage2D), E(glGenTextures), E(glGetFloatv), E(glGetError), E(glPixelStorei),
+  E(glBlendFunc), E(glDepthFunc), E(glDepthMask), E(glColorMask), E(glCullFace), E(glFrontFace),
+  E(glPolygonOffset), E(glViewport), E(glScissor), E(glClearColor), E(glClearStencil), E(glClear),
 #undef E
   { "glActiveTextureARB", (void *)shim_glActiveTexture },
   { "glActiveTexture", (void *)shim_glActiveTexture },

@@ -74,8 +74,11 @@ void SE1Mod_Frame(void);  // port/common/Se1ModHost.cpp
 
 /* called right before SDL_GL_SwapWindow: Emscripten's SDL yields inside the swap, and the
    browser may present + clear the drawing buffer during that yield, so read frames back here */
+extern "C" void SE1_GL1Shim_Flush(void);  // port/common/gl1shim.c: replay this frame's commands
+
 extern "C" void SE1_BeforeSwap(void)
 {
+  SE1_GL1Shim_Flush();   // the frame must be drawn before it's captured or presented
   se1_capture_frame();
 }
 

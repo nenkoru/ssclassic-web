@@ -110,3 +110,21 @@ phase must also pass the visual regression test from phase 0 before it lands.
   phase 2 leaves draw count as the bottleneck.
 - A Rust renderer: possible later as the replayer (wgpu → WebGPU), but the replayer is JS/TS-sized work.
   Rust wins nothing until the command format is stable.
+
+## Results
+
+### Phase 0 (3bbc5c0)
+- `tools/bench.mjs --shots <label>` captures 8 frames (3..17 s of demo time); `tools/shotdiff.py` compares them.
+- Capture mode needs `sam_iVideoSetup = 3` and `gfx_iLensFlareQuality = 0` (port/data/SE1Mod/shots.ini):
+  - flares fade on wall-clock time, so frames would depend on build speed;
+  - the GLSettings presets run after the command-line script and would re-enable them.
+- Same-build runs are bit-identical.
+
+### Phase 1 (command stream + JS WebGL2 replayer)
+- Visual: vs the old renderer, 8/8 frames pass (7 bit-identical, 1 at 0.002% of pixels).
+- GPU, interleaved A/B: ~1790 -> ~2400 fps (+34%); CPU per frame mean 0.55 -> 0.41 ms, p95 1.2 -> 0.7,
+  p99 1.9 -> 0.85.
+- WebGL calls per frame: 1980 -> 1650; bufferData calls ~390 -> 2.
+- Software GL: unchanged (~103 fps, same spikes). As expected, SwiftShader is GPU-side bound: phase 1 removes
+  CPU-side glue, not GPU work. Remaining per-draw state calls (vertexAttribPointer 705, bindTexture 210,
+  activeTexture 178) are the WebGPU phase's target.
