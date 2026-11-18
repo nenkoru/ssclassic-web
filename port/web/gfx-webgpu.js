@@ -97,6 +97,7 @@
       if (!s) {
         s = { buf: dev.createBuffer({ size: this.slotBytes * this.slots, usage: this.usage | GPUBufferUsage.COPY_DST }),
               data: new ArrayBuffer(this.slotBytes * this.slots), bg: null };
+        s.f32 = new Float32Array(s.data); s.u32 = new Uint32Array(s.data);   // views made once, not per draw
         this.segs[this.cur] = s;
       }
       return s;
@@ -117,7 +118,7 @@
     var xpool = new SegPool(GPUBufferUsage.INDEX, 4, 1 << 18);      // generated indices (fans, loops, u8)
 
     // ---- canvas / attachments ----
-    var glCanvas = null, canvas = null, ctx = null, depthTex = null, depthView = null, W = 0, H = 0;
+    var glCanvas = null, canvas = null, ctx = null, depthTex = null, depthView = null, W = 0, H = 0, layoutTick = 0, resized = false;
     function ensureTarget() {
       if (!canvas) {
         glCanvas = Module['canvas'];
@@ -128,13 +129,15 @@
         ctx = canvas.getContext('webgpu');
       }
       if (glCanvas.width !== W || glCanvas.height !== H) {
-        W = canvas.width = glCanvas.width; H = canvas.height = glCanvas.height;
+        W = canvas.width = glCanvas.width; H = canvas.height = glCanvas.height; resized = true;
         ctx.configure({ device: dev, format: fmt, alphaMode: 'opaque', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
         if (depthTex) depthTex.destroy();
         depthTex = dev.createTexture({ size: [W, H], format: 'depth32float', usage: GPUTextureUsage.RENDER_ATTACHMENT });
         depthView = depthTex.createView();
       }
-      // keep the overlay on top of SDL's canvas
+      // keep the overlay on top of SDL's canvas (layout reads can force a reflow: not every flush)
+      if (++layoutTick % 60 !== 1 && !resized) return;
+      resized = false;
       var s = canvas.style, l = glCanvas.offsetLeft + 'px', t = glCanvas.offsetTop + 'px',
           w = glCanvas.clientWidth + 'px', h = glCanvas.clientHeight + 'px';
       if (s.left !== l) s.left = l; if (s.top !== t) s.top = t;
@@ -269,8 +272,9 @@
 
     // ---- textures / samplers ----
     function samplerFor(t) {
+      if (t.samp) return t.samp;                     // reset by glTexParameter on this texture
       var p = t.params, key = p.min + ',' + p.mag + ',' + p.ws + ',' + p.wt + ',' + p.aniso, s = samplers.get(key);
-      if (s) return s;
+      if (s) return (t.samp = s);
       var mipmapped = p.min !== G.NEAREST && p.min !== G.LINEAR;
       var minF = (p.min === G.NEAREST || p.min === G.NEAREST_MIPMAP_NEAREST || p.min === G.NEAREST_MIPMAP_LINEAR) ? 'nearest' : 'linear';
       var mipF = (p.min === G.NEAREST_MIPMAP_LINEAR || p.min === G.LINEAR_MIPMAP_LINEAR) ? 'linear' : 'nearest';
@@ -282,10 +286,24 @@
       s = dev.createSampler(desc);
       s.__id = samplers.size + 1;
       samplers.set(key, s);
-      return s;
+      return (t.samp = s);
     }
     var tbgCache = new Map();
     function textureBindGroup(key) {
+      // common case: only unit 0 is used -> bind group cached on the texture itself
+      if ((key & 0x1111) === 1) {
+        var t0 = texs[st.bound[0]];
+        if (t0 && t0.view) {
+          var sm0 = samplerFor(t0);
+          if (t0.bg && t0.bgVid === t0.vid && t0.bgSamp === sm0) return t0.bg;
+          var e0 = [{ binding: 0, resource: t0.view }];
+          for (var d = 1; d < 4; d++) e0.push({ binding: d, resource: dummyView });
+          e0.push({ binding: 4, resource: sm0 });
+          for (d = 1; d < 4; d++) e0.push({ binding: 4 + d, resource: dummySampler });
+          t0.bg = dev.createBindGroup({ layout: bgl1, entries: e0 }); t0.bgVid = t0.vid; t0.bgSamp = sm0;
+          return t0.bg;
+        }
+      }
       var views = [], smps = [], k = '';
       for (var u = 0; u < 4; u++) {
         var t = ((key >> (u * 4)) & 1) ? texs[st.bound[u]] : null;
@@ -311,7 +329,7 @@
     // Emscripten's GL object (SDL's WebGL2 context): only for constant queries
     function GL_ctx() { return (typeof GL !== 'undefined' && GL.currentContext) ? GL.currentContext.GLctx : null; }
 
-    var warnedRead = false;
+    var warnedRead = false, fences = [];
     var api = {
       backend: 'webgpu',
       createProgram: function (vs, fs, key) { progs.push({ key: key >>> 0, shadow: new Float32Array(120), modules: {} }); return progs.length - 1; },
@@ -369,7 +387,8 @@
         if (v.length !== undefined) { for (var i = 0; i < v.length; i++) H32[o + i] = +v[i]; return v.length; }
         H32[o] = 0; return 0;
       },
-      sync: function () { return dev.queue.onSubmittedWorkDone(); },
+      // timedemo: wait for the frame from 2 frames ago, not this one (bounded queue, no full stall)
+      sync: function () { fences.push(dev.queue.onSubmittedWorkDone()); return fences.length > 2 ? fences.shift() : null; },
       // visual regression capture: copy the frame, deliver bottom-up RGBA like glReadPixels
       capture: function (cb) {
         var tex = ctx.getCurrentTexture(), w = tex.width, h = tex.height, bpr = Math.ceil(w * 4 / 256) * 256;
@@ -419,15 +438,18 @@
           }
           scDirty = false;
         }
+        var boundU = null;   // uniform slot currently bound to group 0 in this pass
         function uniforms() {
-          if (!uniDirty && lastU) { pass.setBindGroup(0, lastU[0].bg, [lastU[1]]); return; }
-          var a = upool.alloc(1), seg = a[0], off = a[1], P = progs[st.prog];
-          var f = new Float32Array(seg.data, off, U_FLOATS);
-          if (P) f.set(P.shadow, 0);
-          f.set(st.attrConst, ATTR_OFF);
+          if (!uniDirty && lastU) {
+            if (boundU !== lastU) { pass.setBindGroup(0, lastU[0].bg, [lastU[1]]); boundU = lastU; }
+            return;
+          }
+          var a = upool.alloc(1), seg = a[0], base = a[1] >> 2, P = progs[st.prog];
+          if (P) seg.f32.set(P.shadow, base);
+          seg.f32.set(st.attrConst, base + ATTR_OFF);
           if (!seg.bg) seg.bg = dev.createBindGroup({ layout: bgl0, entries: [{ binding: 0, resource: { buffer: seg.buf, size: 576 } }] });
-          pass.setBindGroup(0, seg.bg, [off]);
-          lastU = a; uniDirty = false;
+          pass.setBindGroup(0, seg.bg, [a[1]]);
+          lastU = boundU = a; uniDirty = false;
         }
         // common part of every draw; returns false if nothing should be drawn
         function prep(topo, stripFmt) {
@@ -446,8 +468,8 @@
           return true;
         }
         function genIndices(list) {
-          var a = xpool.alloc(list.length), arr = new Uint32Array(a[0].data, a[1], list.length);
-          arr.set(list);
+          var a = xpool.alloc(list.length);
+          a[0].u32.set(list, a[1] >> 2);
           return a;
         }
         function drawGen(topo, list) {
@@ -482,10 +504,10 @@
             var mask = I[c + 1], cm = (mask & G.COLOR_BIT) ? st.colorMask : 0, dw = (mask & G.DEPTH_BIT) && st.depthMask;
             if (cm || dw) {
               pass.setPipeline(clearPipeline(cm, dw)); curPipe = null; pipeDirty = true;
-              var a = upool.alloc(1), f = new Float32Array(a[0].data, a[1], U_FLOATS);
-              f.fill(0); f.set(st.clearColor, ATTR_OFF); f[ATTR_OFF + 4] = st.clearDepth;
+              var a = upool.alloc(1), cb = a[1] >> 2, f = a[0].f32;
+              f.fill(0, cb, cb + U_FLOATS); f.set(st.clearColor, cb + ATTR_OFF); f[cb + ATTR_OFF + 4] = st.clearDepth;
               if (!a[0].bg) a[0].bg = dev.createBindGroup({ layout: bgl0, entries: [{ binding: 0, resource: { buffer: a[0].buf, size: 576 } }] });
-              pass.setBindGroup(0, a[0].bg, [a[1]]); uniDirty = true;
+              pass.setBindGroup(0, a[0].bg, [a[1]]); uniDirty = true; boundU = null;
               if (!curTBG) { curTBG = textureBindGroup(0); pass.setBindGroup(1, curTBG); }
               pass.setViewport(0, 0, W, H, 0, 1); vpDirty = true;   // glClear ignores the viewport
               setScissor();
@@ -502,7 +524,7 @@
               if (pn === G.MIN_FILTER) t.params.min = v; else if (pn === G.MAG_FILTER) t.params.mag = v;
               else if (pn === G.WRAP_S) t.params.ws = v; else if (pn === G.WRAP_T) t.params.wt = v;
               else if (pn === G.MAX_ANISO) t.params.aniso = v;
-              texDirty = true;
+              t.samp = null; texDirty = true;
             }
             c += 4; break;
           }

@@ -141,5 +141,14 @@ phase must also pass the visual regression test from phase 0 before it lands.
     groups.
 - No software WebGPU adapter on macOS Chrome (SwiftShader WebGPU unavailable), so no potato proxy here.
 - Stays opt-in; WebGL2 remains the default.
-- Next: allocation-free uniform writes, numeric cache keys, fewer redundant setBindGroup/setVertexBuffer
-  calls, render bundles for static world geometry, a fair timedemo sync (fence only every N frames).
+- Optimization pass 1:
+  - Changes: persistent typed views (no allocation per draw), sampler and single-texture bind group
+    cached on the texture, no redundant setBindGroup(0), overlay layout reads every 60 flushes instead
+    of every flush, timedemo sync pipelined two frames deep.
+  - Result: 550 -> ~1400 fps; CPU per frame 0.87 -> 0.69 ms (p99 1.9 -> 1.6). WebGL2 on the same
+    run: ~2490 fps, 0.39 ms.
+- Next (structural):
+  - render bundles for static world geometry;
+  - one writeBuffer of all per-draw uniforms per flush, already the case;
+  - packing the per-draw state changes the engine makes;
+  - measuring on a real weak GPU, since macOS Chrome has no software WebGPU adapter.
