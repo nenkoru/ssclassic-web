@@ -69,8 +69,6 @@ if(SE1_THREADS)
   add_compile_definitions(SE1_THREADS=1)
   # rename the engine's SDL_GL_* calls to stubs: the worker has no GL context (sdlgl_threads.h)
   add_compile_options("SHELL:-include ${ROOT}/port/common/sdlgl_threads.h")
-  # Rust's precompiled std for wasm32-unknown-emscripten has no atomics: needs nightly build-std
-  set(SE1_RUSTMOD OFF CACHE BOOL "Link the Rust mod layer" FORCE)
 endif()
 add_compile_options(
   ${PORT_FLAGS} ${EH_FLAGS} ${OPT_FLAGS}
@@ -117,12 +115,25 @@ option(SE1_RUSTMOD "Link the Rust mod layer" ON)
 if(SE1_RUSTMOD)
   target_sources(engine PRIVATE "${ROOT}/port/common/Se1ModHost.cpp")
   find_program(CARGO cargo HINTS "$ENV{HOME}/.cargo/bin" REQUIRED)
-  set(RUSTMOD_LIB "${ROOT}/rust/target/wasm32-unknown-emscripten/release/libse1_mod.a")
-  add_custom_target(rustmod
-    COMMAND ${CARGO} build -p se1-mod --target wasm32-unknown-emscripten --release
-    WORKING_DIRECTORY "${ROOT}/rust"
-    BYPRODUCTS "${RUSTMOD_LIB}"
-    COMMENT "cargo build se1-mod (wasm32-unknown-emscripten)")
+  if(SE1_THREADS)
+    # Rust's precompiled std for wasm32-unknown-emscripten has no atomics, so the threaded build
+    # rebuilds std with them (nightly + rust-src: rustup toolchain install nightly --component rust-src)
+    set(RUSTMOD_LIB "${ROOT}/rust/target-mt/wasm32-unknown-emscripten/release/libse1_mod.a")
+    add_custom_target(rustmod
+      COMMAND ${CMAKE_COMMAND} -E env "RUSTFLAGS=-C target-feature=+atomics,+bulk-memory,+mutable-globals"
+              ${CARGO} +nightly build -Z build-std=std,panic_abort -p se1-mod
+              --target wasm32-unknown-emscripten --release --target-dir target-mt
+      WORKING_DIRECTORY "${ROOT}/rust"
+      BYPRODUCTS "${RUSTMOD_LIB}"
+      COMMENT "cargo +nightly build se1-mod (wasm32-unknown-emscripten, atomics, build-std)")
+  else()
+    set(RUSTMOD_LIB "${ROOT}/rust/target/wasm32-unknown-emscripten/release/libse1_mod.a")
+    add_custom_target(rustmod
+      COMMAND ${CARGO} build -p se1-mod --target wasm32-unknown-emscripten --release
+      WORKING_DIRECTORY "${ROOT}/rust"
+      BYPRODUCTS "${RUSTMOD_LIB}"
+      COMMENT "cargo build se1-mod (wasm32-unknown-emscripten)")
+  endif()
   target_compile_definitions(engine PRIVATE SE1_WITH_RUSTMOD=1)
   target_include_directories(engine PRIVATE "${ROOT}/port/common")
 endif()

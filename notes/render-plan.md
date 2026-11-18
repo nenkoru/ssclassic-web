@@ -186,12 +186,12 @@ phase must also pass the visual regression test from phase 0 before it lands.
   Every replay is a synchronous round trip, so nothing overlaps yet.
 - Loading is slow (~20 s for the intro): MEMFS lives on the main thread, so every file read from the
   worker is a synchronous proxy.
-- Rust mod layer off in this build (std without atomics; needs nightly build-std).
+- Rust mod layer off in this build (std without atomics; needs nightly build-std). Done in milestone 5.
 - Next:
   - asynchronous double-buffered frame hand-off (worker records frame N+1 while main replays N);
   - ~~worker-local file access~~ (done, milestone 2);
   - ~~SAB audio ring~~ (done, milestone 4);
-  - Rust with build-std.
+  - ~~Rust with build-std~~ (done, milestone 5).
 
 ### Phase 3, milestone 2: WASMFS + frame/capture fixes
 - Filesystem: the threaded build uses WASMFS (the filesystem lives in wasm), so the worker reads
@@ -256,3 +256,14 @@ phase must also pass the visual regression test from phase 0 before it lands.
 - A one-off 11–15 ms frame shows up in most timedemo runs with or without audio (first-use compile
   or GC); not yet investigated.
 - The single-threaded build keeps its clock-based worklet path (no SharedArrayBuffer without COOP/COEP).
+
+### Phase 3, milestone 5: Rust mod layer in the threaded build
+- Rust's precompiled std for wasm32-unknown-emscripten has no atomics, so the threaded build rebuilds
+  it with them:
+  `cargo +nightly build -Z build-std=std,panic_abort` with
+  `RUSTFLAGS=-C target-feature=+atomics,+bulk-memory,+mutable-globals`, into `rust/target-mt`.
+- CMake does this when `SE1_THREADS=ON`. One-time setup:
+  `rustup toolchain install nightly --profile minimal --component rust-src --target wasm32-unknown-emscripten`.
+  The single-threaded build still uses stable Rust.
+- Verified in normal play: config.toml's HUD time and clock show up in the threaded build.
+  Captures are unchanged (shots.ini pins those cvars).
