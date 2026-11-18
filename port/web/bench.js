@@ -28,8 +28,9 @@
       }
       // ?glstats=1: count WebGL draws and how many could merge with the previous draw
       // (only vertex/index upload calls in between, no state change)
-      if (new URLSearchParams(location.search).get('glstats') && GL.currentContext) {
-        var gl = GL.currentContext.GLctx;
+      var statsGl = Module['se1gfx'] && Module['se1gfx'].gl || (typeof GL !== 'undefined' && GL.currentContext && GL.currentContext.GLctx);
+      if (new URLSearchParams(location.search).get('glstats') && statsGl) {
+        var gl = statsGl;
         var G = B.gl = { draws: 0, mergeable: 0, calls: 0, byName: {}, cleanSinceDraw: false, drawsWhileLastWasDraw: 0 };
         var neutral = { bufferData: 1, bufferSubData: 1, bindBuffer: 1, vertexAttribPointer: 1,
                         enableVertexAttribArray: 1, disableVertexAttribArray: 1 };

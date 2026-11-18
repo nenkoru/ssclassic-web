@@ -52,6 +52,7 @@ Module['se1gfx'] = (function () {
 
   return {
     backend: 'webgl2',
+    get gl() { return gl; },   // the replayer's context (?glstats=1 in port/web/bench.js)
     createProgram: function (vs, fs, key) {   // key: used by the WebGPU replayer only
       init();
       var p = gl.createProgram(), v = shader(gl.VERTEX_SHADER, vs), f = shader(gl.FRAGMENT_SHADER, fs);

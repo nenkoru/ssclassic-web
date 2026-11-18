@@ -296,3 +296,19 @@ phase must also pass the visual regression test from phase 0 before it lands.
   - main-thread replay at 8×: 1.1 ms per frame.
 - Next worker hot spots: CRenderer::ScanOneLine / AddActiveSector / MakeSpan (visibility),
   musl qsort (smoothsort: sift/trinkle, ~6%), bind_client_arrays.
+
+### qsort, and where the time goes now
+- `--wrap=qsort` → introsort (port/common/FastSort.c). Sorting went from ~6% to 3.6% of worker
+  time. Timedemo: threaded 2674–2853 fps, single 2522 fps; captures bit-identical.
+- `?glstats=1` works again (it hooks the replayer's own context). Threaded, Auto-Demo0001:
+  - 208 draws and 1636 WebGL calls per frame;
+  - by call: vertexAttribPointer 699 (3.4 per draw), bindTexture 208, activeTexture 176;
+  - 9 draws mergeable.
+- Next candidate: index rebasing with fixed per-attribute streams. Attribute pointers would stay
+  put, and each draw's indices (or `first`) get the base vertex added when they're copied into the
+  arena. That removes most of the ~700 vertexAttribPointer calls (≈40% of all calls).
+  - Doesn't show on this machine (replay is 0.15 ms per frame, 1.1 ms at 8× CPU throttle); it
+    targets the GPU-process/ANGLE cost per call on weak drivers.
+  - Touches both replayers.
+- Worker hot spots (engine visibility code): ScanOneLine 16%, AddActiveSector 10%, Render 7.5%,
+  ClipToOnePlane 5%, MakeSpan 5%. ScanOneLine scales with the engine's resolution height.
