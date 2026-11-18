@@ -24,7 +24,15 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <Engine/Templates/DynamicArray.h>
 #include <Engine/Base/Shell_internal.h>
 
+#ifdef __EMSCRIPTEN__
+// wasm: &pArgs does not reach the next argument; walk the block the shell published.
+// See port/common/ShellCall.cpp.
+extern "C" void *_pSE1ShellArgs;
+extern "C" double SE1_ShellCall(void *pfn, int iFloatMask, int ctArgs, void *pvSRet, void **apvArgs);
+#define NEXTARGUMENT(type) ( *((type*)_pSE1ShellArgs) ); _pSE1ShellArgs = (void*) (((char*)_pSE1ShellArgs) + sizeof(void*));
+#else
 #define NEXTARGUMENT(type) ( *((type*)((char*)&pArgs)) ); pArgs = (void*) (((char*)pArgs) + sizeof(void*));
+#endif
 
 // Object that takes care of shell functions, variables, macros etc.
 class ENGINE_API CShell {

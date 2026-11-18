@@ -1,0 +1,667 @@
+/* gl1shim: the OpenGL 1.x fixed-function subset Serious Engine 1 uses, on WebGL2 (GLES 3.0).
+ *
+ * The engine fetches every GL entry point through SDL_GL_GetProcAddress (Engine/Graphics/
+ * SDL/SDLOpenGL.cpp). On Emscripten that call is routed to SE1_GL1Shim_GetProcAddress(),
+ * which returns:
+ *   - a shim_* implementation for fixed-function / GL1-only calls (matrices, immediate mode,
+ *     client arrays, texenv, alpha test, clip plane, ...) and for a few core calls whose GL1
+ *     semantics differ from GLES3 (enable caps, glGetString, texture formats, draws);
+ *   - the real WebGL2 function for everything else.
+ *
+ * Fixed-function state is turned into a small GLSL ES 3.00 program keyed by the state that
+ * changes the shader (per-unit texture enable + env mode, alpha func, clip plane) — the same
+ * idea as nfsu2-web's FF_FS + pipeline-key cache. Client arrays and immediate-mode vertices
+ * are streamed into VBOs at draw time.
+ */
+#include <GLES3/gl3.h>
+#include <emscripten.h>
+#include <SDL.h>
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ---- GL1 enums not in GLES3 headers ---- */
+#define GL1_QUADS 0x0007
+#define GL1_QUAD_STRIP 0x0008
+#define GL1_POLYGON 0x0009
+#define GL1_MODELVIEW 0x1700
+#define GL1_PROJECTION 0x1701
+#define GL1_TEXTURE 0x1702
+#define GL1_TEXTURE_2D_CAP 0x0DE1 /* == GL_TEXTURE_2D, but as an enable cap */
+#define GL1_ALPHA_TEST 0x0BC0
+#define GL1_CLIP_PLANE0 0x3000
+#define GL1_VERTEX_ARRAY 0x8074
+#define GL1_NORMAL_ARRAY 0x8075
+#define GL1_COLOR_ARRAY 0x8076
+#define GL1_TEXTURE_COORD_ARRAY 0x8078
+#define GL1_TEXTURE_ENV 0x2300
+#define GL1_TEXTURE_ENV_MODE 0x2200
+#define GL1_TEXTURE_ENV_COLOR 0x2201
+#define GL1_MODULATE 0x2100
+#define GL1_DECAL 0x2101
+#define GL1_ADD 0x0104
+#define GL1_COMBINE 0x8570
+#define GL1_COMBINE_RGB 0x8571
+#define GL1_COMBINE_ALPHA 0x8572
+#define GL1_RGB_SCALE 0x8573
+#define GL1_BLEND_ENV 0x0BE2 /* GL_BLEND as env mode */
+#define GL1_REPLACE 0x1E01
+#define GL1_CLAMP 0x2900
+#define GL1_MAX_TEXTURE_UNITS 0x84E2
+#define GL1_TEXTURE_COMPRESSED 0x86A1
+#define GL1_TEXTURE_COMPRESSED_IMAGE_SIZE 0x86A0
+#define GL1_TEXTURE_WIDTH 0x1000
+#define GL1_TEXTURE_HEIGHT 0x1001
+#define GL1_TEXTURE_INTERNAL_FORMAT 0x1003
+#define GL1_TEXTURE_RED_SIZE 0x805C
+#define GL1_TEXTURE_GREEN_SIZE 0x805D
+#define GL1_TEXTURE_BLUE_SIZE 0x805E
+#define GL1_TEXTURE_ALPHA_SIZE 0x805F
+
+#define MAXUNITS 4
+
+typedef double GLdouble;  /* GL1 types missing from GLES headers */
+typedef double GLclampd;
+
+typedef struct { float m[16]; } Mat4;
+
+static void mat_identity(Mat4 *a) { memset(a, 0, sizeof *a); a->m[0] = a->m[5] = a->m[10] = a->m[15] = 1.0f; }
+static void mat_mul(Mat4 *out, const Mat4 *a, const Mat4 *b) { /* out = a*b, column-major */
+  Mat4 r;
+  for (int c = 0; c < 4; c++)
+    for (int rr = 0; rr < 4; rr++) {
+      float s = 0;
+      for (int k = 0; k < 4; k++) s += a->m[k * 4 + rr] * b->m[c * 4 + k];
+      r.m[c * 4 + rr] = s;
+    }
+  *out = r;
+}
+static int mat_invert(Mat4 *out, const Mat4 *in) {
+  const float *m = in->m; float inv[16];
+  inv[0] = m[5]*m[10]*m[15]-m[5]*m[11]*m[14]-m[9]*m[6]*m[15]+m[9]*m[7]*m[14]+m[13]*m[6]*m[11]-m[13]*m[7]*m[10];
+  inv[4] = -m[4]*m[10]*m[15]+m[4]*m[11]*m[14]+m[8]*m[6]*m[15]-m[8]*m[7]*m[14]-m[12]*m[6]*m[11]+m[12]*m[7]*m[10];
+  inv[8] = m[4]*m[9]*m[15]-m[4]*m[11]*m[13]-m[8]*m[5]*m[15]+m[8]*m[7]*m[13]+m[12]*m[5]*m[11]-m[12]*m[7]*m[9];
+  inv[12] = -m[4]*m[9]*m[14]+m[4]*m[10]*m[13]+m[8]*m[5]*m[14]-m[8]*m[6]*m[13]-m[12]*m[5]*m[10]+m[12]*m[6]*m[9];
+  inv[1] = -m[1]*m[10]*m[15]+m[1]*m[11]*m[14]+m[9]*m[2]*m[15]-m[9]*m[3]*m[14]-m[13]*m[2]*m[11]+m[13]*m[3]*m[10];
+  inv[5] = m[0]*m[10]*m[15]-m[0]*m[11]*m[14]-m[8]*m[2]*m[15]+m[8]*m[3]*m[14]+m[12]*m[2]*m[11]-m[12]*m[3]*m[10];
+  inv[9] = -m[0]*m[9]*m[15]+m[0]*m[11]*m[13]+m[8]*m[1]*m[15]-m[8]*m[3]*m[13]-m[12]*m[1]*m[11]+m[12]*m[3]*m[9];
+  inv[13] = m[0]*m[9]*m[14]-m[0]*m[10]*m[13]-m[8]*m[1]*m[14]+m[8]*m[2]*m[13]+m[12]*m[1]*m[10]-m[12]*m[2]*m[9];
+  inv[2] = m[1]*m[6]*m[15]-m[1]*m[7]*m[14]-m[5]*m[2]*m[15]+m[5]*m[3]*m[14]+m[13]*m[2]*m[7]-m[13]*m[3]*m[6];
+  inv[6] = -m[0]*m[6]*m[15]+m[0]*m[7]*m[14]+m[4]*m[2]*m[15]-m[4]*m[3]*m[14]-m[12]*m[2]*m[7]+m[12]*m[3]*m[6];
+  inv[10] = m[0]*m[5]*m[15]-m[0]*m[7]*m[13]-m[4]*m[1]*m[15]+m[4]*m[3]*m[13]+m[12]*m[1]*m[7]-m[12]*m[3]*m[5];
+  inv[14] = -m[0]*m[5]*m[14]+m[0]*m[6]*m[13]+m[4]*m[1]*m[14]-m[4]*m[2]*m[13]-m[12]*m[1]*m[6]+m[12]*m[2]*m[5];
+  inv[3] = -m[1]*m[6]*m[11]+m[1]*m[7]*m[10]+m[5]*m[2]*m[11]-m[5]*m[3]*m[10]-m[9]*m[2]*m[7]+m[9]*m[3]*m[6];
+  inv[7] = m[0]*m[6]*m[11]-m[0]*m[7]*m[10]-m[4]*m[2]*m[11]+m[4]*m[3]*m[10]+m[8]*m[2]*m[7]-m[8]*m[3]*m[6];
+  inv[11] = -m[0]*m[5]*m[11]+m[0]*m[7]*m[9]+m[4]*m[1]*m[11]-m[4]*m[3]*m[9]-m[8]*m[1]*m[7]+m[8]*m[3]*m[5];
+  inv[15] = m[0]*m[5]*m[10]-m[0]*m[6]*m[9]-m[4]*m[1]*m[10]+m[4]*m[2]*m[9]+m[8]*m[1]*m[6]-m[8]*m[2]*m[5];
+  float det = m[0]*inv[0]+m[1]*inv[4]+m[2]*inv[8]+m[3]*inv[12];
+  if (det == 0) return 0;
+  det = 1.0f / det;
+  for (int i = 0; i < 16; i++) out->m[i] = inv[i] * det;
+  return 1;
+}
+
+/* ---- state ---- */
+enum { ENV_MODULATE, ENV_REPLACE, ENV_DECAL, ENV_BLEND, ENV_ADD, ENV_COMBINE_MOD, ENV_COMBINE_REPLACE, ENV_COMBINE_ADD };
+
+typedef struct { int size; GLenum type; int stride; const void *ptr; int enabled; } ClientArray;
+
+typedef struct {
+  int enabled;          /* glEnable(GL_TEXTURE_2D) on this unit */
+  GLenum envMode, combineRGB;
+  float rgbScale;
+  float envColor[4];
+  Mat4 texMat;
+  float curTex[4];
+  ClientArray tc;
+} Unit;
+
+static struct {
+  int inited;
+  Mat4 modelview, projection;
+  GLenum matrixMode;
+  int activeUnit, clientUnit;
+  Unit u[MAXUNITS];
+  int alphaTest; GLenum alphaFunc; float alphaRef;
+  int clipPlane; float clipEye[4];
+  float curColor[4];
+  ClientArray vtx, col, nor;
+  int lockedCount;
+  /* immediate mode */
+  int inBegin; GLenum beginMode;
+  float *imm; int immCount, immCap;
+  /* GL objects */
+  GLuint vao, vboVtx, vboCol, vboTc[MAXUNITS], vboImm, ibo, iboQuads;
+  int quadsCap;
+  /* GLES caps we track for glIsEnabled */
+  int capBlend, capCull, capDepth, capScissor, capDither, capPolyOffset;
+  /* texture info for glGetTexLevelParameteriv */
+  GLuint boundTex[MAXUNITS];
+} S;
+
+typedef struct { GLuint tex; GLint ifmt, w, h; } TexInfo;
+static TexInfo *_texInfo; static int _ctTexInfo, _capTexInfo;
+static TexInfo *tex_info(GLuint t, int create) {
+  for (int i = 0; i < _ctTexInfo; i++) if (_texInfo[i].tex == t) return &_texInfo[i];
+  if (!create) return NULL;
+  if (_ctTexInfo == _capTexInfo) { _capTexInfo = _capTexInfo ? _capTexInfo * 2 : 256; _texInfo = realloc(_texInfo, _capTexInfo * sizeof(TexInfo)); }
+  TexInfo *ti = &_texInfo[_ctTexInfo++]; memset(ti, 0, sizeof *ti); ti->tex = t; return ti;
+}
+
+static void shim_init(void) {
+  if (S.inited) return;
+  S.inited = 1;
+  mat_identity(&S.modelview); mat_identity(&S.projection);
+  S.matrixMode = GL1_MODELVIEW;
+  for (int i = 0; i < MAXUNITS; i++) {
+    mat_identity(&S.u[i].texMat);
+    S.u[i].envMode = GL1_MODULATE; S.u[i].combineRGB = GL1_MODULATE; S.u[i].rgbScale = 1.0f;
+    S.u[i].curTex[3] = 1.0f;
+  }
+  S.alphaFunc = GL_ALWAYS;
+  S.curColor[0] = S.curColor[1] = S.curColor[2] = S.curColor[3] = 1.0f;
+  S.capDither = 1;
+  glGenVertexArrays(1, &S.vao);
+  glBindVertexArray(S.vao);
+  glGenBuffers(1, &S.vboVtx); glGenBuffers(1, &S.vboCol); glGenBuffers(MAXUNITS, S.vboTc);
+  glGenBuffers(1, &S.vboImm); glGenBuffers(1, &S.ibo); glGenBuffers(1, &S.iboQuads);
+}
+
+/* ---- shader cache ---- */
+typedef struct {
+  uint32_t key; GLuint prog;
+  GLint uMVP, uMV, uTexMat[MAXUNITS], uSampler[MAXUNITS], uEnvColor[MAXUNITS], uAlphaRef, uClip;
+} Prog;
+static Prog _progs[256]; static int _ctProgs;
+
+static int unit_env(const Unit *u) {
+  switch (u->envMode) {
+  case GL1_REPLACE: return ENV_REPLACE;
+  case GL1_DECAL: return ENV_DECAL;
+  case GL1_BLEND_ENV: return ENV_BLEND;
+  case GL1_ADD: return ENV_ADD;
+  case GL1_COMBINE:
+    if (u->combineRGB == GL1_REPLACE) return ENV_COMBINE_REPLACE;
+    if (u->combineRGB == GL1_ADD) return ENV_COMBINE_ADD;
+    return ENV_COMBINE_MOD;
+  default: return ENV_MODULATE;
+  }
+}
+
+static uint32_t state_key(void) {
+  uint32_t k = 0;
+  for (int i = 0; i < MAXUNITS; i++) {
+    uint32_t e = S.u[i].enabled ? (1u | ((uint32_t)unit_env(&S.u[i]) << 1)) : 0; /* 4 bits */
+    k |= e << (i * 4);
+  }
+  uint32_t af = S.alphaTest ? (S.alphaFunc - GL_NEVER + 1) : 0; /* 0..8 → 4 bits */
+  k |= af << 16;
+  k |= (uint32_t)(S.clipPlane ? 1 : 0) << 20;
+  return k;
+}
+
+static GLuint compile(GLenum type, const char *src) {
+  GLuint s = glCreateShader(type);
+  glShaderSource(s, 1, &src, NULL);
+  glCompileShader(s);
+  GLint ok = 0; glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+  if (!ok) { char log[2048]; glGetShaderInfoLog(s, sizeof log, NULL, log); fprintf(stderr, "gl1shim: shader error: %s\n%s\n", log, src); }
+  return s;
+}
+
+static Prog *get_prog(uint32_t key) {
+  for (int i = 0; i < _ctProgs; i++) if (_progs[i].key == key) return &_progs[i];
+  if (_ctProgs == 256) _ctProgs = 0; /* crude eviction; never expected in practice */
+
+  char vs[4096], fs[8192]; int n;
+  n = snprintf(vs, sizeof vs,
+    "#version 300 es\n"
+    "layout(location=0) in vec4 aPos;\nlayout(location=1) in vec4 aCol;\n"
+    "layout(location=2) in vec4 aTex0;\nlayout(location=3) in vec4 aTex1;\n"
+    "layout(location=4) in vec4 aTex2;\nlayout(location=5) in vec4 aTex3;\n"
+    "uniform mat4 uMVP; uniform mat4 uMV; uniform mat4 uTexMat[4]; uniform vec4 uClip;\n"
+    "out vec4 vCol; out vec4 vTex0; out vec4 vTex1; out vec4 vTex2; out vec4 vTex3; out float vClip;\n"
+    "void main(){ gl_Position = uMVP*aPos; gl_PointSize = 1.0; vCol = aCol;\n"
+    " vTex0 = uTexMat[0]*aTex0; vTex1 = uTexMat[1]*aTex1; vTex2 = uTexMat[2]*aTex2; vTex3 = uTexMat[3]*aTex3;\n"
+    " vClip = dot(uMV*aPos, uClip); }\n");
+  (void)n;
+
+  n = snprintf(fs, sizeof fs,
+    "#version 300 es\nprecision highp float;\n"
+    "in vec4 vCol; in vec4 vTex0; in vec4 vTex1; in vec4 vTex2; in vec4 vTex3; in float vClip;\n"
+    "uniform sampler2D uS0; uniform sampler2D uS1; uniform sampler2D uS2; uniform sampler2D uS3;\n"
+    "uniform vec4 uEnv0; uniform vec4 uEnv1; uniform vec4 uEnv2; uniform vec4 uEnv3; uniform float uAlphaRef;\n"
+    "out vec4 oColor;\n"
+    "void main(){ vec4 c = vCol; vec4 t;\n");
+  if (key & (1u << 20)) n += snprintf(fs + n, sizeof fs - n, " if (vClip < 0.0) discard;\n");
+  for (int i = 0; i < MAXUNITS; i++) {
+    uint32_t e = (key >> (i * 4)) & 0xF;
+    if (!(e & 1)) continue;
+    int env = (int)(e >> 1);
+    n += snprintf(fs + n, sizeof fs - n, " t = texture(uS%d, vTex%d.xy / vTex%d.w);\n", i, i, i);
+    switch (env) {
+    case ENV_REPLACE: n += snprintf(fs + n, sizeof fs - n, " c = t;\n"); break;
+    case ENV_DECAL: n += snprintf(fs + n, sizeof fs - n, " c.rgb = mix(c.rgb, t.rgb, t.a);\n"); break;
+    case ENV_BLEND: n += snprintf(fs + n, sizeof fs - n, " c.rgb = mix(c.rgb, uEnv%d.rgb, t.rgb); c.a *= t.a;\n", i); break;
+    case ENV_ADD: n += snprintf(fs + n, sizeof fs - n, " c.rgb = min(c.rgb + t.rgb, 1.0); c.a *= t.a;\n"); break;
+    case ENV_COMBINE_MOD: n += snprintf(fs + n, sizeof fs - n, " c.rgb = min(c.rgb * t.rgb * uEnv%d.w, 1.0); c.a *= t.a;\n", i); break;
+    case ENV_COMBINE_REPLACE: n += snprintf(fs + n, sizeof fs - n, " c.rgb = min(t.rgb * uEnv%d.w, 1.0); c.a *= t.a;\n", i); break;
+    case ENV_COMBINE_ADD: n += snprintf(fs + n, sizeof fs - n, " c.rgb = min((c.rgb + t.rgb) * uEnv%d.w, 1.0); c.a *= t.a;\n", i); break;
+    default: n += snprintf(fs + n, sizeof fs - n, " c *= t;\n"); break;
+    }
+  }
+  uint32_t af = (key >> 16) & 0xF;
+  if (af) {
+    static const char *cmp[] = { "false", "c.a < uAlphaRef", "c.a == uAlphaRef", "c.a <= uAlphaRef",
+                                 "c.a > uAlphaRef", "c.a != uAlphaRef", "c.a >= uAlphaRef", "true" };
+    n += snprintf(fs + n, sizeof fs - n, " if (!(%s)) discard;\n", cmp[af - 1]);
+  }
+  n += snprintf(fs + n, sizeof fs - n, " oColor = c; }\n");
+
+  double tmStart = emscripten_get_now();
+  GLuint p = glCreateProgram();
+  GLuint v = compile(GL_VERTEX_SHADER, vs), f = compile(GL_FRAGMENT_SHADER, fs);
+  glAttachShader(p, v); glAttachShader(p, f);
+  glLinkProgram(p);
+  glDeleteShader(v); glDeleteShader(f);
+  GLint ok = 0; glGetProgramiv(p, GL_LINK_STATUS, &ok);
+  if (!ok) { char log[2048]; glGetProgramInfoLog(p, sizeof log, NULL, log); fprintf(stderr, "gl1shim: link error: %s\n", log); }
+
+  fprintf(stderr, "gl1shim: compiled program %d (key %06x) in %.1f ms\n", _ctProgs, key, emscripten_get_now() - tmStart);
+  Prog *pr = &_progs[_ctProgs++];
+  pr->key = key; pr->prog = p;
+  pr->uMVP = glGetUniformLocation(p, "uMVP");
+  pr->uMV = glGetUniformLocation(p, "uMV");
+  pr->uClip = glGetUniformLocation(p, "uClip");
+  pr->uAlphaRef = glGetUniformLocation(p, "uAlphaRef");
+  char name[32];
+  for (int i = 0; i < MAXUNITS; i++) {
+    snprintf(name, sizeof name, "uTexMat[%d]", i); pr->uTexMat[i] = glGetUniformLocation(p, name);
+    snprintf(name, sizeof name, "uS%d", i); pr->uSampler[i] = glGetUniformLocation(p, name);
+    snprintf(name, sizeof name, "uEnv%d", i); pr->uEnvColor[i] = glGetUniformLocation(p, name);
+  }
+  glUseProgram(p);
+  for (int i = 0; i < MAXUNITS; i++) if (pr->uSampler[i] >= 0) glUniform1i(pr->uSampler[i], i);
+  return pr;
+}
+
+static void apply_program(void) {
+  Prog *p = get_prog(state_key());
+  glUseProgram(p->prog);
+  Mat4 mvp; mat_mul(&mvp, &S.projection, &S.modelview);
+  glUniformMatrix4fv(p->uMVP, 1, GL_FALSE, mvp.m);
+  if (S.clipPlane) { glUniformMatrix4fv(p->uMV, 1, GL_FALSE, S.modelview.m); glUniform4fv(p->uClip, 1, S.clipEye); }
+  if (S.alphaTest) glUniform1f(p->uAlphaRef, S.alphaRef);
+  for (int i = 0; i < MAXUNITS; i++) {
+    if (!S.u[i].enabled) continue;
+    glUniformMatrix4fv(p->uTexMat[i], 1, GL_FALSE, S.u[i].texMat.m);
+    float env[4] = { S.u[i].envColor[0], S.u[i].envColor[1], S.u[i].envColor[2], S.u[i].rgbScale };
+    glUniform4fv(p->uEnvColor[i], 1, env);
+  }
+}
+
+/* ---- matrices ---- */
+static Mat4 *cur_mat(void) {
+  if (S.matrixMode == GL1_PROJECTION) return &S.projection;
+  if (S.matrixMode == GL1_TEXTURE) return &S.u[S.activeUnit].texMat;
+  return &S.modelview;
+}
+static void shim_glMatrixMode(GLenum m) { shim_init(); S.matrixMode = m; }
+static void shim_glLoadIdentity(void) { shim_init(); mat_identity(cur_mat()); }
+static void shim_glLoadMatrixf(const GLfloat *m) { shim_init(); memcpy(cur_mat()->m, m, 64); }
+static void shim_glMultMatrixf(const GLfloat *m) { shim_init(); Mat4 b; memcpy(b.m, m, 64); mat_mul(cur_mat(), cur_mat(), &b); }
+static void shim_glTranslatef(GLfloat x, GLfloat y, GLfloat z) {
+  shim_init(); Mat4 t; mat_identity(&t); t.m[12] = x; t.m[13] = y; t.m[14] = z; mat_mul(cur_mat(), cur_mat(), &t);
+}
+static void shim_glScalef(GLfloat x, GLfloat y, GLfloat z) {
+  shim_init(); Mat4 t; mat_identity(&t); t.m[0] = x; t.m[5] = y; t.m[10] = z; mat_mul(cur_mat(), cur_mat(), &t);
+}
+static void shim_glOrtho(GLdouble l, GLdouble r, GLdouble b, GLdouble t, GLdouble n, GLdouble f) {
+  shim_init(); Mat4 o; mat_identity(&o);
+  o.m[0] = (float)(2 / (r - l)); o.m[5] = (float)(2 / (t - b)); o.m[10] = (float)(-2 / (f - n));
+  o.m[12] = (float)(-(r + l) / (r - l)); o.m[13] = (float)(-(t + b) / (t - b)); o.m[14] = (float)(-(f + n) / (f - n));
+  mat_mul(cur_mat(), cur_mat(), &o);
+}
+static void shim_glFrustum(GLdouble l, GLdouble r, GLdouble b, GLdouble t, GLdouble n, GLdouble f) {
+  shim_init(); Mat4 o; memset(&o, 0, sizeof o);
+  o.m[0] = (float)(2 * n / (r - l)); o.m[5] = (float)(2 * n / (t - b));
+  o.m[8] = (float)((r + l) / (r - l)); o.m[9] = (float)((t + b) / (t - b));
+  o.m[10] = (float)(-(f + n) / (f - n)); o.m[11] = -1; o.m[14] = (float)(-2 * f * n / (f - n));
+  mat_mul(cur_mat(), cur_mat(), &o);
+}
+
+/* ---- enables ---- */
+static int is_gles_cap(GLenum c) {
+  switch (c) {
+  case GL_BLEND: case GL_CULL_FACE: case GL_DEPTH_TEST: case GL_DITHER: case GL_POLYGON_OFFSET_FILL:
+  case GL_SCISSOR_TEST: case GL_STENCIL_TEST: case GL_SAMPLE_ALPHA_TO_COVERAGE: case GL_SAMPLE_COVERAGE:
+    return 1;
+  }
+  return 0;
+}
+static void set_cap(GLenum c, int on) {
+  shim_init();
+  switch (c) {
+  case GL1_TEXTURE_2D_CAP: S.u[S.activeUnit].enabled = on; return;
+  case GL1_ALPHA_TEST: S.alphaTest = on; return;
+  case GL1_CLIP_PLANE0: S.clipPlane = on; return;
+  case GL_BLEND: S.capBlend = on; break;
+  case GL_CULL_FACE: S.capCull = on; break;
+  case GL_DEPTH_TEST: S.capDepth = on; break;
+  case GL_SCISSOR_TEST: S.capScissor = on; break;
+  case GL_DITHER: S.capDither = on; break;
+  case GL_POLYGON_OFFSET_FILL: S.capPolyOffset = on; break;
+  }
+  if (is_gles_cap(c)) { if (on) glEnable(c); else glDisable(c); }
+  /* everything else (POLYGON_OFFSET_POINT/LINE, PN_TRIANGLES, MULTISAMPLE_3DFX, ...) is ignored */
+}
+static void shim_glEnable(GLenum c) { set_cap(c, 1); }
+static void shim_glDisable(GLenum c) { set_cap(c, 0); }
+static GLboolean shim_glIsEnabled(GLenum c) {
+  shim_init();
+  switch (c) {
+  case GL1_TEXTURE_2D_CAP: return S.u[S.activeUnit].enabled;
+  case GL1_ALPHA_TEST: return S.alphaTest;
+  case GL1_CLIP_PLANE0: return S.clipPlane;
+  case GL1_VERTEX_ARRAY: return S.vtx.enabled;
+  case GL1_COLOR_ARRAY: return S.col.enabled;
+  case GL1_NORMAL_ARRAY: return S.nor.enabled;
+  case GL1_TEXTURE_COORD_ARRAY: return S.u[S.clientUnit].tc.enabled;
+  }
+  return is_gles_cap(c) ? glIsEnabled(c) : GL_FALSE;
+}
+static void shim_glAlphaFunc(GLenum f, GLclampf ref) { shim_init(); S.alphaFunc = f; S.alphaRef = ref; }
+static void shim_glClipPlane(GLenum p, const GLdouble *eq) {
+  shim_init();
+  if (p != GL1_CLIP_PLANE0) return;
+  /* plane is given in object space of the current modelview; store in eye space: eq * inverse(MV) */
+  Mat4 inv; if (!mat_invert(&inv, &S.modelview)) mat_identity(&inv);
+  for (int c = 0; c < 4; c++)
+    S.clipEye[c] = (float)(eq[0] * inv.m[c * 4 + 0] + eq[1] * inv.m[c * 4 + 1] + eq[2] * inv.m[c * 4 + 2] + eq[3] * inv.m[c * 4 + 3]);
+}
+
+/* ---- texture units & env ---- */
+static void shim_glActiveTexture(GLenum t) { shim_init(); S.activeUnit = (int)(t - GL_TEXTURE0) & (MAXUNITS - 1); glActiveTexture(t); }
+static void shim_glClientActiveTexture(GLenum t) { shim_init(); S.clientUnit = (int)(t - GL_TEXTURE0) & (MAXUNITS - 1); }
+static void shim_glTexEnvi(GLenum target, GLenum pname, GLint v) {
+  shim_init();
+  if (target != GL1_TEXTURE_ENV) return; /* e.g. TEXTURE_FILTER_CONTROL lod bias: ignored */
+  Unit *u = &S.u[S.activeUnit];
+  if (pname == GL1_TEXTURE_ENV_MODE) u->envMode = (GLenum)v;
+  else if (pname == GL1_COMBINE_RGB) u->combineRGB = (GLenum)v;
+  else if (pname == GL1_RGB_SCALE) u->rgbScale = (float)v;
+}
+static void shim_glTexEnvf(GLenum target, GLenum pname, GLfloat v) {
+  if (pname == GL1_RGB_SCALE) { shim_init(); if (target == GL1_TEXTURE_ENV) S.u[S.activeUnit].rgbScale = v; return; }
+  shim_glTexEnvi(target, pname, (GLint)v);
+}
+static void shim_glTexEnvfv(GLenum target, GLenum pname, const GLfloat *v) {
+  shim_init();
+  if (target == GL1_TEXTURE_ENV && pname == GL1_TEXTURE_ENV_COLOR) memcpy(S.u[S.activeUnit].envColor, v, 16);
+  else shim_glTexEnvf(target, pname, v[0]);
+}
+static void shim_glGetTexEnviv(GLenum target, GLenum pname, GLint *out) {
+  shim_init();
+  Unit *u = &S.u[S.activeUnit];
+  if (pname == GL1_TEXTURE_ENV_MODE) *out = (GLint)u->envMode;
+  else if (pname == GL1_COMBINE_RGB) *out = (GLint)u->combineRGB;
+  else if (pname == GL1_RGB_SCALE) *out = (GLint)u->rgbScale;
+  else *out = 0;
+}
+
+/* ---- textures ---- */
+static void shim_glBindTexture(GLenum target, GLuint t) { shim_init(); S.boundTex[S.activeUnit] = t; glBindTexture(target, t); }
+static void shim_glTexImage2D(GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border,
+                              GLenum fmt, GLenum type, const void *data) {
+  shim_init();
+  if (level == 0) { TexInfo *ti = tex_info(S.boundTex[S.activeUnit], 1); ti->ifmt = ifmt; ti->w = w; ti->h = h; }
+  /* the engine always supplies RGBA8 pixels; GL1 internal formats (RGB5_A1, LUMINANCE8, ...) → RGBA8 */
+  (void)border;
+  glTexImage2D(target, level, GL_RGBA8, w, h, 0, fmt == GL_RGBA ? GL_RGBA : fmt, type, data);
+}
+static void shim_glTexParameteri(GLenum target, GLenum pname, GLint v) {
+  if ((pname == GL_TEXTURE_WRAP_S || pname == GL_TEXTURE_WRAP_T) && v == GL1_CLAMP) v = GL_CLAMP_TO_EDGE;
+  glTexParameteri(target, pname, v);
+}
+static void shim_glTexParameterf(GLenum target, GLenum pname, GLfloat v) {
+  if (pname == GL_TEXTURE_WRAP_S || pname == GL_TEXTURE_WRAP_T) { shim_glTexParameteri(target, pname, (GLint)v); return; }
+  glTexParameterf(target, pname, v);
+}
+static void shim_glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname, GLint *out) {
+  shim_init(); (void)target;
+  TexInfo *ti = tex_info(S.boundTex[S.activeUnit], 0);
+  int w = ti ? ti->w >> level : 0, h = ti ? ti->h >> level : 0;
+  switch (pname) {
+  case GL1_TEXTURE_WIDTH: *out = w; break;
+  case GL1_TEXTURE_HEIGHT: *out = h; break;
+  case GL1_TEXTURE_INTERNAL_FORMAT: *out = ti ? ti->ifmt : GL_RGBA8; break;
+  case GL1_TEXTURE_COMPRESSED: *out = 0; break;
+  case GL1_TEXTURE_COMPRESSED_IMAGE_SIZE: *out = w * h * 4; break;
+  case GL1_TEXTURE_RED_SIZE: case GL1_TEXTURE_GREEN_SIZE: case GL1_TEXTURE_BLUE_SIZE: case GL1_TEXTURE_ALPHA_SIZE: *out = 8; break;
+  default: *out = 0;
+  }
+}
+static void shim_glDeleteTextures(GLsizei n, const GLuint *t) {
+  for (int i = 0; i < n; i++) { TexInfo *ti = tex_info(t[i], 0); if (ti) *ti = _texInfo[--_ctTexInfo]; }
+  glDeleteTextures(n, t);
+}
+
+/* ---- current vertex attributes ---- */
+static void shim_glColor4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a) { shim_init(); S.curColor[0] = r; S.curColor[1] = g; S.curColor[2] = b; S.curColor[3] = a; }
+static void shim_glColor3f(GLfloat r, GLfloat g, GLfloat b) { shim_glColor4f(r, g, b, 1.0f); }
+static void shim_glColor4ub(GLubyte r, GLubyte g, GLubyte b, GLubyte a) { shim_glColor4f(r / 255.0f, g / 255.0f, b / 255.0f, a / 255.0f); }
+static void shim_glColor4ubv(const GLubyte *v) { shim_glColor4ub(v[0], v[1], v[2], v[3]); }
+static void shim_glTexCoord4f(GLfloat s, GLfloat t, GLfloat r, GLfloat q) {
+  shim_init(); float *c = S.u[0].curTex; c[0] = s; c[1] = t; c[2] = r; c[3] = q;
+}
+static void shim_glTexCoord2f(GLfloat s, GLfloat t) { shim_glTexCoord4f(s, t, 0, 1); }
+
+/* immediate-mode vertex layout: pos4, col4, tex4 x MAXUNITS */
+#define IMM_FLOATS (4 + 4 + 4 * MAXUNITS)
+static void imm_push(float x, float y, float z, float w) {
+  if (!S.inBegin) return;
+  if (S.immCount == S.immCap) { S.immCap = S.immCap ? S.immCap * 2 : 1024; S.imm = realloc(S.imm, S.immCap * IMM_FLOATS * sizeof(float)); }
+  float *v = S.imm + S.immCount++ * IMM_FLOATS;
+  v[0] = x; v[1] = y; v[2] = z; v[3] = w;
+  memcpy(v + 4, S.curColor, 16);
+  for (int i = 0; i < MAXUNITS; i++) memcpy(v + 8 + 4 * i, S.u[i].curTex, 16);
+}
+static void shim_glVertex4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w) { imm_push(x, y, z, w); }
+static void shim_glVertex3f(GLfloat x, GLfloat y, GLfloat z) { imm_push(x, y, z, 1); }
+static void shim_glVertex2f(GLfloat x, GLfloat y) { imm_push(x, y, 0, 1); }
+
+/* fetch one component group from a client array into floats (GL semantics for missing comps) */
+static void fetch(const ClientArray *a, int i, float out[4], float defW) {
+  out[0] = out[1] = out[2] = 0; out[3] = defW;
+  int ts = a->type == GL_FLOAT ? 4 : a->type == GL_UNSIGNED_BYTE ? 1 : a->type == GL_SHORT ? 2 : 4;
+  int stride = a->stride ? a->stride : a->size * ts;
+  const uint8_t *p = (const uint8_t *)a->ptr + (size_t)i * stride;
+  for (int c = 0; c < a->size && c < 4; c++) {
+    if (a->type == GL_FLOAT) out[c] = ((const float *)p)[c];
+    else if (a->type == GL_UNSIGNED_BYTE) out[c] = p[c] / 255.0f;
+    else if (a->type == GL_SHORT) out[c] = ((const int16_t *)p)[c];
+  }
+}
+static void shim_glArrayElement(GLint i) {
+  shim_init();
+  if (S.col.enabled) { float c[4]; fetch(&S.col, i, c, 1); memcpy(S.curColor, c, 16); }
+  for (int u = 0; u < MAXUNITS; u++) if (S.u[u].tc.enabled) fetch(&S.u[u].tc, i, S.u[u].curTex, 1);
+  if (S.vtx.enabled) { float v[4]; fetch(&S.vtx, i, v, 1); imm_push(v[0], v[1], v[2], v[3]); }
+}
+
+/* ---- client arrays ---- */
+static ClientArray *client_array(GLenum cap) {
+  switch (cap) {
+  case GL1_VERTEX_ARRAY: return &S.vtx;
+  case GL1_COLOR_ARRAY: return &S.col;
+  case GL1_NORMAL_ARRAY: return &S.nor;
+  case GL1_TEXTURE_COORD_ARRAY: return &S.u[S.clientUnit].tc;
+  }
+  return NULL;
+}
+static void shim_glEnableClientState(GLenum cap) { shim_init(); ClientArray *a = client_array(cap); if (a) a->enabled = 1; }
+static void shim_glDisableClientState(GLenum cap) { shim_init(); ClientArray *a = client_array(cap); if (a) a->enabled = 0; }
+static void set_array(ClientArray *a, GLint size, GLenum type, GLsizei stride, const void *ptr) { a->size = size; a->type = type; a->stride = stride; a->ptr = ptr; }
+static void shim_glVertexPointer(GLint size, GLenum type, GLsizei stride, const void *p) { shim_init(); set_array(&S.vtx, size, type, stride, p); }
+static void shim_glColorPointer(GLint size, GLenum type, GLsizei stride, const void *p) { shim_init(); set_array(&S.col, size, type, stride, p); }
+static void shim_glNormalPointer(GLenum type, GLsizei stride, const void *p) { shim_init(); set_array(&S.nor, 3, type, stride, p); }
+static void shim_glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const void *p) { shim_init(); set_array(&S.u[S.clientUnit].tc, size, type, stride, p); }
+static void shim_glLockArraysEXT(GLint first, GLsizei count) { shim_init(); S.lockedCount = first + count; }
+static void shim_glUnlockArraysEXT(void) { shim_init(); S.lockedCount = 0; }
+
+static void upload_array(GLuint vbo, GLuint loc, const ClientArray *a, int ctVerts, int normalized) {
+  int ts = a->type == GL_FLOAT ? 4 : a->type == GL_UNSIGNED_BYTE ? 1 : a->type == GL_SHORT ? 2 : 4;
+  int elem = a->size * ts;
+  int stride = a->stride ? a->stride : elem;
+  glBindBuffer(GL_ARRAY_BUFFER, vbo);
+  glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(ctVerts - 1) * stride + elem, a->ptr, GL_STREAM_DRAW);
+  glEnableVertexAttribArray(loc);
+  glVertexAttribPointer(loc, a->size, a->type, normalized ? GL_TRUE : GL_FALSE, stride, 0);
+}
+
+/* bind client arrays covering vertices [0, ctVerts) */
+static void bind_client_arrays(int ctVerts) {
+  glBindVertexArray(S.vao);
+  if (S.vtx.enabled) upload_array(S.vboVtx, 0, &S.vtx, ctVerts, 0);
+  else { glDisableVertexAttribArray(0); glVertexAttrib4f(0, 0, 0, 0, 1); }
+  if (S.col.enabled) upload_array(S.vboCol, 1, &S.col, ctVerts, S.col.type == GL_UNSIGNED_BYTE);
+  else { glDisableVertexAttribArray(1); glVertexAttrib4fv(1, S.curColor); }
+  for (int i = 0; i < MAXUNITS; i++) {
+    if (S.u[i].enabled && S.u[i].tc.enabled) upload_array(S.vboTc[i], 2 + i, &S.u[i].tc, ctVerts, 0);
+    else { glDisableVertexAttribArray(2 + i); glVertexAttrib4fv(2 + i, S.u[i].curTex); }
+  }
+}
+
+/* index buffer that turns quads (0,1,2,3) into triangles (0,1,2, 0,2,3) */
+static void bind_quad_indices(int ctQuads) {
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, S.iboQuads);
+  if (ctQuads > S.quadsCap) {
+    int cap = 1024; while (cap < ctQuads) cap *= 2;
+    uint32_t *idx = malloc((size_t)cap * 6 * 4);
+    for (int q = 0; q < cap; q++) {
+      uint32_t b = q * 4; uint32_t *o = idx + q * 6;
+      o[0] = b; o[1] = b + 1; o[2] = b + 2; o[3] = b; o[4] = b + 2; o[5] = b + 3;
+    }
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)cap * 6 * 4, idx, GL_STATIC_DRAW);
+    free(idx);
+    S.quadsCap = cap;
+  }
+}
+
+static void shim_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
+  shim_init();
+  if (count <= 0) return;
+  apply_program();
+  bind_client_arrays(first + count);
+  if (mode == GL1_QUADS) {
+    bind_quad_indices((first + count) / 4);
+    glDrawElements(GL_TRIANGLES, count / 4 * 6, GL_UNSIGNED_INT, (const void *)(uintptr_t)(first / 4 * 6 * 4));
+  } else {
+    glDrawArrays(mode == GL1_POLYGON ? GL_TRIANGLE_FAN : mode, first, count);
+  }
+}
+
+static void shim_glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices) {
+  shim_init();
+  if (count <= 0) return;
+  int maxIdx = 0;
+  if (S.lockedCount > 0) maxIdx = S.lockedCount - 1;
+  else if (type == GL_UNSIGNED_INT) { const uint32_t *ix = indices; for (int i = 0; i < count; i++) if ((int)ix[i] > maxIdx) maxIdx = ix[i]; }
+  else if (type == GL_UNSIGNED_SHORT) { const uint16_t *ix = indices; for (int i = 0; i < count; i++) if (ix[i] > maxIdx) maxIdx = ix[i]; }
+  else { const uint8_t *ix = indices; for (int i = 0; i < count; i++) if (ix[i] > maxIdx) maxIdx = ix[i]; }
+  apply_program();
+  bind_client_arrays(maxIdx + 1);
+  int isz = type == GL_UNSIGNED_INT ? 4 : type == GL_UNSIGNED_SHORT ? 2 : 1;
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, S.ibo);
+  glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)count * isz, indices, GL_STREAM_DRAW);
+  glDrawElements(mode, count, type, 0);
+}
+
+/* ---- immediate mode ---- */
+static void shim_glBegin(GLenum mode) { shim_init(); S.inBegin = 1; S.beginMode = mode; S.immCount = 0; }
+static void shim_glEnd(void) {
+  shim_init();
+  S.inBegin = 0;
+  int n = S.immCount;
+  if (n == 0) return;
+  apply_program();
+  glBindVertexArray(S.vao);
+  glBindBuffer(GL_ARRAY_BUFFER, S.vboImm);
+  glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)n * IMM_FLOATS * 4, S.imm, GL_STREAM_DRAW);
+  const int st = IMM_FLOATS * 4;
+  glEnableVertexAttribArray(0); glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, st, (void *)0);
+  glEnableVertexAttribArray(1); glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, st, (void *)16);
+  for (int i = 0; i < MAXUNITS; i++) { glEnableVertexAttribArray(2 + i); glVertexAttribPointer(2 + i, 4, GL_FLOAT, GL_FALSE, st, (void *)(uintptr_t)(32 + 16 * i)); }
+  switch (S.beginMode) {
+  case GL1_QUADS: bind_quad_indices(n / 4); glDrawElements(GL_TRIANGLES, n / 4 * 6, GL_UNSIGNED_INT, 0); break;
+  case GL1_QUAD_STRIP: glDrawArrays(GL_TRIANGLE_STRIP, 0, n); break;
+  case GL1_POLYGON: glDrawArrays(GL_TRIANGLE_FAN, 0, n); break;
+  default: glDrawArrays(S.beginMode, 0, n); break;
+  }
+}
+
+/* ---- misc GL1 calls ---- */
+static void shim_glClearDepth(GLdouble d) { glClearDepthf((float)d); }
+static void shim_glDepthRange(GLdouble n, GLdouble f) { glDepthRangef((float)n, (float)f); }
+static void shim_glShadeModel(GLenum m) { (void)m; }
+static void shim_glDrawBuffer(GLenum m) { (void)m; }
+static void shim_glPolygonMode(GLenum f, GLenum m) { (void)f; (void)m; } /* wireframe: unsupported */
+static void shim_glPointSize(GLfloat s) { (void)s; }
+static void shim_glHint(GLenum t, GLenum m) { if (t == GL_GENERATE_MIPMAP_HINT || t == GL_FRAGMENT_SHADER_DERIVATIVE_HINT) glHint(t, m); }
+static void shim_nop(void) {}
+
+static char _strExtensions[512];
+static const GLubyte *shim_glGetString(GLenum name) {
+  if (name == GL_EXTENSIONS) {
+    if (!_strExtensions[0]) {
+      strcpy(_strExtensions, "GL_ARB_multitexture GL_EXT_texture_env_combine GL_ARB_texture_env_combine "
+                             "GL_EXT_compiled_vertex_array GL_EXT_texture_edge_clamp");
+      const char *real = (const char *)glGetString(GL_EXTENSIONS);
+      if (real && strstr(real, "texture_filter_anisotropic")) strcat(_strExtensions, " GL_EXT_texture_filter_anisotropic");
+    }
+    return (const GLubyte *)_strExtensions;
+  }
+  if (name == GL_VERSION) return (const GLubyte *)"1.3 (SE1 gl1shim on WebGL2)";
+  return glGetString(name);
+}
+static void shim_glGetIntegerv(GLenum p, GLint *out) {
+  if (p == GL1_MAX_TEXTURE_UNITS) { *out = MAXUNITS; return; }
+  glGetIntegerv(p, out);
+}
+
+/* ---- proc address table ---- */
+typedef struct { const char *name; void *fn; } Entry;
+static const Entry _entries[] = {
+#define E(n) { #n, (void *)shim_##n }
+  E(glMatrixMode), E(glLoadIdentity), E(glLoadMatrixf), E(glMultMatrixf), E(glTranslatef), E(glScalef),
+  E(glOrtho), E(glFrustum), E(glEnable), E(glDisable), E(glIsEnabled), E(glAlphaFunc), E(glClipPlane),
+  E(glTexEnvi), E(glTexEnvf), E(glTexEnvfv), E(glGetTexEnviv), E(glBindTexture), E(glTexImage2D),
+  E(glTexParameteri), E(glTexParameterf), E(glGetTexLevelParameteriv), E(glDeleteTextures),
+  E(glColor4f), E(glColor3f), E(glColor4ub), E(glColor4ubv), E(glTexCoord2f), E(glTexCoord4f),
+  E(glVertex2f), E(glVertex3f), E(glVertex4f), E(glArrayElement), E(glBegin), E(glEnd),
+  E(glEnableClientState), E(glDisableClientState), E(glVertexPointer), E(glColorPointer),
+  E(glNormalPointer), E(glTexCoordPointer), E(glLockArraysEXT), E(glUnlockArraysEXT),
+  E(glDrawArrays), E(glDrawElements), E(glClearDepth), E(glDepthRange), E(glShadeModel),
+  E(glDrawBuffer), E(glPolygonMode), E(glPointSize), E(glHint), E(glGetString), E(glGetIntegerv),
+#undef E
+  { "glActiveTextureARB", (void *)shim_glActiveTexture },
+  { "glActiveTexture", (void *)shim_glActiveTexture },
+  { "glClientActiveTextureARB", (void *)shim_glClientActiveTexture },
+  { "glClientActiveTexture", (void *)shim_glClientActiveTexture },
+};
+
+void *SE1_GL1Shim_GetProcAddress(const char *name) {
+  for (unsigned i = 0; i < sizeof _entries / sizeof _entries[0]; i++)
+    if (strcmp(_entries[i].name, name) == 0) return _entries[i].fn;
+  void *p = SDL_GL_GetProcAddress(name);
+  /* Never hand the engine NULL for a GL1 entry it might call unconditionally (e.g. NV/ATI/3DFX
+   * extension functions are guarded by extension checks, but some GL1 calls are not). */
+  if (p == NULL && strncmp(name, "wgl", 3) != 0) {
+    static int warned = 0;
+    if (warned++ < 64) fprintf(stderr, "gl1shim: no implementation for %s (using no-op)\n", name);
+    return (void *)shim_nop;
+  }
+  return p;
+}

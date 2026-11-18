@@ -1,0 +1,97 @@
+# GL usage (TFE): call-site counts of pgl* functions
+
+Status 2026-11-18: engine boots with demo data, sound + GL context init OK, crashes in CRaster::Lock() on a NULL fixed-function pointer.
+
+```
+  25 glIsEnabled
+  19 glGetIntegerv
+  19 glDisable
+  16 glEnable
+  11 glVertex2f
+  10 glTexCoord2f
+  10 glMatrixMode
+   9 glLoadIdentity
+   9 glDisableClientState
+   8 glEnd
+   8 glBegin
+   7 glPNTrianglesiATI
+   7 glClientActiveTextureARB
+   7 glActiveTextureARB
+   6 glUnlockArraysEXT
+   6 glTBufferMask3DFX
+   6 glLockArraysEXT
+   6 glGetTexLevelParameteriv
+   5 glVertex3f
+   5 glTexParameteri
+   5 glTexImage2D
+   5 glTexEnvi
+   5 glPNTrianglesfATI
+   5 glGetString
+   5 glGenTextures
+   5 glDepthMask
+   5 glArrayElement
+   4 glTexSubImage2D
+   4 glIsOcclusionQueryNV
+   4 glGetOcclusionQueryuivNV
+   4 glGetOcclusionQueryivNV
+   4 glGenOcclusionQueriesNV
+   4 glFrontFace
+   4 glEndOcclusionQueryNV
+   4 glEnableClientState
+   4 glDeleteOcclusionQueriesNV
+   4 glClear
+   4 glBindTexture
+   4 glBeginOcclusionQueryNV
+   4 glActiveTexture
+   3 glTexEnvf
+   3 glTexCoordPointer
+   3 glScissor
+   3 glReadPixels
+   3 glPolygonMode
+   3 glLoadMatrixf
+   3 glBlendFunc
+   2 glPolygonOffset
+   2 glPointSize
+   2 glPixelStorei
+   2 glHint
+   2 glGetFloatv
+   2 glGetError
+   2 glDepthRange
+   2 glDepthFunc
+   2 glDeleteTextures
+   2 glCullFace
+   2 glColorPointer
+   2 glClearStencil
+   2 glClearDepth
+   2 glClearColor
+   1 glViewport
+   1 glVertexPointer
+   1 glVertexArrayRangeNV
+   1 glTranslatef
+   1 glTestFenceNV
+   1 glShadeModel
+   1 glSetFenceNV
+   1 glScalef
+   1 glOrtho
+   1 glNormalPointer
+   1 glMultMatrixf
+   1 glIsFenceNV
+   1 glGetTexEnviv
+   1 glGetFenceivNV
+   1 glGenFencesNV
+   1 glFrustum
+   1 glFlushVertexArrayRangeNV
+   1 glFinishFenceNV
+   1 glFinish
+   1 glDrawElements
+   1 glDrawBuffer
+   1 glDrawArrays
+   1 glDeleteFencesNV
+   1 glColorMask
+   1 glColor4ubv
+   1 glColor4f
+   1 glClipPlane
+   1 glAlphaFunc
+```
+
+Plan: port/common/gl1shim.c implements the non-WebGL2 entries on top of GLES3; vendor extensions (NV fence/occlusion/VAR, ATI PN, 3DFX, EXT_compiled_vertex_array) are stubbed and their extension strings hidden so the engine skips them.

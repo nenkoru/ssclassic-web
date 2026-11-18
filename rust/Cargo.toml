@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["se1-mod", "se1-server"]
+
+[workspace.package]
+edition = "2021"
+license = "GPL-2.0-only"   # same as the Serious Engine source it links with
+
+[profile.release]
+# Rust panics must never unwind through engine C++ frames (the engine uses wasm exceptions).
+panic = "abort"
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[profile.dev]
+panic = "abort"

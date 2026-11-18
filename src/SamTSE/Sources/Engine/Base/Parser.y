@@ -454,7 +454,13 @@ statement
   // if it is not constant
   } else {
     // if it can be changed
-    if ($1.lv_pssSymbol->ss_pPreFunc==NULL || $1.lv_pssSymbol->ss_pPreFunc($1.lv_pvAddress)) {
+    #ifdef __EMSCRIPTEN__
+    void *pvPreArg = $1.lv_pvAddress;
+    BOOL bSE1CanChange = $1.lv_pssSymbol->ss_pPreFunc==NULL || (BOOL)SE1_ShellCall((void*)$1.lv_pssSymbol->ss_pPreFunc, 0, 1, NULL, &pvPreArg);
+#else
+    BOOL bSE1CanChange = $1.lv_pssSymbol->ss_pPreFunc==NULL || $1.lv_pssSymbol->ss_pPreFunc($1.lv_pvAddress);
+#endif
+    if (bSE1CanChange) {
       // if floats
       if ($1.lv_sttType == STT_FLOAT && $3.sttType==STT_FLOAT) {
         // assign value
@@ -480,7 +486,12 @@ statement
 
       // call post-change function
       if ($1.lv_pssSymbol->ss_pPostFunc!=NULL) {
+#ifdef __EMSCRIPTEN__
+        void *pvPostArg = $1.lv_pvAddress;
+        SE1_ShellCall((void*)$1.lv_pssSymbol->ss_pPostFunc, 0, 1, NULL, &pvPostArg);
+#else
         $1.lv_pssSymbol->ss_pPostFunc($1.lv_pvAddress);
+#endif
       }
     }
   }
@@ -1036,31 +1047,64 @@ expression
 #endif
   
         if (callfunc) {
+#ifdef __EMSCRIPTEN__
+          int iFloatMask = 0, ctArgs = 0;
+          for (INDEX istArg = stFunc.st_istLastArgument; istArg != -1; istArg = _shell_ast[istArg].st_istPrevInArguments) {
+            enum ShellTypeType stt = _shell_ast[istArg].st_sttType;
+            if (stt == STT_VOID) continue;
+            if (stt == STT_FLOAT) iFloatMask |= 1 << ctArgs;
+            ctArgs++;
+          }
+          #undef CALLPARAMS
+          #define SE1CALL(sret) SE1_ShellCall($1->ss_pvValue, iFloatMask, ctArgs, sret, ARG)
+#endif
           // if void
           if (stResult.st_sttType==STT_VOID) {
             // just call the function
             $$.sttType = STT_VOID;
             PUSHPARAMS;
+#ifdef __EMSCRIPTEN__
+            SE1CALL(NULL);
+#else
             ((void (*)(FUNCSIG))$1->ss_pvValue)(CALLPARAMS);
+#endif
           // if index
           } else if (stResult.st_sttType==STT_INDEX) {
             // call the function and return result
             $$.sttType = STT_INDEX;
             PUSHPARAMS;
+#ifdef __EMSCRIPTEN__
+            $$.iIndex = (INDEX)SE1CALL(NULL);
+#else
             $$.iIndex = ((INDEX (*)(FUNCSIG))$1->ss_pvValue)(CALLPARAMS);
+#endif
           // if float
           } else if (stResult.st_sttType==STT_FLOAT) {
             // call the function and return result
             $$.sttType = STT_FLOAT;
             PUSHPARAMS;
+#ifdef __EMSCRIPTEN__
+            $$.fFloat = (FLOAT)SE1CALL(NULL);
+#else
             $$.fFloat = ((FLOAT (*)(FUNCSIG))$1->ss_pvValue)(CALLPARAMS);
+#endif
           // if string
           } else if (stResult.st_sttType==STT_STRING) {
             // call the function and return result
             $$.sttType = STT_STRING;
             CTString &strNew = _shell_astrTempStrings.Push();
             PUSHPARAMS;
+#ifdef __EMSCRIPTEN__
+            { // CTString is returned through a hidden struct-return pointer
+              alignas(CTString) char aubRet[sizeof(CTString)];
+              SE1CALL(aubRet);
+              CTString &strRet = *(CTString*)aubRet;
+              strNew = strRet;
+              strRet.~CTString();
+            }
+#else
             strNew = ((CTString (*)(FUNCSIG))$1->ss_pvValue)(CALLPARAMS);
+#endif
             $$.strString = (const char*)strNew;
           } else {
             ASSERT(FALSE);

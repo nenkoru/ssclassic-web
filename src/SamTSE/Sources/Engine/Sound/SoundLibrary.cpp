@@ -196,6 +196,33 @@ static void sdl_audio_callback(void *userdata, Uint8 *stream, int len)
   } // if
 } // sdl_audio_callback
 
+#ifdef __EMSCRIPTEN__
+// Web: no SDL audio device; drain the engine's ring buffer at real-time pace into an
+// AudioWorklet (port/common/WebAudio.cpp) so main-thread hitches don't starve playback.
+extern "C" {
+void SE1_WebAudio_Init(int iRate, int ctChannels);
+int  SE1_WebAudio_WantedFrames(void);
+void SE1_WebAudio_Push(const short *pswPCM, int ctFrames);
+}
+static int sdl_frame_bytes = 4;
+static void PumpWebAudio(void)
+{
+  if (sdl_backbuffer == NULL) return;
+  static Uint8 aubChunk[16384];
+  int iWant = SE1_WebAudio_WantedFrames() * sdl_frame_bytes;
+  while (iWant > 0 && sdl_backbuffer_remain > 0) {
+    int n = iWant;
+    if (n > (int)sizeof(aubChunk)) n = sizeof(aubChunk);
+    if (n > sdl_backbuffer_remain) n = sdl_backbuffer_remain;
+    n -= n % sdl_frame_bytes;
+    if (n <= 0) break;
+    sdl_audio_callback(NULL, aubChunk, n);
+    SE1_WebAudio_Push((const short *)aubChunk, n / sdl_frame_bytes);
+    iWant -= n;
+  }
+}
+#endif
+
 
 // initialize the SDL audio subsystem.
 
@@ -253,11 +280,24 @@ static BOOL StartUp_SDLaudio( CSoundLibrary &sl, BOOL bReport=TRUE)
   // !!! FIXME rcg12162001  if the Serious Engine can handle it if we changed
   // !!! FIXME rcg12162001  sl.sl_SwfeFormat to match what the audio hardware
   // !!! FIXME rcg12162001  can handle. I'll have to check later.
+#ifdef __EMSCRIPTEN__
+  // see PumpWebAudio(): output goes to an AudioWorklet, not an SDL device
+  if (desired.format != AUDIO_S16LSB) {
+    CPrintF(TRANSV("Web audio needs 16-bit output (got %d bits)\n"), bps);
+    return FALSE;
+  }
+  obtained = desired;
+  obtained.silence = 0;
+  obtained.size = desired.samples * desired.channels * 2;
+  sdl_frame_bytes = desired.channels * 2;
+  SE1_WebAudio_Init(desired.freq, desired.channels);
+#else
   sdl_audio_device = SDL_OpenAudioDevice(snd_strDeviceName.IsEmpty() ? NULL : (const char *) snd_strDeviceName, 0, &desired, &obtained, 0);
   if (!sdl_audio_device) {
     CPrintF( TRANSV("SDL_OpenAudioDevice() error: %s\n"), SDL_GetError());
     return FALSE;
   }
+#endif
 
   sdl_silence = obtained.silence;
   sdl_backbuffer_allocation = (obtained.size * 4);
@@ -443,6 +483,10 @@ static void SndPostFunc(void *pArgs)
   // clamp variables
   snd_tmMixAhead = Clamp( snd_tmMixAhead, 0.1f, 0.9f);
   snd_iFormat    = Clamp( snd_iFormat, (INDEX)CSoundLibrary::SF_NONE, (INDEX)CSoundLibrary::SF_44100_16);
+#ifdef __EMSCRIPTEN__
+  // web: always mix at 44.1 kHz (scripts set 11 kHz); the AudioContext runs at 44.1 kHz
+  if (snd_iFormat != CSoundLibrary::SF_NONE) snd_iFormat = CSoundLibrary::SF_44100_16;
+#endif
   snd_iDevice    = Clamp( snd_iDevice, (INDEX)-1, (INDEX)15);
   snd_iInterface = Clamp( snd_iInterface, (INDEX)0, (INDEX)2);
   // if any variable has been changed
@@ -1644,6 +1688,9 @@ void CSoundLibrary::MixSounds(void)
     slDataToMix = PrepareSoundBuffer_waveout(*this);
   }
 #else
+#ifdef __EMSCRIPTEN__
+  PumpWebAudio();
+#endif
   SDL_LockAudioDevice(sdl_audio_device);
   slDataToMix = PrepareSoundBuffer_SDLaudio(*this);
 #endif
@@ -1703,6 +1750,9 @@ void CSoundLibrary::MixSounds(void)
 #else
   CopyMixerBuffer_SDLaudio(*this, slDataToMix);
   SDL_UnlockAudioDevice(sdl_audio_device);
+#ifdef __EMSCRIPTEN__
+  PumpWebAudio();
+#endif
 #endif
 
   // all done

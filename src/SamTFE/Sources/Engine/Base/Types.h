@@ -91,7 +91,7 @@ typedef uint32_t UINT;
   #define PLATFORM_RISCV64 0
 #endif
 
-#if defined(__aarch64__) || defined(__arm__) || PLATFORM_RISCV64 || defined(mips) || defined(__mips__) || defined(__mips) || defined(__s390x__) || defined(__s390__) \
+#if defined(__EMSCRIPTEN__) || defined(__wasm32__) || defined(__aarch64__) || defined(__arm__) || PLATFORM_RISCV64 || defined(mips) || defined(__mips__) || defined(__mips) || defined(__s390x__) || defined(__s390__) \
     || defined(_powerpc)  || defined(__powerpc__)  || defined(__powerpc64__)  || defined(__POWERPC__)  || defined(__ppc__) \
     || defined(__ppc64__)  || defined(__PPC__)  || defined(__PPC64__)  || defined(_ARCH_PPC)  || defined(_ARCH_PPC64) || defined(_M_IA64) || defined(__IA64__) || defined(__e2k__) \
     || defined(__loongarch_lp64) || defined(__loongarch_double_float) || defined(__loongarch_single_float) || defined(__loongarch_soft_float)
@@ -106,7 +106,7 @@ typedef uint32_t UINT;
 
   #define PLATFORM_64BIT 1
 
-#elif defined(__i386) || defined(_M_IX86) || defined(__arm__) || defined(_M_ARM) || defined(__POWERPC__) \
+#elif defined(__wasm32__) || defined(__i386) || defined(_M_IX86) || defined(__arm__) || defined(_M_ARM) || defined(__POWERPC__) \
       || defined(_M_PPC) || defined(_ARCH_PPC) || (defined(mips) && !defined(__LP64__)) || (defined(mips__) && !defined(__LP64__)) || (defined(__mips__) && !defined(__LP64__))
 
   #define PLATFORM_32BIT 1
@@ -228,7 +228,11 @@ MY_STATIC_ASSERT(size_tSize, sizeof(size_t) == sizeof(void*));
     #define _mkdir(x) mkdir(x, S_IRWXU)
     #define _open open
     #define _close close
+    #ifdef __EMSCRIPTEN__
+    #define _strupr se1_strupr  // emscripten libc declares its own strupr
+    #else
     #define _strupr strupr
+    #endif
     #define stricmp strcasecmp
     #define strcmpi strcasecmp
     #define strnicmp strncasecmp
@@ -302,9 +306,9 @@ MY_STATIC_ASSERT(size_tSize, sizeof(size_t) == sizeof(void*));
     }
 
     typedef uint64_t __uint64;
-    #if (!defined __INTEL_COMPILER) && (!defined PLATFORM_FREEBSD) && (!defined PLATFORM_MACOSX)
+    #if (!defined __INTEL_COMPILER) && (!defined PLATFORM_FREEBSD) && (!defined PLATFORM_MACOSX) && (!defined __EMSCRIPTEN__)
       typedef int64_t __int64;
-    #elif (!defined PLATFORM_FREEBSD) && (!defined PLATFORM_MACOSX)
+    #elif (!defined PLATFORM_FREEBSD) && (!defined PLATFORM_MACOSX) && (!defined __EMSCRIPTEN__)
       typedef long long int // #define __INT64_TYPE__ long long int
     #endif
 

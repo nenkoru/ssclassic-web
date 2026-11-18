@@ -1094,6 +1094,9 @@ void CNetworkLibrary::StartPeerToPeer_t(const CTString &strSessionName,
   ga_ctTimersPending = 0;
   FinishCRCGather();
   CPrintF( TRANS("  started.\n"));
+#ifdef SE1_WITH_RUSTMOD
+  { void SE1Mod_LevelStarted(const char *); SE1Mod_LevelStarted((const char *)ga_fnmWorld); }
+#endif
 }
 
 /*

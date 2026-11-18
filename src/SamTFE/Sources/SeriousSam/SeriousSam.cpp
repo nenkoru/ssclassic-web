@@ -63,7 +63,7 @@ extern FLOAT _fGlobalOptionsAdjuster;
 extern FLOAT _fGlobalModAdjuster;
 extern FLOAT _fGlobalButtonAdjuster;
 extern FLOAT _fGlobalProfileFOVAdjuster;
-#ifdef PLATFORM_UNIX
+#if defined(PLATFORM_UNIX) && !defined(STATICALLY_LINKED)
 ENGINE_API FLOAT _fWeaponFOVAdjuster;
 ENGINE_API FLOAT _fPlayerFOVAdjuster;
 ENGINE_API FLOAT _fArmorHeightAdjuster;
@@ -175,7 +175,11 @@ CTString sam_strModName = TRANS("-   T H E  F I R S T  E N C O U N T E R   -");
 #if _SE_DEMO
   CTString sam_strFirstLevel = "Levels\\KarnakDemo.wld";
 #else
+#ifdef SE1_DEMO
+  CTString sam_strFirstLevel = "Levels\\KarnakDemo.wld";
+#else
   CTString sam_strFirstLevel = "Levels\\01_Hatshepsut.wld";
+#endif
 #endif
 CTString sam_strIntroLevel = "Levels\\Intro.wld";
 CTString sam_strGameName = "serioussam";
@@ -788,6 +792,9 @@ BOOL Init( HINSTANCE hInstance, int nCmdShow, CTString strCmdLine)
   _pShell->DeclareSymbol("INDEX sam_iStartCredits;", (void *) &sam_iStartCredits);
 
   InitializeGame();
+#ifdef SE1_WITH_RUSTMOD
+  { void SE1Mod_Init(void); SE1Mod_Init(); } // Rust mod layer (port/common/se1mod.h)
+#endif
   _pNetwork->md_strGameID = sam_strGameName;
 
   _pGame->LCDInit();
@@ -800,6 +807,10 @@ BOOL Init( HINSTANCE hInstance, int nCmdShow, CTString strCmdLine)
   }
 
   // initialize sound library
+#ifdef __EMSCRIPTEN__
+  // web: always mix at 44.1 kHz (startup scripts pick 11 kHz); the AudioContext runs at 44.1 kHz
+  if (snd_iFormat != CSoundLibrary::SF_NONE) snd_iFormat = CSoundLibrary::SF_44100_16;
+#endif
   snd_iFormat = Clamp( snd_iFormat, (INDEX)CSoundLibrary::SF_NONE, (INDEX)CSoundLibrary::SF_44100_16);
   _pSound->SetFormat( (enum CSoundLibrary::SoundFormat)snd_iFormat);
 

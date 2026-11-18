@@ -1,0 +1,20 @@
+# Serious Sam web: mod layer config (read by rust/se1-mod at startup).
+# Everything here is plain data: edit, reload the page, done.
+
+[startup]
+message = "se1mod: hello from Rust"
+# console commands run once at startup, exactly as typed in the in-game console
+commands = []
+
+# console variable overrides (INDEX / FLOAT / string), applied at startup
+[cvars]
+hud_bShowTime  = 1     # show elapsed level time on the HUD
+hud_bShowClock = 1     # show the clock on the HUD
+
+[level]
+# console commands run whenever any level starts
+commands = []
+
+# extra commands for one specific level
+[level.per_world]
+# "Levels/KarnakDemo.wld" = ["..."]

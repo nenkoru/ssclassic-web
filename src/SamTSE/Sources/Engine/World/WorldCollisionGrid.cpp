@@ -47,7 +47,17 @@ static inline void BoxToGrid(
   FLOAT fMinZ = boxEntity.Min()(3);
   FLOAT fMaxX = boxEntity.Max()(1);
   FLOAT fMaxZ = boxEntity.Max()(3);
-#ifdef __arm__
+#if defined(__EMSCRIPTEN__)
+  // wasm float->int conversion saturates (+inf -> INT_MAX), but the engine relies on x86
+  // cvttsd2si semantics, where any non-finite/out-of-range value becomes INT_MIN. Movers with
+  // an infinite box then clamp to one cell on x86, but to a 64001x64001-cell scan in wasm
+  // (multi-second freezes). Reproduce x86 exactly.
+  #define SE1_X86FloatToIndex(d) (((d) >= -2147483648.0 && (d) < 2147483648.0) ? (INDEX)(d) : (INDEX)0x80000000)
+  iMinX = Clamp(SE1_X86FloatToIndex(floor(fMinX/GRID_CELLSIZE)), (INDEX)GRID_MIN, (INDEX)GRID_MAX);
+  iMinZ = Clamp(SE1_X86FloatToIndex(floor(fMinZ/GRID_CELLSIZE)), (INDEX)GRID_MIN, (INDEX)GRID_MAX);
+  iMaxX = Clamp(SE1_X86FloatToIndex(ceil(fMaxX/GRID_CELLSIZE)), (INDEX)GRID_MIN, (INDEX)GRID_MAX);
+  iMaxZ = Clamp(SE1_X86FloatToIndex(ceil(fMaxZ/GRID_CELLSIZE)), (INDEX)GRID_MIN, (INDEX)GRID_MAX);
+#elif defined(__arm__)
 #if defined(PLATFORM_PANDORA) || defined(PLATFORM_PYRA)
   #define Isinf(a) (((*(unsigned int*)&a)&0x7fffffff)==0x7f800000)
 #else

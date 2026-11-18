@@ -635,16 +635,16 @@ void CMGHighScore::Render( CDrawPort *pdp)
   strHighScores[0][5] = TRANS("Score");
 
   {for (INDEX i=0; i<HIGHSCORE_COUNT; i++) {
-    switch(_pGame->gm_ahseHighScores[i].hse_gdDifficulty) {
+    switch((int)_pGame->gm_ahseHighScores[i].hse_gdDifficulty) {
     default:
       ASSERT(FALSE);
 #ifdef PLATFORM_FREEBSD
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wenum-constexpr-conversion"
-    case (CSessionProperties::GameDifficulty)-100:
+    case -100:
 #pragma clang diagnostic pop
 #else
-	case (CSessionProperties::GameDifficulty)-100:
+	case -100:
 #endif
       strHighScores[i+1][1] = "---";
       continue;

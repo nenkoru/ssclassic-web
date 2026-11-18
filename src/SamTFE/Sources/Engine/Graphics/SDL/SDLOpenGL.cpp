@@ -3,6 +3,13 @@
 #include <Engine/Engine.h>
 #include "SDL.h"
 
+#ifdef __EMSCRIPTEN__
+// WebGL2 has no fixed-function GL: route every GL lookup through the GL1 emulation layer
+// (port/common/gl1shim.c), which falls back to the real WebGL2 entry points.
+extern "C" void *SE1_GL1Shim_GetProcAddress(const char *name);
+#define SDL_GL_GetProcAddress SE1_GL1Shim_GetProcAddress
+#endif
+
 static void FailFunction_t(const char *strName) {
   ThrowF_t(TRANS("Required function %s not found."), strName);
 }

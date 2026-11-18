@@ -17,6 +17,9 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "Engine/StdH.h"
 
 #include <Engine/Graphics/GfxLibrary.h>
+#ifdef __EMSCRIPTEN__
+extern "C" void SE1_YieldToBrowser(void);
+#endif
 
 #include <Engine/Base/Translation.h>
 #include <Engine/Base/ErrorReporting.h>
@@ -2036,6 +2039,9 @@ void CGfxLibrary::SwapBuffers(CViewPort *pvp)
     pwglSwapBuffers(tdc.hdc);
 #else
     SDL_GL_SwapWindow((SDL_Window *) pvp->vp_hWnd);
+    #ifdef __EMSCRIPTEN__
+    SE1_YieldToBrowser(); // port/common/WebFrame.cpp: let the browser present this frame
+    #endif
 #endif
 
     // force finishing of all rendering operations (if required)
