@@ -70,7 +70,8 @@ Module['se1gfx'] = (function () {
       return ulocs.length - 1;
     },
     // handles are never reused: a deferred delete must not hit a newer texture
-    genTexture: function () { init(); texs.push(gl.createTexture()); return texs.length - 1; },
+    // texture handles come from gl1shim (C); the object is created on first bind
+    genTexture: function () { init(); texs.push(gl.createTexture()); return texs.length - 1; },   // (unused)
     // static index buffer turning quads (0,1,2,3) into triangles (0,1,2, 0,2,3)
     quadCapacity: function (ctQuads) {
       if (ctQuads <= qcap) return;
@@ -155,10 +156,12 @@ Module['se1gfx'] = (function () {
         case 15: gl.clear(I[c + 1]); c += 2; break;
         case 16: gl.depthRange(F[c + 1], F[c + 2]); c += 3; break;
         case 17: gl.activeTexture(I[c + 1]); c += 2; break;                            // ACTIVETEX enum
-        case 18: gl.bindTexture(I[c + 1], I[c + 2] ? texs[I[c + 2]] : null); c += 3; break;
+        case 18: { var th = I[c + 2];                                                   // BINDTEX target handle
+          if (th && !texs[th]) texs[th] = gl.createTexture();                             // first use of a handle
+          gl.bindTexture(I[c + 1], th ? texs[th] : null); c += 3; break; }
         case 19: gl.texParameteri(I[c + 1], I[c + 2], I[c + 3]); c += 4; break;
         case 20: gl.texParameterf(I[c + 1], I[c + 2], F[c + 3]); c += 4; break;
-        case 21: gl.deleteTexture(texs[I[c + 1]]); texs[I[c + 1]] = null; c += 2; break;
+        case 21: if (texs[I[c + 1]]) gl.deleteTexture(texs[I[c + 1]]); texs[I[c + 1]] = null; c += 2; break;
         case 22: gl.useProgram(progs[I[c + 1]] || null); c += 2; break;
         case 23: gl.uniform1i(ulocs[I[c + 1]], I[c + 2]); c += 3; break;
         case 24: gl.uniform1f(ulocs[I[c + 1]], F[c + 2]); c += 3; break;

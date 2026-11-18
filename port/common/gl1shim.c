@@ -254,7 +254,6 @@ static int gfx_create_program(const char *vs, const char *fs, unsigned key)
   { return MAIN_THREAD_EM_ASM_INT({ return Module['se1gfx'].createProgram(UTF8ToString($0), UTF8ToString($1), $2 >>> 0); }, vs, fs, key); }
 static int gfx_uniform_location(int prog, const char *name)
   { return MAIN_THREAD_EM_ASM_INT({ return Module['se1gfx'].uniformLocation($0, UTF8ToString($1)); }, prog, name); }
-static int gfx_gen_texture(void) { return MAIN_THREAD_EM_ASM_INT({ return Module['se1gfx'].genTexture(); }); }
 static void gfx_quad_capacity(int ctQuads) { MAIN_THREAD_EM_ASM({ Module['se1gfx'].quadCapacity($0); }, ctQuads); }
 static void gfx_tex_image(int sub, int target, int level, int x, int y, int w, int h, int fmt, int type, const void *data, int len)
   { MAIN_THREAD_EM_ASM({ Module['se1gfx'].texImage($0, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10); }, sub, target, level, x, y, w, h, fmt, type, data, len); }
@@ -270,7 +269,6 @@ EM_JS(int, gfx_create_program, (const char *vs, const char *fs, unsigned key),
       { return Module['se1gfx'].createProgram(UTF8ToString(vs), UTF8ToString(fs), key >>> 0); });
 EM_JS(int, gfx_uniform_location, (int prog, const char *name),
       { return Module['se1gfx'].uniformLocation(prog, UTF8ToString(name)); });
-EM_JS(int, gfx_gen_texture, (void), { return Module['se1gfx'].genTexture(); });
 EM_JS(void, gfx_quad_capacity, (int ctQuads), { Module['se1gfx'].quadCapacity(ctQuads); });
 EM_JS(void, gfx_tex_image, (int sub, int target, int level, int x, int y, int w, int h, int fmt, int type, const void *data, int len),
       { Module['se1gfx'].texImage(sub, target, level, x, y, w, h, fmt, type, data, len); });
@@ -672,7 +670,10 @@ static void shim_glTexSubImage2D(GLenum target, GLint level, GLint x, GLint y, G
   shim_init();
   record_tex_image(1, target, level, x, y, w, h, fmt, type, data);
 }
-static void shim_glGenTextures(GLsizei n, GLuint *t) { shim_init(); for (int i = 0; i < n; i++) t[i] = (GLuint)gfx_gen_texture(); }
+/* texture handles are allocated here, never reused; the replayer creates the texture object the
+   first time a handle is bound. (A synchronous genTexture call queued behind pending frame batches:
+   on a phone, the textures created at one demo camera cut cost a 2.4 s hitch in the threaded build.) */
+static void shim_glGenTextures(GLsizei n, GLuint *t) { static GLuint next = 1; shim_init(); for (int i = 0; i < n; i++) t[i] = next++; }
 static void shim_glTexParameteri(GLenum target, GLenum pname, GLint v) {
   if ((pname == GL_TEXTURE_WRAP_S || pname == GL_TEXTURE_WRAP_T) && v == GL1_CLAMP) v = GL_CLAMP_TO_EDGE;
   cmd_iii(OP_TEXPARAMI, (int)target, (int)pname, v);

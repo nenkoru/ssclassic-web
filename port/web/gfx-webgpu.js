@@ -151,6 +151,10 @@
 
     // ---- objects owned by the replayer (integer handles, 0 = none) ----
     var progs = [null], ulocs = [null], texs = [null];
+    function newTex() {
+      return { tex: null, w: 0, h: 0, levels: 0, have: [], view: null, viewLevels: 0, vid: 0,
+               params: { min: G.NEAREST_MIPMAP_LINEAR, mag: G.LINEAR, ws: G.REPEAT, wt: G.REPEAT, aniso: 1 } };
+    }
     var samplers = new Map(), viewId = 1;
 
     // ---- shadowed GL state ----
@@ -344,11 +348,7 @@
         ulocs.push({ p: p, off: o[0], n: o[1] });
         return ulocs.length - 1;
       },
-      genTexture: function () {
-        texs.push({ tex: null, w: 0, h: 0, levels: 0, have: [], view: null, viewLevels: 0, vid: 0,
-                    params: { min: G.NEAREST_MIPMAP_LINEAR, mag: G.LINEAR, ws: G.REPEAT, wt: G.REPEAT, aniso: 1 } });
-        return texs.length - 1;
-      },
+      genTexture: function () { texs.push(newTex()); return texs.length - 1; },   // (unused: handles come from gl1shim)
       quadCapacity: function (ctQuads) {
         if (ctQuads <= qcap) return;
         var cap = 1024; while (cap < ctQuads) cap *= 2;
@@ -546,7 +546,9 @@
           }
           case 16: st.dnear = F[c + 1]; st.dfar = F[c + 2]; vpDirty = true; c += 3; break;
           case 17: st.unit = (I[c + 1] - G.TEXTURE0) & 3; c += 2; break;
-          case 18: st.bound[st.unit] = I[c + 2]; texDirty = true; c += 3; break;
+          case 18:                                                             // BINDTEX: first use creates the entry
+            if (I[c + 2] && !texs[I[c + 2]]) texs[I[c + 2]] = newTex();
+            st.bound[st.unit] = I[c + 2]; texDirty = true; c += 3; break;
           case 19: case 20: {                                                  // TEXPARAMI / TEXPARAMF
             var t = texs[st.bound[st.unit]], pn = I[c + 2], v = I[c] === 19 ? I[c + 3] : F[c + 3];
             if (t) {
