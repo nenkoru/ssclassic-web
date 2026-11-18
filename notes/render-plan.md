@@ -332,3 +332,22 @@ phase must also pass the visual regression test from phase 0 before it lands.
   - timedemo: single-threaded 2522 → 2700 fps; threaded ~2870 (worker-bound, unchanged);
   - potato ×8: replay 1.09 → 0.51 ms per frame, worker 4.4 → 0.94 ms (with the quad and qsort fixes).
   - Captures bit-identical (both builds; WebGPU matches WebGL2).
+
+### Engine profile (after the quad, qsort and rebasing fixes)
+- Worker self time (threaded timedemo):
+  - engine visibility (ScanOneLine/Render 22%, AddActiveSector 10%, ClipToOnePlane 5%, MakeSpan 5%);
+  - models (RenderModel 5%, UnpackFrame 4%);
+  - shim vertex copies (put_vertices 7%);
+  - sorting (4%).
+- Attribution limits:
+  - LTO and Binaryen inline the renderer helpers into AddActiveSector/Render, and LLVM `noinline`
+    doesn't survive wasm-opt;
+  - V8 reports wasm ticks at "line 1" only (no per-offset data).
+  - Splitting these further needs a profiling build linked at -O1.
+- put_vertices went from 4.9% (old bind_client_arrays, plus 0.9% memcpy) to 7.3%. Neither skipping
+  disabled units in immediate mode nor block-copying client arrays changed it. Likely cause: the
+  per-attribute streams touch more memory than the old packed arena. Net: threaded throughput is
+  unchanged, and main-thread WebGL calls are −41%.
+- Engine CPU is no longer a limiter on the emulated potato (it held 57 fps at 12× CPU throttle even
+  before these fixes). The visibility code is ASER, a span-buffer rasterizer; its "coherent scan
+  line" shortcut was disabled upstream because of bugs. Further gains there mean algorithm changes.

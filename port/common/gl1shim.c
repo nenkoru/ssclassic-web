@@ -780,7 +780,7 @@ static void ensure_quad_capacity(int ctQuads) {
   quadCap = cap;
 }
 
-typedef struct { const uint8_t *ptr; int size; GLenum type; int norm; int stride; } VSrc;   /* stride: source */
+typedef struct { const uint8_t *ptr; int size; GLenum type; int norm; int stride; int compact; } VSrc;   /* stride: source */
 /* copy ctVerts vertices of every enabled attribute into its stream at the vertex cursor, record
    attribute pointers only where needed; returns the base vertex to add to this draw's indices */
 static uint32_t put_vertices(const VSrc *src, int ctVerts) {
@@ -789,7 +789,7 @@ static uint32_t put_vertices(const VSrc *src, int ctVerts) {
     if (!src[l].ptr) continue;
     elem[l] = src[l].size * type_size(src[l].type);
     int st = src[l].stride ? src[l].stride : elem[l];
-    dst[l] = st > 2 * elem[l] ? elem[l] : st;       /* widely interleaved (immediate mode): compact */
+    dst[l] = src[l].compact ? elem[l] : st;           /* immediate mode: compact; arrays: one block copy */
     if (dst[l] & 3) dst[l] = (elem[l] + 3) & ~3;    /* keep offsets 4-aligned (WebGPU) */
   }
   for (int pass = 0; pass < 2; pass++) {             /* pass 1: after restarting the vertex cursor */
@@ -890,7 +890,8 @@ static void shim_glEnd(void) {
   if (n == 0) return;
   apply_program();
   VSrc src[NSTREAMS];
-  for (int l = 0; l < NSTREAMS; l++) src[l] = (VSrc){ (const uint8_t *)(S.imm + 4 * l), 4, GL_FLOAT, 0, IMM_FLOATS * 4 };
+  for (int l = 0; l < NSTREAMS; l++)   /* texcoords only for enabled units: the shader reads no others */
+    src[l] = (l < 2 || S.u[l - 2].enabled) ? (VSrc){ (const uint8_t *)(S.imm + 4 * l), 4, GL_FLOAT, 0, IMM_FLOATS * 4, 1 } : (VSrc){ 0 };
   uint32_t v0 = put_vertices(src, n);
   switch (S.beginMode) {
   case GL1_QUADS: ensure_quad_capacity((int)((v0 + n) / 4)); cmd_ii(OP_DRAW_QUADS, n / 4 * 6, (int)(v0 / 4 * 6 * 4)); break;
