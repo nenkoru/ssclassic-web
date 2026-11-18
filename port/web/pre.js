@@ -7,7 +7,8 @@
   if (q.get('bench')) args.push('+script', 'SE1Mod/bench.ini');
   if (q.get('args')) args = args.concat(q.get('args').split(' ').filter(Boolean));
   if (args.length) Module['arguments'] = args;
-  if (q.get('uncapped') === '1') Module['se1Uncapped'] = true;   // timedemo: no vsync wait (port/common/WebFrame.cpp)
+  if (q.get('uncapped') === '1') Module['se1Uncapped'] = true;
+  if (q.get('spin') === '0' || q.get('spin') === '1') Module['se1Spin'] = +q.get('spin');   // threaded vsync wait (WebFrame.cpp)   // timedemo: no vsync wait (port/common/WebFrame.cpp)
   // ?scale=0.5 renders at half resolution (engine/HUD/input stay at full logical size);
   // ?scale=auto = dynamic resolution: lowers it while frames are GPU-bound, raises it with headroom
   var sc = q.get('scale');

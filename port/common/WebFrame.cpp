@@ -167,8 +167,31 @@ extern "C" void SE1_YieldToBrowser(void)
        at the end of each replayed frame (Module.se1ReplayBatch), so the worker doesn't wait for it;
        the double-buffered hand-off keeps the worker at most one frame ahead. */
   } else {
+    /* Adaptive spin-wait for the next vsync tick. On phones (big.LITTLE), a thread that sleeps a large
+       part of every frame gets clocked down or moved to a slow core, while the page's main thread
+       stays boosted: on a Snapdragon 710 the same frame took 9.4 ms paced vs 4.4 ms uncapped. So when
+       the frame's work is a large share of the frame budget, spin instead of sleeping (a busy core
+       keeps its clock); fast machines (work a small share) keep sleeping and save power.
+       ?spin=0 / ?spin=1 force it off / on. */
+    static int spinMode = -2, spinning;
+    static double workAvg, intervalAvg = 16.7, lastResumed;
+    if (spinMode == -2) spinMode = MAIN_THREAD_EM_ASM_INT({ return Module.se1Spin === undefined ? -1 : Module.se1Spin; });
+    if (_resumed > 0) workAvg = workAvg * 0.9 + (now - _resumed) * 0.1;
+    if (spinMode >= 0) spinning = spinMode;
+    else if (!spinning && workAvg > 0.35 * intervalAvg) spinning = 1;
+    else if (spinning && workAvg < 0.12 * intervalAvg) spinning = 0;
     int32_t seen = _vsyncTick;
+    if (spinning) {   /* spin, but never long: a hidden tab only ticks every 100 ms */
+      double t0 = emscripten_get_now();
+      while (emscripten_atomic_load_u32((void *)&_vsyncTick) == (uint32_t)seen && emscripten_get_now() - t0 < 20.0) {}
+    }
     while (_vsyncTick == seen) emscripten_futex_wait((void *)&_vsyncTick, (uint32_t)seen, 100.0);
+    double t = emscripten_get_now();
+    if (lastResumed > 0) {
+      double iv = t - lastResumed;
+      if (iv > 4.0 && iv < 50.0) intervalAvg = intervalAvg * 0.95 + iv * 0.05;   /* vsync interval */
+    }
+    lastResumed = t;
   }
   _resumed = emscripten_get_now();
 }
