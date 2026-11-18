@@ -818,6 +818,9 @@ BOOL Init( HINSTANCE hInstance, int nCmdShow, CTString strCmdLine)
     _pShell->Execute("include \"Scripts\\Addons\\SFX-AutoAdjust.ini\"");
   }
 
+#ifdef __EMSCRIPTEN__
+  { void SE1_ApplyWebStartup(void); SE1_ApplyWebStartup(); } // ?res= etc. (port/common/WebFrame.cpp)
+#endif
   // execute script given on command line
   if (cmd_strScript!="") {
     CPrintF("Command line script: '%s'\n", (const char *) cmd_strScript);

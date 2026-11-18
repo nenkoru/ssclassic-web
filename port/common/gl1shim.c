@@ -247,6 +247,18 @@ void SE1_GL1Shim_Flush(void) {
   _ncmd = 0; _va.n = 0; _ia.n = 0; _da.n = 0;
 }
 
+/* SE1_THREADS end of frame: replay the rest of the frame, run the ?shots= capture and end the
+   frame on the replayer as ONE main-thread task: between two proxied calls
+   the browser may present (and clear) the canvas, and a capture would read an empty frame. */
+#ifdef SE1_THREADS
+void SE1_GL1Shim_FlushFrame(void);
+void SE1_GL1Shim_FlushFrame(void) {
+  MAIN_THREAD_EM_ASM({ Module['se1PresentFrame']($0, $1, $2, $3, $4, $5, $6, $7); },
+                     _cmd, (int)_ncmd, _va.p, (int)_va.n, _ia.p, (int)_ia.n, _da.p, (int)_da.n);
+  _ncmd = 0; _va.n = 0; _ia.n = 0; _da.n = 0;
+}
+#endif
+
 /* ---- state caches: skip recording commands that change nothing (WebGL state persists
    across flushes; the engine never touches programs/buffers/attributes itself) ---- */
 static int _curProgram = -1;

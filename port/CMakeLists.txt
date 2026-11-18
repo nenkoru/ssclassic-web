@@ -103,7 +103,7 @@ list(FILTER S_ENGINE EXCLUDE REGEX "Engine/Base/Unix/UnixDynamicLoader\\.cpp$")
 if(SE1_THREADS)
   list(APPEND S_ENGINE "${ROOT}/port/common/SdlGlThreads.cpp")
 endif()
-list(APPEND S_ENGINE "${ROOT}/port/common/WebDynamicLoader.cpp" "${ROOT}/port/common/gl1shim.c" "${ROOT}/port/common/ShellCall.cpp" "${ROOT}/port/common/WebAudio.cpp" "${ROOT}/port/common/WebFrame.cpp")
+list(APPEND S_ENGINE "${ROOT}/port/common/WebDynamicLoader.cpp" "${ROOT}/port/common/gl1shim.c" "${ROOT}/port/common/ShellCall.cpp" "${ROOT}/port/common/WebAudio.cpp" "${ROOT}/port/common/WebFrame.cpp" "${ROOT}/port/common/CaseFs.c")
 
 add_library(engine_safemath STATIC ${S_SAFEMATH})
 target_compile_options(engine_safemath PRIVATE -fno-unsafe-math-optimizations)
@@ -144,10 +144,13 @@ target_link_options(serioussam PRIVATE
   "SHELL:--pre-js ${ROOT}/port/web/pre.js" "SHELL:--pre-js ${ROOT}/port/web/audio.js" "SHELL:--pre-js ${ROOT}/port/web/gfx.js" "SHELL:--pre-js ${ROOT}/port/web/gfx-webgpu.js" "SHELL:--post-js ${ROOT}/port/web/bench.js"
   # (SHELL: keeps each flag with its argument; target_link_options would de-duplicate "--pre-js")
   -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=256MB -sSTACK_SIZE=4MB
+  -Wl,--wrap=fopen -Wl,--wrap=open -Wl,--wrap=opendir   # case-insensitive opens (port/common/CaseFs.c)
   -sFULL_ES3=1 -sMAX_WEBGL_VERSION=2 -sMIN_WEBGL_VERSION=2
   $<IF:$<BOOL:${SE1_THREADS}>,-sPROXY_TO_PTHREAD,-sJSPI=1>
   $<$<BOOL:${SE1_THREADS}>:-sPTHREAD_POOL_SIZE=4>
-  -sFORCE_FILESYSTEM=1 -lidbfs.js
+  $<$<BOOL:${SE1_THREADS}>:-sWASMFS>   # filesystem in wasm: no per-read proxy to the main thread
+  -sFORCE_FILESYSTEM=1
+  $<$<NOT:$<BOOL:${SE1_THREADS}>>:-lidbfs.js>   # WASMFS (threaded build) persists via its OPFS backend instead
   -sEXPORTED_RUNTIME_METHODS=FS,callMain,HEAPU8,HEAP16,HEAPU16,HEAPU32,HEAP32,HEAPF32,UTF8ToString,addRunDependency,removeRunDependency
 )
 if(DATA_DIR)

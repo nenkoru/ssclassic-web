@@ -26,19 +26,15 @@
 // case-insensitive paths ("demos\x.dem" for "Demos/x.dem"). Emscripten resolves every path
 // component through FS.lookupNode; when the exact name is missing, fall back to a
 // case-insensitive match in that directory. Exact matches stay the fast path.
-// ?res=640x480: start the engine at that resolution. Resolution is a persistent console
-// variable read from Scripts/PersistentSymbols.ini in the user folder before the window is
-// created (changing it later from a script via ApplyVideoMode() aborts the script).
-Module['preRun'] = (Module['preRun'] || []).concat([function () {
+// ?res=640x480: start the engine at that resolution (applied in C by SE1_ApplyWebStartup in
+// port/common/WebFrame.cpp, before the first video mode is set; works in both builds).
+(function () {
   var m = /^(\d+)x(\d+)$/.exec(new URLSearchParams(location.search).get('res') || '');
-  if (!m) return;
-  var dir = '/libsdl/Serious-Engine/' + (Module['se1Game'] || 'serioussam') + '/Scripts';
-  FS.mkdirTree(dir);
-  FS.writeFile(dir + '/PersistentSymbols.ini',
-    'sam_iScreenSizeI = ' + m[1] + ';\nsam_iScreenSizeJ = ' + m[2] + ';\n');
-}]);
+  if (m) Module['se1Res'] = [+m[1], +m[2]];
+})();
 
 Module['preRun'] = (Module['preRun'] || []).concat([function () {
+  if (!FS.lookupNode) return;   // WASMFS (threaded build): port/common/CaseFs.c does this in C
   var lookupNode = FS.lookupNode;
   FS.lookupNode = function (parent, name) {
     try {
@@ -74,6 +70,16 @@ Module['se1CaptureFrame'] = function () {
   if (S.i >= S.times.length) { S.done = true; if (S.pending === 0) window.__shotsDone = true; }
 };
 
+// End of frame (gl1shim SE1_GL1Shim_FlushFrame): replay what is left of the frame, capture, end the
+// frame, all in one main-thread task (the threaded build would otherwise let the browser present
+// between them). n === 0 and nothing in the arenas: the frame was already replayed.
+Module['se1PresentFrame'] = function (c, n, v, nv, ix, ni, d, nd) {
+  var g = Module['se1gfx'];
+  if (g && (n || nv || ni)) g.replay(c, n, v, nv, ix, ni, d, nd);
+  if (Module['se1CaptureFrame']) Module['se1CaptureFrame']();
+  if (g && g.endFrame) g.endFrame();
+};
+
 // SE1_THREADS build (port/common/WebFrame.cpp): runs on the page's main thread. Bumps a shared
 // counter on every animation frame (and every 100 ms while hidden, so the simulation keeps going),
 // which the engine worker waits on after each frame, and exposes the worker's per-frame CPU times
@@ -91,3 +97,6 @@ Module['se1StartFrameLoop'] = function (tickPtr, nPtr, workPtr) {
   (function raf() { bump(); requestAnimationFrame(raf); })();
   setInterval(function () { if (document.hidden) bump(); }, 100);
 };
+
+// WASMFS (SE1_THREADS build) has no lookup hook: Windows-style case-insensitive paths are
+// resolved in C instead (port/common/CaseFs.c wraps fopen/open/opendir).

@@ -189,6 +189,39 @@ phase must also pass the visual regression test from phase 0 before it lands.
 - Rust mod layer off in this build (std without atomics; needs nightly build-std).
 - Next:
   - asynchronous double-buffered frame hand-off (worker records frame N+1 while main replays N);
-  - worker-local file access (WASMFS, or the data mounted inside the worker);
+  - ~~worker-local file access~~ (done, milestone 2);
   - SAB audio ring;
   - Rust with build-std.
+
+### Phase 3, milestone 2: WASMFS + frame/capture fixes
+- Filesystem: the threaded build uses WASMFS (the filesystem lives in wasm), so the worker reads
+  files directly. The intro now loads as fast as single-threaded (~20 s before; a full capture run
+  takes 3–5 s).
+- Case-insensitive paths (the data and code disagree on letter case, Windows style): MEMFS keeps the
+  JS lookup hook; for WASMFS, port/common/CaseFs.c wraps fopen/open/opendir (`-Wl,--wrap`) and
+  retries a miss component by component with strcasecmp. The top-level symlink aliases are gone:
+  they showed up in directory scans as duplicate folders.
+- `CUnixFileSystem::FindFiles` returns entries in case-insensitive name order, as on Windows.
+  readdir() order depends on the filesystem. Single-threaded captures are unchanged by this.
+- Main-thread `FS` calls abort under WASMFS + PROXY_TO_PTHREAD. So:
+  - the benchmark driver follows the exported `SE1_DemoTime()` instead of reading SeriousSam.log;
+  - `?res=` is applied in C (`SE1_ApplyWebStartup`, before the command-line script) instead of
+    writing PersistentSymbols.ini from preRun.
+- Fixed black captured frames in the threaded build. The last replay, the `?shots=` capture and
+  `endFrame` were separate main-thread tasks, and Chrome could present (and clear) the canvas
+  between them. They are now one task: `SE1_GL1Shim_FlushFrame` → `Module.se1PresentFrame`.
+- Visual:
+  - threaded vs threaded: 8/8;
+  - threaded vs single-threaded *on WASMFS*: 8/8, bit-identical;
+  - MEMFS vs WASMFS (any threading): a small deterministic offset in animation phase, a few pixels
+    on the palms and the weapon bob.
+  - What was ruled out for that offset:
+    - every byte the engine reads (3,538 files hashed through fread) is identical;
+    - path resolution (ExpandFilePath, 803 lookups) is identical;
+    - listing order, and case-insensitive stat, made no difference.
+  - Likely cause: an uninitialized read in the engine that depends on heap layout. Not pursued; the
+    WASMFS builds have their own baseline.
+- Perf (timedemo, WebGL2, median of 3):
+  - threaded: 1541 fps, 0.63 ms mean, p99 1.27 ms, max 11 ms (the 767 ms load hitch is gone);
+  - single-threaded: 2453 fps, 0.40 ms.
+  - Throughput is still bound by the synchronous replay round trip (next: double-buffered hand-off).

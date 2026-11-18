@@ -14,14 +14,30 @@
  *    read back before the swap and POSTed to the dev server.
  */
 #include <emscripten.h>
+#include <emscripten/threading.h>
 #include <Engine/Engine.h>
 #include <Engine/Network/Network.h>
+#include <Engine/Base/Shell.h>
 
 /* demo playback clock in seconds, or -1 when no demo is playing (used by the shot capture) */
 extern "C" EMSCRIPTEN_KEEPALIVE float SE1_DemoTime(void)
 {
   if (_pNetwork == NULL || !_pNetwork->ga_bDemoPlay) return -1.0f;
   return _pNetwork->ga_fDemoTimer;
+}
+
+/* page options that must be in place before the first video mode (SeriousSam.cpp calls this
+   right before the command-line script): ?res=WxH. Read through the main thread, which owns the
+   page's URL; no file writes (the threaded build's main thread can't use the filesystem). */
+void SE1_ApplyWebStartup(void)   /* C++ linkage: declared in SeriousSam.cpp */
+{
+  int w = MAIN_THREAD_EM_ASM_INT({ return Module['se1Res'] ? Module['se1Res'][0] : 0; });
+  int h = MAIN_THREAD_EM_ASM_INT({ return Module['se1Res'] ? Module['se1Res'][1] : 0; });
+  if (w > 0 && h > 0) {
+    _pShell->SetINDEX("sam_iScreenSizeI", w);
+    _pShell->SetINDEX("sam_iScreenSizeJ", h);
+    CPrintF("web: start resolution %dx%d (?res=)\n", w, h);
+  }
 }
 
 #ifndef SE1_THREADS
@@ -91,6 +107,7 @@ void SE1Mod_Frame(void);  // port/common/Se1ModHost.cpp
 /* called right before SDL_GL_SwapWindow: Emscripten's SDL yields inside the swap, and the
    browser may present + clear the drawing buffer during that yield, so read frames back here */
 extern "C" void SE1_GL1Shim_Flush(void);  // port/common/gl1shim.c: replay this frame's commands
+extern "C" void SE1_GL1Shim_FlushFrame(void);  // SE1_THREADS: the same plus capture + end of frame
 
 #ifndef SE1_THREADS
 EM_JS(void, se1_capture_frame, (void), { if (Module['se1CaptureFrame']) Module['se1CaptureFrame'](); });
@@ -136,11 +153,7 @@ static void start_main_thread_loop(void)
 
 extern "C" void SE1_BeforeSwap(void)
 {
-  SE1_GL1Shim_Flush();   // replayed on the main thread (synchronous proxy for now)
-  MAIN_THREAD_EM_ASM({
-    if (Module['se1CaptureFrame']) Module['se1CaptureFrame']();
-    if (Module['se1gfx'] && Module['se1gfx'].endFrame) Module['se1gfx'].endFrame();
-  });
+  SE1_GL1Shim_FlushFrame();   // replay + capture + end of frame in one main-thread task
 }
 
 extern "C" void SE1_YieldToBrowser(void)

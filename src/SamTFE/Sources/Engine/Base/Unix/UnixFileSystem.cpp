@@ -6,6 +6,10 @@
 // !!! FIXME: rcg10142001 This should really be using CTStrings...
 
 
+#include <algorithm>
+#include <string>
+#include <vector>
+#include <strings.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -126,14 +130,21 @@ CDynamicArray<CTString> *CUnixFileSystem::FindFiles(const char *dir,
 
     if (d != NULL)
     {
+        // web port: return entries in case-insensitive name order, as Windows does. readdir()
+        // order depends on the filesystem (MEMFS, WASMFS, ext4...), and load order matters.
+        std::vector<std::string> names;
         struct dirent *dent;
         while ((dent = readdir(d)) != NULL)
         {
             CTString str(dent->d_name);
             if (str.Matches(wildcard))
-                *retval->New() = str;
+                names.push_back(dent->d_name);
         }
         closedir(d);
+        std::sort(names.begin(), names.end(), [](const std::string &a, const std::string &b) {
+            return strcasecmp(a.c_str(), b.c_str()) < 0; });
+        for (size_t i = 0; i < names.size(); i++)
+            *retval->New() = CTString(names[i].c_str());
     }
 
     return(retval);

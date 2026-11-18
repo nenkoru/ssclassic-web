@@ -1,6 +1,8 @@
 // Demo benchmark driver: paste-free version of the in-page harness. Loaded only with ?bench=1.
 // Measures CPU ms per frame (Module.se1Perf, port/common/WebFrame.cpp) between the demo start
-// (+1 s warm-up) and its end ("stopping game"), and whether the page stayed visible.
+// (+1 s warm-up) and its end, and whether the page stayed visible. Demo state comes from the
+// exported SE1_DemoTime() (>= 0 while a demo plays): plain shared memory, so it also works on the
+// main thread of the threaded build, where FS calls (e.g. reading SeriousSam.log) are not allowed.
 (function () {
   if (!new URLSearchParams(location.search).get('bench')) return;
   var B = window.__bench = { state: 'waiting', stats: null, hiddenMs: 0 };
@@ -9,12 +11,12 @@
     if (document.hidden) lastVis = performance.now(); else if (B.state === 'running') B.hiddenMs += performance.now() - lastVis;
   });
   var t = setInterval(function () {
-    var log = '';
-    try { log = FS.readFile('/libsdl/Serious-Engine/serioussam/SeriousSam.log', { encoding: 'utf8' }); } catch (e) { return; }
+    if (!Module._SE1_DemoTime || !Module.se1Perf) return;
+    var playing = Module._SE1_DemoTime() >= 0;
     var now = performance.now();
-    if (B.state === 'waiting' && log.indexOf('Started playing demo') >= 0) { B.state = 'warmup'; B.warmT = now; }
+    if (B.state === 'waiting' && playing) { B.state = 'warmup'; B.warmT = now; }
     else if (B.state === 'warmup' && now - B.warmT > 1000) {
-      B.state = 'running'; B.startT = now; B.logAt = log.length; Module.se1Perf.n = 0;
+      B.state = 'running'; B.startT = now; Module.se1Perf.n = 0;
       // presented-frame intervals (what the player sees), independent of CPU work time
       B.iv = []; var lastRaf = 0;
       (function rafLoop(ts) { if (lastRaf) B.iv.push(ts - lastRaf); lastRaf = ts; if (B.state === 'running') requestAnimationFrame(rafLoop); })(0);
@@ -48,7 +50,7 @@
         }
       }
     }
-    else if (B.state === 'running' && log.slice(B.logAt).indexOf('stopping game') >= 0) {
+    else if (B.state === 'running' && !playing) {
       var P = Module.se1Perf, n = Math.min(P.n, 65536);
       var a = Array.from(P.work.slice(0, n)).sort(function (x, y) { return x - y; });
       var q = function (p) { return a[Math.min(a.length - 1, Math.floor(p * a.length))]; };
