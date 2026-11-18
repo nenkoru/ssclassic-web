@@ -15,6 +15,9 @@
     if (B.state === 'waiting' && log.indexOf('Started playing demo') >= 0) { B.state = 'warmup'; B.warmT = now; }
     else if (B.state === 'warmup' && now - B.warmT > 1000) {
       B.state = 'running'; B.startT = now; B.logAt = log.length; Module.se1Perf.n = 0;
+      // presented-frame intervals (what the player sees), independent of CPU work time
+      B.iv = []; var lastRaf = 0;
+      (function rafLoop(ts) { if (lastRaf) B.iv.push(ts - lastRaf); lastRaf = ts; if (B.state === 'running') requestAnimationFrame(rafLoop); })(0);
       // ?profile=1: sample the demo window with the JS Self-Profiling API (needs the
       // Document-Policy: js-profiling header, sent by tools/devserver.py)
       if (new URLSearchParams(location.search).get('profile') && typeof Profiler !== 'undefined') {
@@ -52,7 +55,11 @@
       var secs = (now - B.startT) / 1000;
       B.stats = { seconds: +secs.toFixed(1), fps: +(P.n / secs).toFixed(1), meanMs: +(a.reduce(function (s, x) { return s + x; }, 0) / a.length).toFixed(2),
         p50: +q(0.5).toFixed(2), p95: +q(0.95).toFixed(2), p99: +q(0.99).toFixed(2), max: +a[a.length - 1].toFixed(1),
-        over16_7: a.filter(function (x) { return x > 16.7; }).length, backend: Module['se1gfx'] && Module['se1gfx'].backend, hiddenMs: Math.round(B.hiddenMs + (document.hidden ? now - lastVis : 0)) };
+        over16_7: a.filter(function (x) { return x > 16.7; }).length,
+        frameMs: B.iv.length ? +B.iv.slice().sort(function (x, y) { return x - y; })[B.iv.length >> 1].toFixed(1) : 0,
+        lateFrames: (function () { var iv = B.iv.slice().sort(function (x, y) { return x - y; }), med = iv[iv.length >> 1] || 0;
+                                   return B.iv.filter(function (x) { return x > med * 1.5; }).length; })(),
+        presented: B.iv.length, backend: Module['se1gfx'] && Module['se1gfx'].backend, scale: Module['se1Scale'] || 1, scaleChanges: (Module['se1Drs'] && Module['se1Drs'].changes) || 0, hiddenMs: Math.round(B.hiddenMs + (document.hidden ? now - lastVis : 0)) };
       clearInterval(t);
       if (B.gl) {
         var G = B.gl, fr = Math.max(1, P.n);

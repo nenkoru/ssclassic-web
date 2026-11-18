@@ -66,6 +66,38 @@ EM_ASYNC_JS(void, se1_wait_frame, (void), {
     timer = setTimeout(finish, 100);   /* hidden tab: rAF is throttled */
   });
   P.resumed = performance.now();
+
+  /* ?scale=auto: dynamic resolution. Frames arriving late while the CPU work leaves headroom means
+     the GPU is the bottleneck: render fewer pixels. Raise the scale again when frames are on time.
+     The vsync interval is estimated as the shortest recent frame interval. */
+  var D = Module.se1Drs;
+  if (D) {
+    var tn = P.resumed;
+    if (D.last) {
+      var dt = tn - D.last;
+      if (dt < 100) {   /* ignore loading stalls and hidden-tab frames */
+        D.vs = D.vs ? Math.min(D.vs * 1.002 + 0.001, Math.max(dt, 4)) : dt;
+        D.ema = D.ema ? D.ema * 0.9 + dt * 0.1 : dt;
+        var wk = P.work[(P.n - 1) & 65535] || 0;
+        D.work = D.work ? D.work * 0.9 + wk * 0.1 : wk;
+        D.n = (D.n || 0) + 1;
+        /* hysteresis: step down only on repeated late frames (not one hitch), step up only after
+           ~3 s without any, so the resolution doesn't pump */
+        var late = dt > D.vs * 1.5;
+        D.lateWin = (D.lateWin || 0) + (late ? 1 : 0);
+        D.sinceLate = late ? 0 : (D.sinceLate || 0) + 1;
+        if (D.n % 30 === 0) {
+          var cs = Module.se1Scale || 1, ns = cs;
+          if (D.lateWin >= 2 && D.work < D.vs * 0.6) ns = Math.max(D.min, cs * 0.85);
+          else if (D.sinceLate > 180 && cs < 1) { ns = Math.min(1, cs * 1.06); D.sinceLate = 0; }
+          ns = Math.round(ns * 20) / 20;
+          if (ns !== cs) { Module.se1Scale = ns; D.changed = tn; D.changes = (D.changes || 0) + 1; }
+          D.lateWin = 0;
+        }
+      }
+    }
+    D.last = tn;
+  }
 });
 
 #ifdef SE1_WITH_RUSTMOD
@@ -76,10 +108,13 @@ void SE1Mod_Frame(void);  // port/common/Se1ModHost.cpp
    browser may present + clear the drawing buffer during that yield, so read frames back here */
 extern "C" void SE1_GL1Shim_Flush(void);  // port/common/gl1shim.c: replay this frame's commands
 
+EM_JS(void, se1_end_frame, (void), { if (Module['se1gfx'] && Module['se1gfx'].endFrame) Module['se1gfx'].endFrame(); });
+
 extern "C" void SE1_BeforeSwap(void)
 {
   SE1_GL1Shim_Flush();   // the frame must be drawn before it's captured or presented
   se1_capture_frame();
+  se1_end_frame();       // e.g. apply a new render scale for the next frame
 }
 
 extern "C" void SE1_YieldToBrowser(void)

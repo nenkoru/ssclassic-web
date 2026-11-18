@@ -152,3 +152,19 @@ phase must also pass the visual regression test from phase 0 before it lands.
   - one writeBuffer of all per-draw uniforms per flush, already the case;
   - packing the per-draw state changes the engine makes;
   - measuring on a real weak GPU, since macOS Chrome has no software WebGPU adapter.
+
+### Render scale / dynamic resolution (`?scale=0.5`, `?scale=auto`)
+- The engine keeps its logical size (HUD layout, input: SDL maps mouse by window size / CSS size, so
+  the backing store size doesn't matter). Both replayers draw into a smaller backing store with scaled
+  viewport and scissor; the canvas keeps its CSS size.
+- Visual: scale 1 unchanged (8/8 on both backends); scale 0.5 renders 512x384 correctly on both.
+- Potato proxy (software GL, vsync on, ~1050 presented frames, late = interval > 1.5x median):
+  - scale 1: 9 and 15 late frames;
+  - scale 0.5: 4 and 2 late frames;
+  - auto: 5, 10 and 5 late frames, with 4-8 scale changes per run. It follows the demo's heavy/light
+    scenes; hysteresis is "step down on 2+ late frames per 30, up after 3 s without any".
+  - With vsync the software GPU mostly holds 60 fps (~1% late at full resolution). The uncapped "13%
+    over 16.7 ms" figure measured CPU work, not presentation.
+- Auto stays experimental (opt-in); next: a GPU timer query (EXT_disjoint_timer_query_webgl2 /
+  WebGPU timestamps) instead of frame-interval inference, plus upscaling quality (CSS
+  `image-rendering`, or an FSR-style pass).

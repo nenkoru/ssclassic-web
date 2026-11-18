@@ -10,6 +10,23 @@
 // handles (index into the tables below; 0 = none). OPCODES MUST MATCH the OP_* enum in gl1shim.c.
 Module['se1gfx'] = (function () {
   var gl = null, vao, vbuf, ibuf, qbuf, qcap = 0;
+  // render scale (dynamic resolution): the engine keeps its logical size (SDL's canvas size, HUD
+  // layout, input coordinates); we draw into a smaller backing store and scale viewport/scissor.
+  // The canvas keeps its CSS size, so the browser stretches the result to fill it.
+  var logW = 0, logH = 0, backW = 0, backH = 0, sx = 1, sy = 1;
+  function applyScale() {
+    var c = Module['canvas'];
+    if (c.width !== backW || c.height !== backH) { logW = c.width; logH = c.height; }  // SDL set a new mode
+    var s = Math.min(1, Math.max(0.25, Module['se1Scale'] || 1));
+    var bw = Math.max(1, Math.round(logW * s)), bh = Math.max(1, Math.round(logH * s));
+    if (bw !== c.width || bh !== c.height) {
+      if (!c.style.width || c.dataset.se1Scaled) { c.style.width = logW + 'px'; c.style.height = logH + 'px'; c.dataset.se1Scaled = '1'; }
+      c.width = bw; c.height = bh;
+    }
+    backW = bw; backH = bh; sx = bw / logW; sy = bh / logH;
+  }
+  function sxr(v) { return Math.round(v * sx); }
+  function syr(v) { return Math.round(v * sy); }
   var progs = [null], ulocs = [null], texs = [null];
 
   function init() {
@@ -20,6 +37,7 @@ Module['se1gfx'] = (function () {
     vbuf = gl.createBuffer(); ibuf = gl.createBuffer(); qbuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, vbuf);    // every attribute points into the vertex arena
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibuf);
+    applyScale();
   }
   function shader(type, src) {
     var s = gl.createShader(type);
@@ -71,8 +89,21 @@ Module['se1gfx'] = (function () {
     },
     readPixels: function (x, y, w, h, fmt, type, ptr, len) {
       init();
-      gl.readPixels(x, y, w, h, fmt, type, HEAPU8.subarray(ptr, ptr + len));
+      if (sx === 1 && sy === 1) { gl.readPixels(x, y, w, h, fmt, type, HEAPU8.subarray(ptr, ptr + len)); return; }
+      // logical-pixel request on a scaled backing store: read scaled, resample nearest (RGBA only)
+      var rx = sxr(x), ry = syr(y), rw = Math.max(1, sxr(x + w) - rx), rh = Math.max(1, syr(y + h) - ry);
+      var tmp = new Uint8Array(rw * rh * 4), out = HEAPU8.subarray(ptr, ptr + len);
+      gl.readPixels(rx, ry, rw, rh, gl.RGBA, gl.UNSIGNED_BYTE, tmp);
+      for (var j = 0; j < h; j++) {
+        var sj = Math.min(rh - 1, Math.floor(j * rh / h));
+        for (var i = 0; i < w; i++) {
+          var si = (sj * rw + Math.min(rw - 1, Math.floor(i * rw / w))) * 4, di = (j * w + i) * 4;
+          out[di] = tmp[si]; out[di + 1] = tmp[si + 1]; out[di + 2] = tmp[si + 2]; out[di + 3] = tmp[si + 3];
+        }
+      }
     },
+    // called once per frame after the swap flush: resolution changes take effect next frame
+    endFrame: function () { if (gl) applyScale(); },
     pixelStore: function (p, v) { init(); gl.pixelStorei(p, v); },
     sync: function () { if (gl) gl.finish(); return null; },
     // visual regression capture: bottom-up RGBA, delivered to cb (synchronously here)
@@ -107,8 +138,10 @@ Module['se1gfx'] = (function () {
         case 7:  gl.cullFace(I[c + 1]); c += 2; break;                                 // CULLFACE m
         case 8:  gl.frontFace(I[c + 1]); c += 2; break;                                // FRONTFACE m
         case 9:  gl.polygonOffset(F[c + 1], F[c + 2]); c += 3; break;                  // POLYOFFSET f u
-        case 10: gl.viewport(I[c + 1], I[c + 2], I[c + 3], I[c + 4]); c += 5; break;
-        case 11: gl.scissor(I[c + 1], I[c + 2], I[c + 3], I[c + 4]); c += 5; break;
+        case 10: var vx = sxr(I[c + 1]), vy = syr(I[c + 2]);                     // VIEWPORT (scaled)
+                 gl.viewport(vx, vy, sxr(I[c + 1] + I[c + 3]) - vx, syr(I[c + 2] + I[c + 4]) - vy); c += 5; break;
+        case 11: var qx = sxr(I[c + 1]), qy = syr(I[c + 2]);                     // SCISSOR (scaled)
+                 gl.scissor(qx, qy, sxr(I[c + 1] + I[c + 3]) - qx, syr(I[c + 2] + I[c + 4]) - qy); c += 5; break;
         case 12: gl.clearColor(F[c + 1], F[c + 2], F[c + 3], F[c + 4]); c += 5; break;
         case 13: gl.clearDepth(F[c + 1]); c += 2; break;
         case 14: gl.clearStencil(I[c + 1]); c += 2; break;

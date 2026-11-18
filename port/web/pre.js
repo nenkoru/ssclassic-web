@@ -8,6 +8,11 @@
   if (q.get('args')) args = args.concat(q.get('args').split(' ').filter(Boolean));
   if (args.length) Module['arguments'] = args;
   if (q.get('uncapped') === '1') Module['se1Uncapped'] = true;   // timedemo: no vsync wait (port/common/WebFrame.cpp)
+  // ?scale=0.5 renders at half resolution (engine/HUD/input stay at full logical size);
+  // ?scale=auto = dynamic resolution: lowers it while frames are GPU-bound, raises it with headroom
+  var sc = q.get('scale');
+  if (sc === 'auto') Module['se1Drs'] = { min: 0.5 };
+  else if (sc && +sc > 0) Module['se1Scale'] = Math.min(1, +sc);
   // ?shots=<label>: deterministic demo replay, capture frames at fixed demo times and POST them
   // to the dev server (tools/devserver.py saves them under data/shots/<label>/). Starts at 3 s:
   // lens flares fade on wall-clock time, so the first second varies run to run.

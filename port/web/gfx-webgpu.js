@@ -128,8 +128,11 @@
         glCanvas.parentNode.insertBefore(canvas, glCanvas.nextSibling);
         ctx = canvas.getContext('webgpu');
       }
-      if (glCanvas.width !== W || glCanvas.height !== H) {
-        W = canvas.width = glCanvas.width; H = canvas.height = glCanvas.height; resized = true;
+      // render scale: SDL's canvas has the engine's logical size; we draw at curScale of it
+      var bw = Math.max(1, Math.round(glCanvas.width * curScale)), bh = Math.max(1, Math.round(glCanvas.height * curScale));
+      logW = glCanvas.width; logH = glCanvas.height;
+      if (bw !== W || bh !== H) {
+        W = canvas.width = bw; H = canvas.height = bh; resized = true;
         ctx.configure({ device: dev, format: fmt, alphaMode: 'opaque', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
         if (depthTex) depthTex.destroy();
         depthTex = dev.createTexture({ size: [W, H], format: 'depth32float', usage: GPUTextureUsage.RENDER_ATTACHMENT });
@@ -143,6 +146,7 @@
       if (s.left !== l) s.left = l; if (s.top !== t) s.top = t;
       if (s.width !== w) s.width = w; if (s.height !== h) s.height = h;
     }
+    var curScale = 1, logW = 1, logH = 1;
 
     // ---- objects owned by the replayer (integer handles, 0 = none) ----
     var progs = [null], ulocs = [null], texs = [null];
@@ -388,6 +392,8 @@
         H32[o] = 0; return 0;
       },
       // timedemo: wait for the frame from 2 frames ago, not this one (bounded queue, no full stall)
+      // once per frame after the swap flush: a new render scale takes effect next frame
+      endFrame: function () { curScale = Math.min(1, Math.max(0.25, Module['se1Scale'] || 1)); },
       sync: function () { fences.push(dev.queue.onSubmittedWorkDone()); return fences.length > 2 ? fences.shift() : null; },
       // visual regression capture: copy the frame, deliver bottom-up RGBA like glReadPixels
       capture: function (cb) {
@@ -402,7 +408,7 @@
           for (var yy = 0; yy < h; yy++) {
             var si = (h - 1 - yy) * bpr, di = yy * w * 4;
             for (var xx = 0; xx < w; xx++, si += 4, di += 4) {
-              out[di] = src[si + (bgra ? 2 : 0)]; out[di + 1] = src[si + 1]; out[di + 2] = src[si + (bgra ? 0 : 2)]; out[di + 3] = src[si + 3];
+              out[di] = src[si + (bgra ? 2 : 0)]; out[di + 1] = src[si + 1]; out[di + 2] = src[si + (bgra ? 0 : 2)]; out[di + 3] = 255;   // canvas is alphaMode 'opaque': alpha isn't shown
             }
           }
           buf.unmap(); buf.destroy();
@@ -424,16 +430,21 @@
         var pipeDirty = true, texDirty = true, uniDirty = true, vpDirty = true, scDirty = true;
         var curPipe = null, curTBG = null, lastU = null, lastIdx = null, vbOff = [-1, -1, -1, -1, -1, -1], lastTopo = null, lastStrip;
 
+        var sx = W / logW, sy = H / logH;   // logical (engine) -> backing pixels
         function setViewport() {
-          var x = Math.max(0, st.vp[0]), w = Math.min(st.vp[2], W - x), y = Math.max(0, H - st.vp[1] - st.vp[3]), h = Math.min(st.vp[3], H - y);
+          var x0 = Math.round(st.vp[0] * sx), y0 = Math.round(st.vp[1] * sy);
+          var vw = Math.round((st.vp[0] + st.vp[2]) * sx) - x0, vh = Math.round((st.vp[1] + st.vp[3]) * sy) - y0;
+          var x = Math.max(0, x0), w = Math.min(vw, W - x), y = Math.max(0, H - y0 - vh), h = Math.min(vh, H - y);
           if (w > 0 && h > 0) pass.setViewport(x, y, w, h, Math.min(st.dnear, st.dfar), Math.max(st.dnear, st.dfar));
           vpDirty = false;
         }
         function setScissor() {
           if (!st.scissorTest) pass.setScissorRect(0, 0, W, H);
           else {
-            var x = Math.max(0, Math.min(W, st.sc[0])), y = Math.max(0, Math.min(H, H - st.sc[1] - st.sc[3]));
-            var w = Math.max(0, Math.min(W - x, st.sc[2])), h = Math.max(0, Math.min(H - y, st.sc[3]));
+            var s0 = Math.round(st.sc[0] * sx), s1 = Math.round(st.sc[1] * sy);
+            var sw = Math.round((st.sc[0] + st.sc[2]) * sx) - s0, sh = Math.round((st.sc[1] + st.sc[3]) * sy) - s1;
+            var x = Math.max(0, Math.min(W, s0)), y = Math.max(0, Math.min(H, H - s1 - sh));
+            var w = Math.max(0, Math.min(W - x, sw)), h = Math.max(0, Math.min(H - y, sh));
             pass.setScissorRect(x, y, w, h);
           }
           scDirty = false;
