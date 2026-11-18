@@ -31,7 +31,11 @@ Module['se1gfx'] = (function () {
 
   function init() {
     if (gl) return;
-    gl = GL.currentContext.GLctx;
+    // single-threaded build: SDL's context. SE1_THREADS: the engine thread has no GL context,
+    // so the main-thread replayer creates its own on the page canvas.
+    gl = (typeof GL !== 'undefined' && GL.currentContext) ? GL.currentContext.GLctx
+       : Module['canvas'].getContext('webgl2', { alpha: false, depth: true, stencil: true, antialias: false,
+                                                 premultipliedAlpha: true, preserveDrawingBuffer: false });
     vao = gl.createVertexArray();
     gl.bindVertexArray(vao);                 // the only VAO, bound for good
     vbuf = gl.createBuffer(); ibuf = gl.createBuffer(); qbuf = gl.createBuffer();
@@ -105,6 +109,7 @@ Module['se1gfx'] = (function () {
     // called once per frame after the swap flush: resolution changes take effect next frame
     endFrame: function () { if (gl) applyScale(); },
     pixelStore: function (p, v) { init(); gl.pixelStorei(p, v); },
+    hasAnisotropy: function () { init(); return !!gl.getExtension('EXT_texture_filter_anisotropic'); },
     sync: function () { if (gl) gl.finish(); return null; },
     // visual regression capture: bottom-up RGBA, delivered to cb (synchronously here)
     capture: function (cb) {
@@ -122,7 +127,7 @@ Module['se1gfx'] = (function () {
       H[o] = 0; return 0;
     },
 
-    replay: function (cp, n, vp, vn, ip, inn) {
+    replay: function (cp, n, vp, vn, ip, inn, dp, dn) {
       init();
       var I = HEAP32, F = HEAPF32, c = cp >> 2, end = c + n;
       if (vn) gl.bufferData(gl.ARRAY_BUFFER, HEAPU8.subarray(vp, vp + vn), gl.STREAM_DRAW);
@@ -168,6 +173,11 @@ Module['se1gfx'] = (function () {
           gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibuf);
           c += 3; break;
         case 33: gl.drawArrays(I[c + 1], I[c + 2], I[c + 3]); c += 4; break;           // mode first count
+        case 34:                                                                        // TEXIMAGE (data in the data arena)
+          this.texImage(I[c + 1], I[c + 2], I[c + 3], I[c + 4], I[c + 5], I[c + 6], I[c + 7], I[c + 8], I[c + 9],
+                        I[c + 10] >= 0 ? dp + I[c + 10] : 0, I[c + 11]);
+          c += 12; break;
+        case 35: gl.pixelStorei(I[c + 1], I[c + 2]); c += 3; break;                    // PIXELSTORE
         default:
           console.error('gl1shim replay: bad opcode ' + I[c] + ' at word ' + (c - (cp >> 2)));
           return;

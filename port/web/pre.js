@@ -55,3 +55,39 @@ Module['preRun'] = (Module['preRun'] || []).concat([function () {
     }
   };
 }]);
+
+// Visual regression capture (?shots=): called once per frame right before the swap, after the
+// frame's commands were replayed. Grabs frames at fixed demo times via the active replayer.
+Module['se1CaptureFrame'] = function () {
+  var S = Module.se1Shots;
+  if (!S || S.done || !Module['se1gfx']) return;
+  var t = Module._SE1_DemoTime();
+  while (t >= 0 && S.i < S.times.length && t >= S.times[S.i]) {
+    var tname = 't' + String(Math.round(S.times[S.i] * 100)).padStart(5, '0');
+    S.pending++;
+    Module['se1gfx'].capture(function (px, w, h) {   // bottom-up RGBA from either replayer
+      fetch('/__shots/' + encodeURIComponent(S.label) + '/' + tname + '_' + w + 'x' + h + '.rgba', { method: 'POST', body: px })
+        .finally(function () { S.pending--; if (S.done && S.pending === 0) window.__shotsDone = true; });
+    });
+    S.i++;
+  }
+  if (S.i >= S.times.length) { S.done = true; if (S.pending === 0) window.__shotsDone = true; }
+};
+
+// SE1_THREADS build (port/common/WebFrame.cpp): runs on the page's main thread. Bumps a shared
+// counter on every animation frame (and every 100 ms while hidden, so the simulation keeps going),
+// which the engine worker waits on after each frame, and exposes the worker's per-frame CPU times
+// (a ring in shared memory) as Module.se1Perf, the same shape the single-threaded build uses.
+Module['se1StartFrameLoop'] = function (tickPtr, nPtr, workPtr) {
+  var tick = tickPtr >> 2;
+  var n = nPtr >> 2;
+  var work = workPtr >> 2;
+  Module.se1Perf = {
+    get n() { return Atomics.load(HEAP32, n); },
+    set n(v) { Atomics.store(HEAP32, n, v); },
+    get work() { return HEAPF32.subarray(work, work + 65536); }
+  };
+  function bump() { Atomics.add(HEAP32, tick, 1); Atomics.notify(HEAP32, tick); }
+  (function raf() { bump(); requestAnimationFrame(raf); })();
+  setInterval(function () { if (document.hidden) bump(); }, 100);
+};

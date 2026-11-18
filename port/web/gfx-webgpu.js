@@ -384,8 +384,11 @@
         if (!warnedRead) { warnedRead = true; console.warn('se1gfx webgpu: glReadPixels is not supported (returns black)'); }
       },
       pixelStore: function () {},
+      hasAnisotropy: function () { return true; },   // WebGPU samplers support maxAnisotropy
       getParam: function (pname, ptr, isFloat) {   // constants: SDL's WebGL2 context still exists
-        var gl = GL_ctx(), v = gl ? gl.getParameter(pname) : 0, H32 = isFloat ? HEAPF32 : HEAP32, o = ptr >> 2;
+        var gl = GL_ctx(), H32 = isFloat ? HEAPF32 : HEAP32, o = ptr >> 2, v;
+        if (gl) v = gl.getParameter(pname);
+        else v = ({ 0x0D33: dev.limits.maxTextureDimension2D, 0x84FF: 16, 0x84E2: 4 })[pname] || 0;  // threads build: no GL context
         if (v === null || v === undefined) { H32[o] = 0; return 0; }
         if (typeof v === 'number' || typeof v === 'boolean') { H32[o] = +v; return 1; }
         if (v.length !== undefined) { for (var i = 0; i < v.length; i++) H32[o + i] = +v[i]; return v.length; }
@@ -416,16 +419,21 @@
         });
       },
 
-      replay: function (cp, n, vp, vn, ip, inn) {
+      replay: function (cp, n, vp, vn, ip, inn, dp, dn) {
         ensureTarget();
         if (vn) { vbuf.ensure(vn); dev.queue.writeBuffer(vbuf.buf, 0, HEAPU8, vp, (vn + 3) & ~3); }
         if (inn) { ibuf.ensure(inn); dev.queue.writeBuffer(ibuf.buf, 0, HEAPU8, ip, (inn + 3) & ~3); }
         var I = HEAP32, F = HEAPF32, c = cp >> 2, end = c + n;
-        var enc = dev.createCommandEncoder();
-        var pass = enc.beginRenderPass({
-          colorAttachments: [{ view: ctx.getCurrentTexture().createView(), loadOp: 'load', storeOp: 'store' }],
-          depthStencilAttachment: { view: depthView, depthLoadOp: 'load', depthStoreOp: 'store' }
-        });
+        var colorView = ctx.getCurrentTexture().createView();
+        function beginPass() {
+          enc = dev.createCommandEncoder();
+          pass = enc.beginRenderPass({
+            colorAttachments: [{ view: colorView, loadOp: 'load', storeOp: 'store' }],
+            depthStencilAttachment: { view: depthView, depthLoadOp: 'load', depthStoreOp: 'store' }
+          });
+        }
+        var enc, pass;
+        beginPass();
         // per-pass dirty tracking
         var pipeDirty = true, texDirty = true, uniDirty = true, vpDirty = true, scDirty = true;
         var curPipe = null, curTBG = null, lastU = null, lastIdx = null, vbOff = [-1, -1, -1, -1, -1, -1], lastTopo = null, lastStrip;
@@ -477,6 +485,15 @@
           if (texDirty) { var bg = textureBindGroup(P.key); if (bg !== curTBG) { pass.setBindGroup(1, bg); curTBG = bg; } texDirty = false; }
           for (var l = 0; l < 6; l++) if ((st.attrOn & (1 << l)) && vbOff[l] !== st.attr[l].off) { pass.setVertexBuffer(l, vbuf.buf, st.attr[l].off); vbOff[l] = st.attr[l].off; }
           return true;
+        }
+        // queue.writeTexture runs ahead of not-yet-submitted draws: submit what was recorded so far,
+        // upload, then continue in a fresh pass, so draws see texture contents in GL order
+        function splitForUpload() {
+          pass.end(); upool.finish(); xpool.finish(); dev.queue.submit([enc.finish()]);
+          beginPass();
+          pipeDirty = texDirty = uniDirty = vpDirty = scDirty = true;
+          curPipe = null; curTBG = null; lastU = null; boundU = null; lastIdx = null; lastTopo = null;
+          vbOff = [-1, -1, -1, -1, -1, -1];
         }
         function genIndices(list) {
           var a = xpool.alloc(list.length);
@@ -584,6 +601,13 @@
             else if (TOPO[m] && prep(TOPO[m])) pass.draw(cn, 1, first);
             c += 4; break;
           }
+          case 34:                                                             // TEXIMAGE (data in the data arena)
+            splitForUpload();
+            api.texImage(I[c + 1], I[c + 2], I[c + 3], I[c + 4], I[c + 5], I[c + 6], I[c + 7], I[c + 8], I[c + 9],
+                         I[c + 10] >= 0 ? dp + I[c + 10] : 0, I[c + 11]);
+            texDirty = true;
+            c += 12; break;
+          case 35: c += 3; break;                                              // PIXELSTORE: n/a
           default:
             console.error('se1gfx webgpu replay: bad opcode ' + I[c]);
             c = end;

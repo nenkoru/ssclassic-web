@@ -24,24 +24,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE float SE1_DemoTime(void)
   return _pNetwork->ga_fDemoTimer;
 }
 
-EM_JS(void, se1_capture_frame, (void), {
-  var S = Module.se1Shots;
-  if (S && !S.done && typeof GL !== 'undefined' && GL.currentContext) {
-    var t = Module._SE1_DemoTime();
-    while (t >= 0 && S.i < S.times.length && t >= S.times[S.i]) {
-      var tname = 't' + String(Math.round(S.times[S.i] * 100)).padStart(5, '0');
-      S.pending++;
-      Module['se1gfx'].capture(function (px, w, h) {   /* bottom-up RGBA from either replayer */
-        fetch('/__shots/' + encodeURIComponent(S.label) + '/' + tname + '_' + w + 'x' + h + '.rgba', { method: 'POST', body: px })
-          .finally(function() { S.pending--; if (S.done && S.pending === 0) window.__shotsDone = true; });
-      });
-      S.i++;
-    }
-    if (S.i >= S.times.length) { S.done = true; if (S.pending === 0) window.__shotsDone = true; }
-  }
-
-});
-
+#ifndef SE1_THREADS
 EM_ASYNC_JS(void, se1_wait_frame, (void), {
   var P = Module.se1Perf || (Module.se1Perf = { work: new Float32Array(65536), n: 0, resumed: 0 });
   var now = performance.now();
@@ -99,6 +82,7 @@ EM_ASYNC_JS(void, se1_wait_frame, (void), {
     D.last = tn;
   }
 });
+#endif
 
 #ifdef SE1_WITH_RUSTMOD
 void SE1Mod_Frame(void);  // port/common/Se1ModHost.cpp
@@ -108,6 +92,8 @@ void SE1Mod_Frame(void);  // port/common/Se1ModHost.cpp
    browser may present + clear the drawing buffer during that yield, so read frames back here */
 extern "C" void SE1_GL1Shim_Flush(void);  // port/common/gl1shim.c: replay this frame's commands
 
+#ifndef SE1_THREADS
+EM_JS(void, se1_capture_frame, (void), { if (Module['se1CaptureFrame']) Module['se1CaptureFrame'](); });
 EM_JS(void, se1_end_frame, (void), { if (Module['se1gfx'] && Module['se1gfx'].endFrame) Module['se1gfx'].endFrame(); });
 
 extern "C" void SE1_BeforeSwap(void)
@@ -124,3 +110,52 @@ extern "C" void SE1_YieldToBrowser(void)
 #endif
   se1_wait_frame();
 }
+
+#else  /* SE1_THREADS: the engine runs in a worker (render plan phase 3) */
+#include <emscripten/threading.h>
+#include <emscripten/atomic.h>
+
+/* Incremented by the page's main thread on every animation frame (and every 100 ms while the tab
+   is hidden, so the simulation keeps running for multiplayer). The engine blocks on it after each
+   frame instead of awaiting rAF through JSPI. */
+static volatile int32_t _vsyncTick;
+/* per-frame CPU work time, exposed to the page as Module.se1Perf (same shape as the JSPI build) */
+static float _perfWork[65536];
+static volatile int32_t _perfN;
+static double _resumed;
+static int _uncapped = -1;
+
+static void start_main_thread_loop(void)
+{
+  static int started;
+  if (started) return;
+  started = 1;
+  /* JS in port/web/pre.js: EM_ASM splits its code at top-level commas, so keep it a single call */
+  MAIN_THREAD_EM_ASM({ Module['se1StartFrameLoop']($0, $1, $2); }, &_vsyncTick, &_perfN, _perfWork);
+}
+
+extern "C" void SE1_BeforeSwap(void)
+{
+  SE1_GL1Shim_Flush();   // replayed on the main thread (synchronous proxy for now)
+  MAIN_THREAD_EM_ASM({
+    if (Module['se1CaptureFrame']) Module['se1CaptureFrame']();
+    if (Module['se1gfx'] && Module['se1gfx'].endFrame) Module['se1gfx'].endFrame();
+  });
+}
+
+extern "C" void SE1_YieldToBrowser(void)
+{
+  double now = emscripten_get_now();
+  if (_resumed > 0) { _perfWork[_perfN & 65535] = (float)(now - _resumed); _perfN = _perfN + 1; }
+  start_main_thread_loop();
+  if (_uncapped < 0) _uncapped = MAIN_THREAD_EM_ASM_INT({ return Module.se1Uncapped ? 1 : 0; });
+  if (_uncapped) {
+    /* timedemo: no vsync wait; one GPU sync per frame keeps the queue bounded (WebGL2) */
+    MAIN_THREAD_EM_ASM({ if (Module['se1gfx'] && Module['se1gfx'].sync) Module['se1gfx'].sync(); });
+  } else {
+    int32_t seen = _vsyncTick;
+    while (_vsyncTick == seen) emscripten_futex_wait((void *)&_vsyncTick, (uint32_t)seen, 100.0);
+  }
+  _resumed = emscripten_get_now();
+}
+#endif

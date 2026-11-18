@@ -162,7 +162,8 @@ enum {
   OP_ACTIVETEX = 17, OP_BINDTEX = 18, OP_TEXPARAMI = 19, OP_TEXPARAMF = 20, OP_DELTEX = 21,
   OP_USEPROG = 22, OP_UNIFORM1I = 23, OP_UNIFORM1F = 24, OP_UNIFORM4F = 25, OP_UNIFORMMAT4 = 26,
   OP_ATTRIB_ON = 27, OP_ATTRIB_OFF = 28, OP_ATTRIB_CONST = 29, OP_ATTRIB_PTR = 30,
-  OP_DRAW_ELEMENTS = 31, OP_DRAW_QUADS = 32, OP_DRAW_ARRAYS = 33
+  OP_DRAW_ELEMENTS = 31, OP_DRAW_QUADS = 32, OP_DRAW_ARRAYS = 33,
+  OP_TEXIMAGE = 34, OP_PIXELSTORE = 35
 };
 typedef union { int32_t i; float f; } Word;
 static Word *_cmd; static size_t _ncmd, _capcmd;
@@ -189,6 +190,7 @@ static void cmd_loc_fv(int op, int loc, const float *v, int n) {
 
 typedef struct { uint8_t *p; size_t n, cap; } Arena;
 static Arena _va, _ia;   /* vertex / index data of the current flush */
+static Arena _da;        /* texture upload data of the current flush (OP_TEXIMAGE) */
 static size_t arena_alloc(Arena *a, size_t n, size_t align) {
   size_t off = (a->n + align - 1) & ~(align - 1);
   if (off + n > a->cap) {
@@ -200,8 +202,29 @@ static size_t arena_alloc(Arena *a, size_t n, size_t align) {
   return off;
 }
 
-EM_JS(void, gfx_replay, (const void *c, int n, const void *v, int nv, const void *ix, int ni),
-      { Module['se1gfx'].replay(c, n, v, nv, ix, ni); });
+#ifdef SE1_THREADS
+/* engine runs in a worker: the replayer (and WebGL/WebGPU) live on the page's main thread.
+   Every call is proxied synchronously; pointers are into shared memory, valid on both threads.
+   TODO: hand frames over asynchronously (double-buffered stream) instead of a sync replay. */
+#include <emscripten/threading.h>
+static void gfx_replay(const void *c, int n, const void *v, int nv, const void *ix, int ni, const void *d, int nd)
+  { MAIN_THREAD_EM_ASM({ Module['se1gfx'].replay($0, $1, $2, $3, $4, $5, $6, $7); }, c, n, v, nv, ix, ni, d, nd); }
+static int gfx_create_program(const char *vs, const char *fs, unsigned key)
+  { return MAIN_THREAD_EM_ASM_INT({ return Module['se1gfx'].createProgram(UTF8ToString($0), UTF8ToString($1), $2 >>> 0); }, vs, fs, key); }
+static int gfx_uniform_location(int prog, const char *name)
+  { return MAIN_THREAD_EM_ASM_INT({ return Module['se1gfx'].uniformLocation($0, UTF8ToString($1)); }, prog, name); }
+static int gfx_gen_texture(void) { return MAIN_THREAD_EM_ASM_INT({ return Module['se1gfx'].genTexture(); }); }
+static void gfx_quad_capacity(int ctQuads) { MAIN_THREAD_EM_ASM({ Module['se1gfx'].quadCapacity($0); }, ctQuads); }
+static void gfx_tex_image(int sub, int target, int level, int x, int y, int w, int h, int fmt, int type, const void *data, int len)
+  { MAIN_THREAD_EM_ASM({ Module['se1gfx'].texImage($0, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10); }, sub, target, level, x, y, w, h, fmt, type, data, len); }
+static void gfx_read_pixels(int x, int y, int w, int h, int fmt, int type, void *out, int len)
+  { MAIN_THREAD_EM_ASM({ Module['se1gfx'].readPixels($0, $1, $2, $3, $4, $5, $6, $7); }, x, y, w, h, fmt, type, out, len); }
+static int gfx_get_param(int pname, void *out, int isFloat)
+  { return MAIN_THREAD_EM_ASM_INT({ return Module['se1gfx'].getParam($0, $1, $2); }, pname, out, isFloat); }
+static void gfx_pixel_store(int p, int v) { MAIN_THREAD_EM_ASM({ Module['se1gfx'].pixelStore($0, $1); }, p, v); }
+#else
+EM_JS(void, gfx_replay, (const void *c, int n, const void *v, int nv, const void *ix, int ni, const void *d, int nd),
+      { Module['se1gfx'].replay(c, n, v, nv, ix, ni, d, nd); });
 EM_JS(int, gfx_create_program, (const char *vs, const char *fs, unsigned key),
       { return Module['se1gfx'].createProgram(UTF8ToString(vs), UTF8ToString(fs), key >>> 0); });
 EM_JS(int, gfx_uniform_location, (int prog, const char *name),
@@ -215,10 +238,13 @@ EM_JS(void, gfx_read_pixels, (int x, int y, int w, int h, int fmt, int type, voi
 EM_JS(int, gfx_get_param, (int pname, void *out, int isFloat), { return Module['se1gfx'].getParam(pname, out, isFloat); });
 EM_JS(void, gfx_pixel_store, (int p, int v), { Module['se1gfx'].pixelStore(p, v); });
 
+#endif
+
 /* hand everything recorded so far to the replayer (exported: also called before every swap) */
+void SE1_GL1Shim_Flush(void);
 void SE1_GL1Shim_Flush(void) {
-  if (_ncmd || _va.n || _ia.n) gfx_replay(_cmd, (int)_ncmd, _va.p, (int)_va.n, _ia.p, (int)_ia.n);
-  _ncmd = 0; _va.n = 0; _ia.n = 0;
+  if (_ncmd || _va.n || _ia.n) gfx_replay(_cmd, (int)_ncmd, _va.p, (int)_va.n, _ia.p, (int)_ia.n, _da.p, (int)_da.n);
+  _ncmd = 0; _va.n = 0; _ia.n = 0; _da.n = 0;
 }
 
 /* ---- state caches: skip recording commands that change nothing (WebGL state persists
@@ -535,20 +561,32 @@ static void shim_glBindTexture(GLenum target, GLuint t) {
   if (S.boundTex[S.activeUnit] == t) return;
   S.boundTex[S.activeUnit] = t; cmd_ii(OP_BINDTEX, (int)target, (int)t);
 }
+/* Texture uploads are commands in the stream (pixels copied into the data arena), so they replay
+   in order inside the frame: no mid-frame replays (in the threaded build each replay is its own
+   main-thread task, and the browser could present a half-drawn frame between them). During level
+   loads the arena is flushed every 32 MB to bound memory. */
+static void record_tex_image(int sub, GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h,
+                             GLenum fmt, GLenum type, const void *data) {
+  int len = data ? w * h * 4 : 0;   /* the engine uploads RGBA8 */
+  int off = -1;
+  if (data) { off = (int)arena_alloc(&_da, (size_t)len, 16); memcpy(_da.p + off, data, (size_t)len); }
+  Word *c = cmd(OP_TEXIMAGE, 11);
+  c[0].i = sub; c[1].i = (int)target; c[2].i = level; c[3].i = x; c[4].i = y; c[5].i = w; c[6].i = h;
+  c[7].i = (int)fmt; c[8].i = (int)type; c[9].i = off; c[10].i = len;
+  if (_da.n > (32u << 20)) SE1_GL1Shim_Flush();
+}
 static void shim_glTexImage2D(GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border,
                               GLenum fmt, GLenum type, const void *data) {
   shim_init();
   if (level == 0) { TexInfo *ti = tex_info(S.boundTex[S.activeUnit], 1); ti->ifmt = ifmt; ti->w = w; ti->h = h; }
   /* the engine always supplies RGBA8 pixels; GL1 internal formats (RGB5_A1, LUMINANCE8, ...) → RGBA8 */
   (void)border;
-  SE1_GL1Shim_Flush();   /* uploads run now; binding/order must match what was recorded */
-  gfx_tex_image(0, (int)target, level, 0, 0, w, h, (int)fmt, (int)type, data, data ? w * h * 4 : 0);
+  record_tex_image(0, target, level, 0, 0, w, h, fmt, type, data);
 }
 static void shim_glTexSubImage2D(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h,
                                  GLenum fmt, GLenum type, const void *data) {
   shim_init();
-  SE1_GL1Shim_Flush();
-  gfx_tex_image(1, (int)target, level, x, y, w, h, (int)fmt, (int)type, data, data ? w * h * 4 : 0);
+  record_tex_image(1, target, level, x, y, w, h, fmt, type, data);
 }
 static void shim_glGenTextures(GLsizei n, GLuint *t) { shim_init(); for (int i = 0; i < n; i++) t[i] = (GLuint)gfx_gen_texture(); }
 static void shim_glTexParameteri(GLenum target, GLenum pname, GLint v) {
@@ -768,25 +806,36 @@ static const GLubyte *shim_glGetString(GLenum name) {
     if (!_strExtensions[0]) {
       strcpy(_strExtensions, "GL_ARB_multitexture GL_EXT_texture_env_combine GL_ARB_texture_env_combine "
                              "GL_EXT_compiled_vertex_array GL_EXT_texture_edge_clamp");
+#ifdef SE1_THREADS
+      if (MAIN_THREAD_EM_ASM_INT({ return Module['se1gfx'].hasAnisotropy() ? 1 : 0; }))
+        strcat(_strExtensions, " GL_EXT_texture_filter_anisotropic");
+#else
       const char *real = (const char *)glGetString(GL_EXTENSIONS);
       if (real && strstr(real, "texture_filter_anisotropic")) strcat(_strExtensions, " GL_EXT_texture_filter_anisotropic");
+#endif
     }
     return (const GLubyte *)_strExtensions;
   }
   if (name == GL_VERSION) return (const GLubyte *)"1.3 (SE1 gl1shim on WebGL2)";
+#ifdef SE1_THREADS
+  /* the engine worker has no GL context: same strings Chrome's WebGL reports (same GLSettings preset) */
+  if (name == GL_VENDOR) return (const GLubyte *)"WebKit";
+  if (name == GL_RENDERER) return (const GLubyte *)"WebKit WebGL";
+  return (const GLubyte *)"";
+#else
   return glGetString(name);
+#endif
 }
 static void shim_glGetIntegerv(GLenum p, GLint *out) {
   if (p == GL1_MAX_TEXTURE_UNITS) { *out = MAXUNITS; return; }
   shim_init();
-  SE1_GL1Shim_Flush();
-  gfx_get_param((int)p, out, 0);
+  gfx_get_param((int)p, out, 0);   /* engine queries constants (limits): no flush needed */
 }
 
 /* ---- core GL calls the engine makes directly: recorded too, so they stay in order ---- */
-static void shim_glGetFloatv(GLenum p, GLfloat *out) { shim_init(); SE1_GL1Shim_Flush(); gfx_get_param((int)p, out, 1); }
+static void shim_glGetFloatv(GLenum p, GLfloat *out) { shim_init(); gfx_get_param((int)p, out, 1); }
 static GLenum shim_glGetError(void) { return GL_NO_ERROR; }  /* WebGL reports errors in the console */
-static void shim_glPixelStorei(GLenum p, GLint v) { shim_init(); SE1_GL1Shim_Flush(); gfx_pixel_store((int)p, v); }
+static void shim_glPixelStorei(GLenum p, GLint v) { shim_init(); cmd_ii(OP_PIXELSTORE, (int)p, v); }
 static void shim_glBlendFunc(GLenum s, GLenum d) { shim_init(); cmd_ii(OP_BLENDFUNC, (int)s, (int)d); }
 static void shim_glDepthFunc(GLenum f) { shim_init(); cmd_i(OP_DEPTHFUNC, (int)f); }
 static void shim_glDepthMask(GLboolean f) { shim_init(); cmd_i(OP_DEPTHMASK, f ? 1 : 0); }

@@ -54,12 +54,23 @@ set(EH_FLAGS -fwasm-exceptions -sSUPPORT_LONGJMP=wasm)
 option(SE1_DEV "Developer build (assertions, no LTO)" ON)
 option(SE1_PROFILE "Keep function names (profiling)" OFF)
 option(SE1_SIMD "Enable wasm SIMD (-msimd128)" ON)
+# Engine in a worker (render plan phase 3): pthreads + PROXY_TO_PTHREAD, frames handed to the
+# page's main thread through shared memory. Needs COOP/COEP (tools/devserver.py --isolate).
+option(SE1_THREADS "Run the engine in a worker thread" OFF)
 set(OPT_FLAGS "")
 if(SE1_SIMD)
   list(APPEND OPT_FLAGS -msimd128)
 endif()
 if(NOT SE1_DEV)
   list(APPEND OPT_FLAGS -O3 -flto)
+endif()
+if(SE1_THREADS)
+  list(APPEND OPT_FLAGS -pthread)
+  add_compile_definitions(SE1_THREADS=1)
+  # rename the engine's SDL_GL_* calls to stubs: the worker has no GL context (sdlgl_threads.h)
+  add_compile_options("SHELL:-include ${ROOT}/port/common/sdlgl_threads.h")
+  # Rust's precompiled std for wasm32-unknown-emscripten has no atomics: needs nightly build-std
+  set(SE1_RUSTMOD OFF CACHE BOOL "Link the Rust mod layer" FORCE)
 endif()
 add_compile_options(
   ${PORT_FLAGS} ${EH_FLAGS} ${OPT_FLAGS}
@@ -89,7 +100,10 @@ prefix_src(S_SAM ${SAM_SRCS})
 
 # dlopen() replacement: drop the Unix loader, use a static symbol registry.
 list(FILTER S_ENGINE EXCLUDE REGEX "Engine/Base/Unix/UnixDynamicLoader\\.cpp$")
-list(APPEND S_ENGINE "${ROOT}/port/common/WebDynamicLoader.cpp" "${ROOT}/port/common/gl1shim.c" "${ROOT}/port/common/ShellCall.cpp" "${ROOT}/port/common/WebAudio.cpp" "${ROOT}/port/common/WebFrame.cpp" "${ROOT}/port/common/Se1ModHost.cpp")
+if(SE1_THREADS)
+  list(APPEND S_ENGINE "${ROOT}/port/common/SdlGlThreads.cpp")
+endif()
+list(APPEND S_ENGINE "${ROOT}/port/common/WebDynamicLoader.cpp" "${ROOT}/port/common/gl1shim.c" "${ROOT}/port/common/ShellCall.cpp" "${ROOT}/port/common/WebAudio.cpp" "${ROOT}/port/common/WebFrame.cpp")
 
 add_library(engine_safemath STATIC ${S_SAFEMATH})
 target_compile_options(engine_safemath PRIVATE -fno-unsafe-math-optimizations)
@@ -101,6 +115,7 @@ add_library(shaders STATIC ${S_SHADERS})
 # --- Rust mod layer (rust/se1-mod), built with cargo for wasm32-unknown-emscripten ---
 option(SE1_RUSTMOD "Link the Rust mod layer" ON)
 if(SE1_RUSTMOD)
+  target_sources(engine PRIVATE "${ROOT}/port/common/Se1ModHost.cpp")
   find_program(CARGO cargo HINTS "$ENV{HOME}/.cargo/bin" REQUIRED)
   set(RUSTMOD_LIB "${ROOT}/rust/target/wasm32-unknown-emscripten/release/libse1_mod.a")
   add_custom_target(rustmod
@@ -126,13 +141,14 @@ target_link_options(serioussam PRIVATE
   ${PORT_FLAGS} ${EH_FLAGS} ${OPT_FLAGS}
   $<$<BOOL:${SE1_DEV}>:-sASSERTIONS=1>
   $<$<OR:$<BOOL:${SE1_DEV}>,$<BOOL:${SE1_PROFILE}>>:--profiling-funcs>
-  "SHELL:--pre-js ${ROOT}/port/web/pre.js" "SHELL:--pre-js ${ROOT}/port/web/gfx.js" "SHELL:--pre-js ${ROOT}/port/web/gfx-webgpu.js" "SHELL:--post-js ${ROOT}/port/web/bench.js"
+  "SHELL:--pre-js ${ROOT}/port/web/pre.js" "SHELL:--pre-js ${ROOT}/port/web/audio.js" "SHELL:--pre-js ${ROOT}/port/web/gfx.js" "SHELL:--pre-js ${ROOT}/port/web/gfx-webgpu.js" "SHELL:--post-js ${ROOT}/port/web/bench.js"
   # (SHELL: keeps each flag with its argument; target_link_options would de-duplicate "--pre-js")
   -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=256MB -sSTACK_SIZE=4MB
   -sFULL_ES3=1 -sMAX_WEBGL_VERSION=2 -sMIN_WEBGL_VERSION=2
-  -sJSPI=1
+  $<IF:$<BOOL:${SE1_THREADS}>,-sPROXY_TO_PTHREAD,-sJSPI=1>
+  $<$<BOOL:${SE1_THREADS}>:-sPTHREAD_POOL_SIZE=4>
   -sFORCE_FILESYSTEM=1 -lidbfs.js
-  -sEXPORTED_RUNTIME_METHODS=FS,callMain,HEAPU8,HEAPU16,HEAPU32,HEAP32,HEAPF32,UTF8ToString,addRunDependency,removeRunDependency
+  -sEXPORTED_RUNTIME_METHODS=FS,callMain,HEAPU8,HEAP16,HEAPU16,HEAPU32,HEAP32,HEAPF32,UTF8ToString,addRunDependency,removeRunDependency
 )
 if(DATA_DIR)
   target_link_options(serioussam PRIVATE "--preload-file" "${DATA_DIR}@/" "--exclude-file" "*.DS_Store")
@@ -140,4 +156,4 @@ endif()
 set_target_properties(serioussam PROPERTIES SUFFIX ".html")
 # --pre-js/--post-js files are link inputs: relink when they change
 set_property(TARGET serioussam APPEND PROPERTY LINK_DEPENDS
-  "${ROOT}/port/web/pre.js" "${ROOT}/port/web/gfx.js" "${ROOT}/port/web/gfx-webgpu.js" "${ROOT}/port/web/bench.js")
+  "${ROOT}/port/web/pre.js" "${ROOT}/port/web/audio.js" "${ROOT}/port/web/gfx.js" "${ROOT}/port/web/gfx-webgpu.js" "${ROOT}/port/web/bench.js")

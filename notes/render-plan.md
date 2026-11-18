@@ -168,3 +168,27 @@ phase must also pass the visual regression test from phase 0 before it lands.
 - Auto stays experimental (opt-in); next: a GPU timer query (EXT_disjoint_timer_query_webgl2 /
   WebGPU timestamps) instead of frame-interval inference, plus upscaling quality (CSS
   `image-rendering`, or an FSR-style pass).
+
+### Phase 3, milestone 1: engine in a worker (`-DSE1_THREADS=ON`, serve with `devserver.py --isolate`)
+- Build: pthreads + PROXY_TO_PTHREAD, no JSPI.
+  - The engine's SDL_GL_* calls are renamed to stubs (force-included port/common/sdlgl_threads.h): the
+    worker has no GL context.
+  - The main-thread replayer creates its own WebGL2 context.
+- Every replayer, audio and capture call is proxied synchronously to the main thread (MAIN_THREAD_EM_ASM).
+- Frame pacing: a rAF loop on the main thread bumps a shared counter (every 100 ms while hidden), and
+  the worker futex-waits on it.
+- Fixed on the way, for both builds: texture uploads are now commands in the stream (data arena;
+  WebGPU splits the pass around uploads). In the threaded build every flush is its own main-thread task,
+  and Chrome presented half-drawn frames between them.
+- Visual: threaded vs single-threaded 8/8 (7 bit-identical). Capture mode now also pins console lines,
+  the display-mode report and the HUD time; those fade on wall-clock time or depend on the Rust config.
+- Perf (timedemo, WebGL2): threaded 1525 fps / 0.66 ms CPU vs single-threaded 2450 fps / 0.40 ms.
+  Every replay is a synchronous round trip, so nothing overlaps yet.
+- Loading is slow (~20 s for the intro): MEMFS lives on the main thread, so every file read from the
+  worker is a synchronous proxy.
+- Rust mod layer off in this build (std without atomics; needs nightly build-std).
+- Next:
+  - asynchronous double-buffered frame hand-off (worker records frame N+1 while main replays N);
+  - worker-local file access (WASMFS, or the data mounted inside the worker);
+  - SAB audio ring;
+  - Rust with build-std.
