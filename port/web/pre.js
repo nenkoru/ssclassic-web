@@ -76,7 +76,8 @@ Module['se1CaptureFrame'] = function (tDemo) {
 // one task. Then frees the batch for the worker (busy flag in shared memory). Timedemo mode: the
 // per-frame GPU sync happens here, so the worker never waits for it.
 Module['se1ReplayBatch'] = function (busy, present, c, n, v, nv, ix, ni, d, nd, tDemo) {
-  var g = Module['se1gfx'];
+  var g = Module['se1gfx'], R = Module.se1Replay || (Module.se1Replay = { ms: new Float32Array(65536), n: 0, acc: 0 });
+  var t0 = performance.now();
   try {
     if (g && (n || nv || ni)) g.replay(c, n, v, nv, ix, ni, d, nd);
     if (present) {
@@ -87,6 +88,9 @@ Module['se1ReplayBatch'] = function (busy, present, c, n, v, nv, ix, ni, d, nd, 
   } finally {
     Atomics.store(HEAP32, busy >> 2, 0);
     Atomics.notify(HEAP32, busy >> 2);
+    // main-thread replay time per frame (all batches of the frame), for the benchmark
+    R.acc += performance.now() - t0;
+    if (present) { R.ms[R.n & 65535] = R.acc; R.n++; R.acc = 0; }
   }
 };
 

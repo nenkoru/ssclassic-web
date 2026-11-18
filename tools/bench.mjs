@@ -7,6 +7,8 @@
 //   node tools/bench.mjs http://127.0.0.1:8092/serioussam.html --shots <label>   (visual regression frames)
 //
 // --software-gl uses SwiftShader instead of the GPU: a rough "potato GPU" stand-in.
+// --cpu-throttle <N> slows the page's CPU N times (DevTools CPU throttling, applies to workers
+// too): with --software-gl --vsync, a rough "potato device" (e.g. --cpu-throttle 4).
 import { spawn } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,7 +22,9 @@ const capped = args.includes('--vsync');   // default: uncapped timedemo (fps = 
 // (port/data/SE1Mod/shots.ini, saved by tools/devserver.py under data/shots/<label>/)
 const shotsIdx = args.indexOf('--shots');
 const shotsLabel = shotsIdx >= 0 ? args[shotsIdx + 1] : null;
-const pos = args.filter((a, i) => !a.startsWith('--') && !(shotsIdx >= 0 && i === shotsIdx + 1));
+const thrIdx = args.indexOf('--cpu-throttle');
+const cpuThrottle = thrIdx >= 0 ? Number(args[thrIdx + 1]) : 0;
+const pos = args.filter((a, i) => !a.startsWith('--') && !(shotsIdx >= 0 && i === shotsIdx + 1) && !(thrIdx >= 0 && i === thrIdx + 1));
 const base = pos[0];
 const runs = Number(pos[1] || 3);
 if (!base) { console.error('usage: bench.mjs <url> [runs] [--software-gl]'); process.exit(2); }
@@ -57,6 +61,7 @@ async function runOnce(i) {
 
     const url = base + (base.includes('?') ? '&' : '?') +
       (shotsLabel ? `shots=${encodeURIComponent(shotsLabel)}&mute=1&uncapped=1` : `bench=1&uncapped=${capped ? 0 : 1}`) + `&run=${Date.now()}`;
+    if (cpuThrottle > 1) await send('Emulation.setCPUThrottlingRate', { rate: cpuThrottle });
     await send('Page.navigate', { url });
     const t0 = Date.now();
     if (shotsLabel) {
@@ -66,7 +71,7 @@ async function runOnce(i) {
       }
       throw new Error('timed out waiting for shots');
     }
-    while (Date.now() - t0 < 120000) {
+    while (Date.now() - t0 < 120000 * Math.max(1, cpuThrottle)) {
       await sleep(1000);
       const s = await evaluate("window.__bench && window.__bench.state === 'done' && JSON.stringify(window.__bench.stats)");
       if (s) return JSON.parse(s);

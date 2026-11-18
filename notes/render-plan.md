@@ -279,3 +279,20 @@ phase must also pass the visual regression test from phase 0 before it lands.
   impossible (no service workers, not a secure context).
 - Verified: a server with no COOP/COEP → one reload → `crossOriginIsolated`, the game runs; with
   headers the script is a no-op (captures 8/8).
+
+### Worker profile: synchronous proxy per quad draw
+- New tools:
+  - `tools/profile-worker.mjs` profiles the engine worker over DevTools and attributes futex waits
+    (synchronous proxies) to their callers;
+  - `tools/bench.mjs --cpu-throttle N` adds DevTools CPU throttling;
+  - the benchmark now reports main-thread replay time per frame (`replay`).
+- Found: `shim_glDrawArrays` called `gfx_quad_capacity` on every quad draw. In the threaded build
+  that is a synchronous main-thread round trip: 28% of the worker's busy time.
+  - Fix: mirror the replayer's doubling capacity in C, so it's called only when the buffer grows.
+  - Timedemo: threaded 1852 → 2619 fps (0.54 → 0.38 ms), now ahead of single-threaded (2421).
+- Potato emulation (`--software-gl --vsync --cpu-throttle N`), before this fix:
+  - threaded: 58 fps at 4× (2.3 ms CPU per frame) and 57 fps at 12× (6.4 ms);
+  - single-threaded at 4×: 55.9 fps, twice the late frames, 44.7 ms max;
+  - main-thread replay at 8×: 1.1 ms per frame.
+- Next worker hot spots: CRenderer::ScanOneLine / AddActiveSector / MakeSpan (visibility),
+  musl qsort (smoothsort: sift/trinkle, ~6%), bind_client_arrays.

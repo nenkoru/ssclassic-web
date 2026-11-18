@@ -17,6 +17,7 @@
     if (B.state === 'waiting' && playing) { B.state = 'warmup'; B.warmT = now; }
     else if (B.state === 'warmup' && now - B.warmT > 1000) {
       B.state = 'running'; B.startT = now; Module.se1Perf.n = 0;
+      if (Module.se1Replay) Module.se1Replay.n = 0;   // threaded build: main-thread replay times
       // presented-frame intervals (what the player sees), independent of CPU work time
       B.iv = []; var lastRaf = 0;
       (function rafLoop(ts) { if (lastRaf) B.iv.push(ts - lastRaf); lastRaf = ts; if (B.state === 'running') requestAnimationFrame(rafLoop); })(0);
@@ -63,6 +64,12 @@
                                    return B.iv.filter(function (x) { return x > med * 1.5; }).length; })(),
         presented: B.iv.length, backend: Module['se1gfx'] && Module['se1gfx'].backend, scale: Module['se1Scale'] || 1, scaleChanges: (Module['se1Drs'] && Module['se1Drs'].changes) || 0, hiddenMs: Math.round(B.hiddenMs + (document.hidden ? now - lastVis : 0)) };
       clearInterval(t);
+      var RP = Module.se1Replay;
+      if (RP && RP.n) {
+        var ra = Array.from(RP.ms.slice(0, Math.min(RP.n, 65536))).sort(function (x, y) { return x - y; });
+        var rq = function (p) { return +ra[Math.min(ra.length - 1, Math.floor(p * ra.length))].toFixed(2); };
+        B.stats.replay = { meanMs: +(ra.reduce(function (s, x) { return s + x; }, 0) / ra.length).toFixed(2), p50: rq(0.5), p95: rq(0.95), p99: rq(0.99), max: +ra[ra.length - 1].toFixed(1) };
+      }
       if (B.gl) {
         var G = B.gl, fr = Math.max(1, P.n);
         var top = Object.keys(G.byName).sort(function (a, b) { return G.byName[b] - G.byName[a]; }).slice(0, 15)
