@@ -760,7 +760,15 @@ static void shim_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
   apply_program();
   bind_client_arrays(first + count);
   if (mode == GL1_QUADS) {
-    gfx_quad_capacity((first + count) / 4);
+    /* the replayer's quad index buffer only grows (doubling from 1024 quads): mirror its capacity
+       here, so the (synchronous, in the threaded build) call happens only when it must grow */
+    static int quadCap;
+    int ctQuads = (first + count) / 4;
+    if (ctQuads > quadCap) {
+      int cap = 1024; while (cap < ctQuads) cap *= 2;
+      gfx_quad_capacity(cap);
+      quadCap = cap;
+    }
     cmd_ii(OP_DRAW_QUADS, count / 4 * 6, first / 4 * 6 * 4);
   } else {
     cmd_iii(OP_DRAW_ARRAYS, (int)(mode == GL1_POLYGON ? GL_TRIANGLE_FAN : mode), first, count);
