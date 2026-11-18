@@ -14,6 +14,18 @@
 // case-insensitive paths ("demos\x.dem" for "Demos/x.dem"). Emscripten resolves every path
 // component through FS.lookupNode; when the exact name is missing, fall back to a
 // case-insensitive match in that directory. Exact matches stay the fast path.
+// ?res=640x480: start the engine at that resolution. Resolution is a persistent console
+// variable read from Scripts/PersistentSymbols.ini in the user folder before the window is
+// created (changing it later from a script via ApplyVideoMode() aborts the script).
+Module['preRun'] = (Module['preRun'] || []).concat([function () {
+  var m = /^(\d+)x(\d+)$/.exec(new URLSearchParams(location.search).get('res') || '');
+  if (!m) return;
+  var dir = '/libsdl/Serious-Engine/' + (Module['se1Game'] || 'serioussam') + '/Scripts';
+  FS.mkdirTree(dir);
+  FS.writeFile(dir + '/PersistentSymbols.ini',
+    'sam_iScreenSizeI = ' + m[1] + ';\nsam_iScreenSizeJ = ' + m[2] + ';\n');
+}]);
+
 Module['preRun'] = (Module['preRun'] || []).concat([function () {
   var lookupNode = FS.lookupNode;
   FS.lookupNode = function (parent, name) {

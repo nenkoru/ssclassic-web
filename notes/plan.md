@@ -61,3 +61,17 @@ Measure only headless: the shared pane gets hidden/throttled, and headless follo
   buffer copy): 9 fps, 500 ms frames. Use one bufferData per draw with all arrays packed instead.
 - Lesson: without vsync backpressure, dropping glFinish lets the GPU queue grow unbounded (hangs);
   the timedemo does one GPU sync per frame for both builds to stay comparable.
+- Tried and reverted (measured in same-session interleaved A/B):
+  - caching locked (CVA) arrays per lock: -15% GPU fps. The engine swaps pointers within a lock, so it
+    re-uploaded anyway, one bufferData per array.
+  - skipping unchanged glVertexAttribPointer calls: -8% GPU fps. Re-specifying right after bufferData
+    seems to be ANGLE's cheap path.
+- Software GL (SwiftShader, "potato GPU" proxy, `--software-gl`):
+  - 1024x768: 104 fps avg, p95 62 / p99 142 ms.
+  - 640x480 (`?res=640x480`): 170 fps, p95 36 / p99 73 ms.
+  - At both resolutions ~13% of frames exceed 16.7 ms, so the hitches are per-draw overhead, not fill
+    rate.
+  - Next levers: fewer draw calls (merge consecutive draws with identical state in gl1shim), a render
+    scale option, WebGPU.
+  - Caveat: SwiftShader on a fast CPU overstates per-draw cost vs a real weak iGPU, so treat it as a
+    pessimistic bound.
