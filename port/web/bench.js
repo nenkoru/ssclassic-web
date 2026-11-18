@@ -52,7 +52,7 @@
       var secs = (now - B.startT) / 1000;
       B.stats = { seconds: +secs.toFixed(1), fps: +(P.n / secs).toFixed(1), meanMs: +(a.reduce(function (s, x) { return s + x; }, 0) / a.length).toFixed(2),
         p50: +q(0.5).toFixed(2), p95: +q(0.95).toFixed(2), p99: +q(0.99).toFixed(2), max: +a[a.length - 1].toFixed(1),
-        over16_7: a.filter(function (x) { return x > 16.7; }).length, hiddenMs: Math.round(B.hiddenMs + (document.hidden ? now - lastVis : 0)) };
+        over16_7: a.filter(function (x) { return x > 16.7; }).length, backend: Module['se1gfx'] && Module['se1gfx'].backend, hiddenMs: Math.round(B.hiddenMs + (document.hidden ? now - lastVis : 0)) };
       clearInterval(t);
       if (B.gl) {
         var G = B.gl, fr = Math.max(1, P.n);

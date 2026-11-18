@@ -29,7 +29,8 @@ Module['se1gfx'] = (function () {
   }
 
   return {
-    createProgram: function (vs, fs) {
+    backend: 'webgl2',
+    createProgram: function (vs, fs, key) {   // key: used by the WebGPU replayer only
       init();
       var p = gl.createProgram(), v = shader(gl.VERTEX_SHADER, vs), f = shader(gl.FRAGMENT_SHADER, fs);
       gl.attachShader(p, v); gl.attachShader(p, f); gl.linkProgram(p);
@@ -73,6 +74,14 @@ Module['se1gfx'] = (function () {
       gl.readPixels(x, y, w, h, fmt, type, HEAPU8.subarray(ptr, ptr + len));
     },
     pixelStore: function (p, v) { init(); gl.pixelStorei(p, v); },
+    sync: function () { if (gl) gl.finish(); return null; },
+    // visual regression capture: bottom-up RGBA, delivered to cb (synchronously here)
+    capture: function (cb) {
+      init();
+      var w = gl.drawingBufferWidth, h = gl.drawingBufferHeight, px = new Uint8Array(w * h * 4);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      cb(px, w, h);
+    },
     getParam: function (pname, ptr, isFloat) {
       init();
       var v = gl.getParameter(pname), H = isFloat ? HEAPF32 : HEAP32, o = ptr >> 2;

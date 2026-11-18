@@ -128,3 +128,18 @@ phase must also pass the visual regression test from phase 0 before it lands.
 - Software GL: unchanged (~103 fps, same spikes). As expected, SwiftShader is GPU-side bound: phase 1 removes
   CPU-side glue, not GPU work. Remaining per-draw state calls (vertexAttribPointer 705, bindTexture 210,
   activeTexture 178) are the WebGPU phase's target.
+
+### Phase 2 (WebGPU replayer, opt-in `?gfx=webgpu`)
+- Visual: 8/8 frames pass vs the WebGL2 baseline (mean diff <= 0.02, <= 0.035% pixels: rasterization
+  differences between backends).
+- Headless Chrome, Apple Metal-3 adapter, interleaved A/B vs WebGL2 replay: 550 vs 2450 fps timedemo,
+  CPU per frame 0.87 vs 0.40 ms, p99 1.9 vs 0.85 ms.
+  - The throughput gap is inflated by the timedemo's per-frame `onSubmittedWorkDone()` round trip
+    (WebGL's `finish()` is cheaper); vsync-paced play doesn't wait like that.
+  - The CPU gap is real: per-draw JS in the replayer (`replay` 24% + `prep` 5% + `uniforms` 2% of
+    busy samples), e.g. a new Float32Array view per uniform slot and string keys for texture bind
+    groups.
+- No software WebGPU adapter on macOS Chrome (SwiftShader WebGPU unavailable), so no potato proxy here.
+- Stays opt-in; WebGL2 remains the default.
+- Next: allocation-free uniform writes, numeric cache keys, fewer redundant setBindGroup/setVertexBuffer
+  calls, render bundles for static world geometry, a fair timedemo sync (fence only every N frames).

@@ -29,13 +29,12 @@ EM_JS(void, se1_capture_frame, (void), {
   if (S && !S.done && typeof GL !== 'undefined' && GL.currentContext) {
     var t = Module._SE1_DemoTime();
     while (t >= 0 && S.i < S.times.length && t >= S.times[S.i]) {
-      var gl = GL.currentContext.GLctx, w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
-      var px = new Uint8Array(w * h * 4);
-      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
-      var name = 't' + String(Math.round(S.times[S.i] * 100)).padStart(5, '0') + '_' + w + 'x' + h + '.rgba';
+      var tname = 't' + String(Math.round(S.times[S.i] * 100)).padStart(5, '0');
       S.pending++;
-      fetch('/__shots/' + encodeURIComponent(S.label) + '/' + name, { method: 'POST', body: px })
-        .finally(function() { S.pending--; if (S.done && S.pending === 0) window.__shotsDone = true; });
+      Module['se1gfx'].capture(function (px, w, h) {   /* bottom-up RGBA from either replayer */
+        fetch('/__shots/' + encodeURIComponent(S.label) + '/' + tname + '_' + w + 'x' + h + '.rgba', { method: 'POST', body: px })
+          .finally(function() { S.pending--; if (S.done && S.pending === 0) window.__shotsDone = true; });
+      });
       S.i++;
     }
     if (S.i >= S.times.length) { S.done = true; if (S.pending === 0) window.__shotsDone = true; }
@@ -53,7 +52,8 @@ EM_ASYNC_JS(void, se1_wait_frame, (void), {
        (MessageChannel messages aren't throttled); throughput = frames rendered per second.
        One GPU sync per frame keeps the GPU queue bounded without vsync backpressure (the
        shim turns the engine's own glFinish into a no-op for normal, rAF-paced play). */
-    if (typeof GL !== 'undefined' && GL.currentContext) GL.currentContext.GLctx.finish();
+    var sync = Module['se1gfx'] && Module['se1gfx'].sync();   /* WebGL2: finish(); WebGPU: a promise */
+    if (sync) await sync;
     var mc = Module.se1MC || (Module.se1MC = new MessageChannel());
     await new Promise(function(resolve) { mc.port1.onmessage = resolve; mc.port2.postMessage(0); });
     P.resumed = performance.now();

@@ -202,8 +202,8 @@ static size_t arena_alloc(Arena *a, size_t n, size_t align) {
 
 EM_JS(void, gfx_replay, (const void *c, int n, const void *v, int nv, const void *ix, int ni),
       { Module['se1gfx'].replay(c, n, v, nv, ix, ni); });
-EM_JS(int, gfx_create_program, (const char *vs, const char *fs),
-      { return Module['se1gfx'].createProgram(UTF8ToString(vs), UTF8ToString(fs)); });
+EM_JS(int, gfx_create_program, (const char *vs, const char *fs, unsigned key),
+      { return Module['se1gfx'].createProgram(UTF8ToString(vs), UTF8ToString(fs), key >>> 0); });
 EM_JS(int, gfx_uniform_location, (int prog, const char *name),
       { return Module['se1gfx'].uniformLocation(prog, UTF8ToString(name)); });
 EM_JS(int, gfx_gen_texture, (void), { return Module['se1gfx'].genTexture(); });
@@ -350,7 +350,7 @@ static Prog *get_prog(uint32_t key) {
   n += snprintf(fs + n, sizeof fs - n, " oColor = c; }\n");
 
   double tmStart = emscripten_get_now();
-  int p = gfx_create_program(vs, fs);   /* compile/link errors are logged by gfx.js */
+  int p = gfx_create_program(vs, fs, key);   /* GLSL for WebGL2; WebGPU builds WGSL from the key */
 
   fprintf(stderr, "gl1shim: compiled program %d (key %06x) in %.1f ms\n", _ctProgs, key, emscripten_get_now() - tmStart);
   Prog *pr = &_progs[_ctProgs++];
