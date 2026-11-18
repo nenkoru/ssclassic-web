@@ -54,10 +54,11 @@ Module['preRun'] = (Module['preRun'] || []).concat([function () {
 
 // Visual regression capture (?shots=): called once per frame right before the swap, after the
 // frame's commands were replayed. Grabs frames at fixed demo times via the active replayer.
-Module['se1CaptureFrame'] = function () {
+Module['se1CaptureFrame'] = function (tDemo) {
   var S = Module.se1Shots;
   if (!S || S.done || !Module['se1gfx']) return;
-  var t = Module._SE1_DemoTime();
+  // demo time of the frame being shown: passed by the threaded build (the engine is a frame ahead)
+  var t = tDemo !== undefined ? tDemo : Module._SE1_DemoTime();
   while (t >= 0 && S.i < S.times.length && t >= S.times[S.i]) {
     var tname = 't' + String(Math.round(S.times[S.i] * 100)).padStart(5, '0');
     S.pending++;
@@ -70,14 +71,23 @@ Module['se1CaptureFrame'] = function () {
   if (S.i >= S.times.length) { S.done = true; if (S.pending === 0) window.__shotsDone = true; }
 };
 
-// End of frame (gl1shim SE1_GL1Shim_FlushFrame): replay what is left of the frame, capture, end the
-// frame, all in one main-thread task (the threaded build would otherwise let the browser present
-// between them). n === 0 and nothing in the arenas: the frame was already replayed.
-Module['se1PresentFrame'] = function (c, n, v, nv, ix, ni, d, nd) {
+// SE1_THREADS: one batch of recorded commands from the engine worker (gl1shim hand_off). Replays
+// it; at the end of a frame (present) also runs the ?shots= capture and ends the frame, all in this
+// one task. Then frees the batch for the worker (busy flag in shared memory). Timedemo mode: the
+// per-frame GPU sync happens here, so the worker never waits for it.
+Module['se1ReplayBatch'] = function (busy, present, c, n, v, nv, ix, ni, d, nd, tDemo) {
   var g = Module['se1gfx'];
-  if (g && (n || nv || ni)) g.replay(c, n, v, nv, ix, ni, d, nd);
-  if (Module['se1CaptureFrame']) Module['se1CaptureFrame']();
-  if (g && g.endFrame) g.endFrame();
+  try {
+    if (g && (n || nv || ni)) g.replay(c, n, v, nv, ix, ni, d, nd);
+    if (present) {
+      if (Module['se1CaptureFrame']) Module['se1CaptureFrame'](tDemo);
+      if (g && g.endFrame) g.endFrame();
+      if (Module.se1Uncapped && g && g.sync) g.sync();
+    }
+  } finally {
+    Atomics.store(HEAP32, busy >> 2, 0);
+    Atomics.notify(HEAP32, busy >> 2);
+  }
 };
 
 // SE1_THREADS build (port/common/WebFrame.cpp): runs on the page's main thread. Bumps a shared

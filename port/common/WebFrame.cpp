@@ -107,7 +107,7 @@ void SE1Mod_Frame(void);  // port/common/Se1ModHost.cpp
 /* called right before SDL_GL_SwapWindow: Emscripten's SDL yields inside the swap, and the
    browser may present + clear the drawing buffer during that yield, so read frames back here */
 extern "C" void SE1_GL1Shim_Flush(void);  // port/common/gl1shim.c: replay this frame's commands
-extern "C" void SE1_GL1Shim_FlushFrame(void);  // SE1_THREADS: the same plus capture + end of frame
+extern "C" void SE1_GL1Shim_FlushFrame(void);  // SE1_THREADS: hand the frame over (+ capture + end of frame)
 
 #ifndef SE1_THREADS
 EM_JS(void, se1_capture_frame, (void), { if (Module['se1CaptureFrame']) Module['se1CaptureFrame'](); });
@@ -153,7 +153,7 @@ static void start_main_thread_loop(void)
 
 extern "C" void SE1_BeforeSwap(void)
 {
-  SE1_GL1Shim_FlushFrame();   // replay + capture + end of frame in one main-thread task
+  SE1_GL1Shim_FlushFrame();   // async hand-off; replay + capture + end of frame in one main-thread task
 }
 
 extern "C" void SE1_YieldToBrowser(void)
@@ -163,8 +163,9 @@ extern "C" void SE1_YieldToBrowser(void)
   start_main_thread_loop();
   if (_uncapped < 0) _uncapped = MAIN_THREAD_EM_ASM_INT({ return Module.se1Uncapped ? 1 : 0; });
   if (_uncapped) {
-    /* timedemo: no vsync wait; one GPU sync per frame keeps the queue bounded (WebGL2) */
-    MAIN_THREAD_EM_ASM({ if (Module['se1gfx'] && Module['se1gfx'].sync) Module['se1gfx'].sync(); });
+    /* timedemo: no vsync wait. The GPU sync that keeps the queue bounded runs on the main thread
+       at the end of each replayed frame (Module.se1ReplayBatch), so the worker doesn't wait for it;
+       the double-buffered hand-off keeps the worker at most one frame ahead. */
   } else {
     int32_t seen = _vsyncTick;
     while (_vsyncTick == seen) emscripten_futex_wait((void *)&_vsyncTick, (uint32_t)seen, 100.0);

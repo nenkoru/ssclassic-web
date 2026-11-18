@@ -225,3 +225,18 @@ phase must also pass the visual regression test from phase 0 before it lands.
   - threaded: 1541 fps, 0.63 ms mean, p99 1.27 ms, max 11 ms (the 767 ms load hitch is gone);
   - single-threaded: 2453 fps, 0.40 ms.
   - Throughput is still bound by the synchronous replay round trip (next: double-buffered hand-off).
+
+### Phase 3, milestone 3: asynchronous, double-buffered frame hand-off
+- gl1shim keeps two batches (command buffer + vertex/index/texture arenas). A flush hands the
+  current batch to the main thread with MAIN_THREAD_ASYNC_EM_ASM and records into the other one.
+  The page (`Module.se1ReplayBatch`) clears the batch's busy flag (Atomics) after replaying it.
+  The worker only waits when it laps the replayer, so it records frame N+1 while the page replays N.
+- Synchronous proxies (createProgram, readPixels, getParam...) share the FIFO queue, so they still
+  run after every batch handed over before them.
+- The end-of-frame batch carries its own demo time: `?shots=` captures must label the frame being
+  shown, not the one the engine is simulating.
+- Timedemo GPU sync moved into the page's end-of-frame task; the worker no longer waits for it.
+- Visual: bit-identical to milestone 2 (8/8); WebGPU threaded vs WebGL2 threaded 8/8.
+- Perf (timedemo, WebGL2, median of 3): threaded 1856 fps, 0.54 ms mean, p99 1.0 ms, max 2.8 ms
+  (was 1541 fps / max 11 ms); single-threaded 2453 fps.
+  - Headless vsync runs at 30 fps for both builds (the headless rAF rate), with no late frames.

@@ -204,11 +204,9 @@ static size_t arena_alloc(Arena *a, size_t n, size_t align) {
 
 #ifdef SE1_THREADS
 /* engine runs in a worker: the replayer (and WebGL/WebGPU) live on the page's main thread.
-   Every call is proxied synchronously; pointers are into shared memory, valid on both threads.
-   TODO: hand frames over asynchronously (double-buffered stream) instead of a sync replay. */
+   Recorded batches go over asynchronously (hand_off below); the calls here are proxied
+   synchronously. Pointers are into shared memory, valid on both threads. */
 #include <emscripten/threading.h>
-static void gfx_replay(const void *c, int n, const void *v, int nv, const void *ix, int ni, const void *d, int nd)
-  { MAIN_THREAD_EM_ASM({ Module['se1gfx'].replay($0, $1, $2, $3, $4, $5, $6, $7); }, c, n, v, nv, ix, ni, d, nd); }
 static int gfx_create_program(const char *vs, const char *fs, unsigned key)
   { return MAIN_THREAD_EM_ASM_INT({ return Module['se1gfx'].createProgram(UTF8ToString($0), UTF8ToString($1), $2 >>> 0); }, vs, fs, key); }
 static int gfx_uniform_location(int prog, const char *name)
@@ -240,23 +238,51 @@ EM_JS(void, gfx_pixel_store, (int p, int v), { Module['se1gfx'].pixelStore(p, v)
 
 #endif
 
+#ifndef SE1_THREADS
 /* hand everything recorded so far to the replayer (exported: also called before every swap) */
 void SE1_GL1Shim_Flush(void);
 void SE1_GL1Shim_Flush(void) {
   if (_ncmd || _va.n || _ia.n) gfx_replay(_cmd, (int)_ncmd, _va.p, (int)_va.n, _ia.p, (int)_ia.n, _da.p, (int)_da.n);
   _ncmd = 0; _va.n = 0; _ia.n = 0; _da.n = 0;
 }
-
-/* SE1_THREADS end of frame: replay the rest of the frame, run the ?shots= capture and end the
-   frame on the replayer as ONE main-thread task: between two proxied calls
-   the browser may present (and clear) the canvas, and a capture would read an empty frame. */
-#ifdef SE1_THREADS
-void SE1_GL1Shim_FlushFrame(void);
-void SE1_GL1Shim_FlushFrame(void) {
-  MAIN_THREAD_EM_ASM({ Module['se1PresentFrame']($0, $1, $2, $3, $4, $5, $6, $7); },
-                     _cmd, (int)_ncmd, _va.p, (int)_va.n, _ia.p, (int)_ia.n, _da.p, (int)_da.n);
+#else
+/* SE1_THREADS: asynchronous, double-buffered hand-off. A flush gives the current command buffer
+   and arenas (a "batch") to the main thread without waiting (MAIN_THREAD_ASYNC_EM_ASM) and the
+   shim carries on recording into the other batch: the engine records frame N+1 while the page
+   replays frame N. The main thread clears the batch's busy flag once it has replayed it; the shim
+   only waits when it laps the replayer. Synchronous calls (createProgram, readPixels...) use the
+   same FIFO proxy queue, so they still run after every batch handed over before them. */
+#include <emscripten/atomic.h>
+typedef struct { Word *cmd; size_t capcmd; Arena va, ia, da; int32_t busy; } Batch;
+static Batch _batch[2];
+static int _curBatch;
+static void batch_switch(void) {
+  Batch *b = &_batch[_curBatch];          /* save the current buffers into their slot */
+  b->cmd = _cmd; b->capcmd = _capcmd; b->va = _va; b->ia = _ia; b->da = _da;
+  _curBatch ^= 1;
+  b = &_batch[_curBatch];                 /* wait until the replayer is done with the other one */
+  while (emscripten_atomic_load_u32((void *)&b->busy))
+    emscripten_futex_wait((void *)&b->busy, 1, 1000.0);
+  _cmd = b->cmd; _capcmd = b->capcmd; _va = b->va; _ia = b->ia; _da = b->da;
   _ncmd = 0; _va.n = 0; _ia.n = 0; _da.n = 0;
 }
+float SE1_DemoTime(void);   /* port/common/WebFrame.cpp */
+static void hand_off(int present) {
+  Batch *b = &_batch[_curBatch];
+  /* the frame's own demo time goes along: by the time the page replays this frame, the engine
+     is already simulating the next one (the ?shots= capture picks frames by demo time) */
+  double tDemo = present ? SE1_DemoTime() : -1.0;
+  emscripten_atomic_store_u32((void *)&b->busy, 1);
+  MAIN_THREAD_ASYNC_EM_ASM({ Module['se1ReplayBatch']($0, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10); },
+                           &b->busy, present, _cmd, (int)_ncmd, _va.p, (int)_va.n, _ia.p, (int)_ia.n, _da.p, (int)_da.n, tDemo);
+  batch_switch();
+}
+void SE1_GL1Shim_Flush(void);
+void SE1_GL1Shim_Flush(void) { if (_ncmd || _va.n || _ia.n) hand_off(0); }
+/* end of frame: replay the rest of the frame, run the ?shots= capture and end the frame as ONE
+   main-thread task (between two tasks the browser may present, and clear, the canvas) */
+void SE1_GL1Shim_FlushFrame(void);
+void SE1_GL1Shim_FlushFrame(void) { hand_off(1); }
 #endif
 
 /* ---- state caches: skip recording commands that change nothing (WebGL state persists
