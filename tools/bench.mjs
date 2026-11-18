@@ -51,13 +51,28 @@ if (android) {
   }
   androidInfo = { device: adb('shell', 'getprop', 'ro.product.model'), android: adb('shell', 'getprop', 'ro.build.version.release'), chrome: ver.Browser };
   console.log('android: ' + JSON.stringify(androidInfo));
+  // keep the screen on (Chrome hides and pauses the page when it goes off) without changing any
+  // device setting: WAKEUP turns a dozing screen back on, and a no-op key (KEYCODE_UNKNOWN) counts
+  // as user activity, which resets the screen-off timer (WAKEUP alone doesn't when already awake)
+  const keepAwake = () => { try { adb('shell', 'input keyevent KEYCODE_WAKEUP; input keyevent KEYCODE_UNKNOWN'); } catch {} };
+  keepAwake();
+  setInterval(keepAwake, 10000).unref();
+  // Chrome in front (its last tab; the benchmark brings its own tab forward too)
+  try { adb('shell', 'am', 'start', '-n', 'com.android.chrome/com.google.android.apps.chrome.Main'); } catch {}
 }
 
 // open a fresh tab on the phone's Chrome; returns its WebSocket and a cleanup function
 async function openAndroidTab() {
-  const t = await (await fetch(`http://127.0.0.1:${ANDROID_PORT}/json/new?about:blank`, { method: 'PUT' })).json();
-  const ws = new WebSocket(t.webSocketDebuggerUrl);
-  return { ws, close: () => fetch(`http://127.0.0.1:${ANDROID_PORT}/json/close/${t.id}`).catch(() => {}) };
+  const r = await fetch(`http://127.0.0.1:${ANDROID_PORT}/json/new?about:blank`, { method: 'PUT' });
+  const body = await r.text();
+  let t = null;
+  try { t = JSON.parse(body); } catch { /* "Could not create new page": reuse an open tab */ }
+  if (t && t.webSocketDebuggerUrl)
+    return { ws: new WebSocket(t.webSocketDebuggerUrl), close: () => fetch(`http://127.0.0.1:${ANDROID_PORT}/json/close/${t.id}`).catch(() => {}) };
+  const list = await (await fetch(`http://127.0.0.1:${ANDROID_PORT}/json/list`)).json();
+  const page = list.find((p) => p.type === 'page');
+  if (!page) throw new Error('no Chrome tab on the phone: open Chrome there');
+  return { ws: new WebSocket(page.webSocketDebuggerUrl), close: async () => {} };
 }
 
 async function runOnce(i) {
@@ -100,19 +115,20 @@ async function drive(ws) {
     const send = (method, params = {}) => new Promise((r) => { const n = ++id; pending.set(n, r); ws.send(JSON.stringify({ id: n, method, params })); });
     const evaluate = async (expr) => (await send('Runtime.evaluate', { expression: expr, returnByValue: true })).result?.result?.value;
 
+    if (android) await send('Page.bringToFront');   // a background tab is hidden and paused
     const url = base + (base.includes('?') ? '&' : '?') +
       (shotsLabel ? `shots=${encodeURIComponent(shotsLabel)}&mute=1&uncapped=1` : `bench=1&uncapped=${capped ? 0 : 1}`) + `&run=${Date.now()}`;
     if (cpuThrottle > 1) await send('Emulation.setCPUThrottlingRate', { rate: cpuThrottle });
     await send('Page.navigate', { url });
     const t0 = Date.now();
     if (shotsLabel) {
-      while (Date.now() - t0 < 120000) {
+      while (Date.now() - t0 < (android ? 600000 : 120000)) {
         await sleep(500);
         if (await evaluate('window.__shotsDone === true')) return { shots: shotsLabel };
       }
       throw new Error('timed out waiting for shots');
     }
-    while (Date.now() - t0 < 120000 * Math.max(1, cpuThrottle)) {
+    while (Date.now() - t0 < (android ? 600000 : 120000) * Math.max(1, cpuThrottle)) {
       await sleep(1000);
       const s = await evaluate("window.__bench && window.__bench.state === 'done' && JSON.stringify(window.__bench.stats)");
       if (s) return JSON.parse(s);

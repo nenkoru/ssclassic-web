@@ -351,3 +351,41 @@ phase must also pass the visual regression test from phase 0 before it lands.
 - Engine CPU is no longer a limiter on the emulated potato (it held 57 fps at 12× CPU throttle even
   before these fixes). The visibility code is ASER, a span-buffer rasterizer; its "coherent scan
   line" shortcut was disabled upstream because of bugs. Further gains there mean algorithm changes.
+
+### Real device: Xiaomi Mi 8 SE (Snapdragon 710, Adreno 616, Android 11, Chrome 157)
+- Driven over adb Wi-Fi: `ADB_SERIAL=<ip>:5555 node tools/bench.mjs <url> 1 --android --vsync`.
+  - DevTools comes through `adb forward`, the page through `adb reverse` (a secure context).
+  - Wake key plus a no-op key every 10 s keep the screen on; no settings are changed.
+  - `tools/profile-worker.mjs --android` profiles the worker on the phone.
+- First run (threaded): 48.8 fps; worker p50 9.6 ms, p99 26.7 ms; a 2.8 s hitch. Single-threaded
+  was better (58.8 fps, 9.5 ms mean).
+- Found and fixed:
+  1. **Paced frames ran 2× slower than uncapped** (9.4 vs 4.4 ms p50; batch waits only 0.01 ms).
+     The worker sleeps between frames and Android clocks it down or moves it to a slow core, while
+     the page's main thread stays boosted.
+     - Fix: adaptive spin-wait for the vsync tick (WebFrame.cpp). It spins while work exceeds 35% of
+       the frame budget and stops below 12%; it falls back to sleeping after 20 ms (hidden tabs);
+       `?spin=0` / `?spin=1` force it.
+     - Fast machines never spin.
+  2. **Synchronous genTexture** queued behind pending frame batches: 1057 ms in total, 160 ms max per
+     call, when the demo's first frames create textures.
+     - Fix: gl1shim allocates texture handles; the replayers create the object on first bind.
+  3. **The rest of the hitch was the first video mode's `RefreshTextures`** (1.44 s on the phone).
+     The command-line script starts the demo before the first mode is applied, and a fresh visit has
+     no saved "last renderer", so the GL preset reloads every texture the demo just loaded.
+     - Players starting from the menu don't hit it (only menu textures are loaded then), so this is
+       a benchmark artifact.
+     - The single-threaded benchmark never counted it, because its JS is blocked too.
+     - Fix: the benchmark warm-up now also waits 60 engine frames.
+- Result, paced (vsync):
+
+  | Mi 8 SE | fps | worker p50 | p99 | max | >16.7 ms |
+  |---|---|---|---|---|---|
+  | threaded (adaptive spin) | 59.5 | 4.8 ms | 8.8 ms | 16.7 ms | 1 |
+  | threaded, `?spin=0` | 58.0 | 9.1 ms | 19.4 ms | 21.9 ms | 19 |
+  | single-threaded | 59.5 | 8.6 ms | 20.4 ms | 97.6 ms | 51 |
+
+  - Uncapped: threaded 174 fps (worker p50 4.4 ms), single 165 fps.
+  - Main-thread replay: 1.2 ms mean on the phone.
+- Spinning keeps a core busy while waiting for vsync. That costs power, and it's only used when a
+  frame takes over a third of the budget.

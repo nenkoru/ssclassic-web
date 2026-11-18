@@ -2,10 +2,20 @@
 // CPU-profile the engine worker (threaded build) during the timedemo, over DevTools auto-attach.
 // Prints the top self-time functions and the call stacks of time spent waiting on the main thread
 // (synchronous proxies show up as _do_futex_wait).
-//   node tools/profile-worker.mjs "http://127.0.0.1:8094/serioussam.html?bench=1&uncapped=1" out.txt [seconds=5]
-import { spawn } from 'node:child_process'; import { mkdtempSync, writeFileSync } from 'node:fs'; import { tmpdir } from 'node:os'; import { join } from 'node:path';
-const [url, out, secs] = process.argv.slice(2), port = 9600 + Math.floor(Math.random() * 30);
-const c = spawn('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), 'wp-'))}`, '--mute-audio', '--use-angle=metal', '--enable-gpu', 'about:blank'], { stdio: 'ignore' });
+//   node tools/profile-worker.mjs "http://127.0.0.1:8094/serioussam.html?bench=1&uncapped=1" out.txt [seconds=5] [--android]
+// --android: profile Chrome on a phone over adb (see tools/bench.mjs --android; ADB_SERIAL picks the device)
+import { spawn, execFileSync } from 'node:child_process'; import { mkdtempSync, writeFileSync } from 'node:fs'; import { tmpdir } from 'node:os'; import { join } from 'node:path';
+const argv = process.argv.slice(2), android = argv.includes('--android');
+const [url, out, secs] = argv.filter(a => a !== '--android');
+let port = 9600 + Math.floor(Math.random() * 30), c = { kill() {} };
+const adb = (...a) => execFileSync(process.env.ADB || 'adb', [...(process.env.ADB_SERIAL ? ['-s', process.env.ADB_SERIAL] : []), ...a], { encoding: 'utf8' });
+if (android) {
+  port = 9222;
+  adb('forward', `tcp:${port}`, 'localabstract:chrome_devtools_remote');
+  adb('reverse', `tcp:${new URL(url).port}`, `tcp:${new URL(url).port}`);
+  const awake = () => { try { adb('shell', 'input keyevent KEYCODE_WAKEUP; input keyevent KEYCODE_UNKNOWN'); } catch {} };
+  awake(); setInterval(awake, 10000).unref();
+} else c = spawn('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), 'wp-'))}`, '--mute-audio', '--use-angle=metal', '--enable-gpu', 'about:blank'], { stdio: 'ignore' });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 let ws; for (let t = 0; t < 50 && !ws; t++) { try { const v = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json(); ws = new WebSocket(v.webSocketDebuggerUrl); } catch { await sleep(200); } }
 await new Promise(r => ws.onopen = r); let id = 0; const pend = new Map(); const workers = [];
@@ -18,11 +28,12 @@ ws.onmessage = m => { const d = JSON.parse(m.data);
 const send = (method, params = {}, sessionId) => new Promise(r => { const n = ++id; pend.set(n, r); ws.send(JSON.stringify(sessionId ? { id: n, method, params, sessionId } : { id: n, method, params })); });
 const { result: { targetInfos } } = await send('Target.getTargets');
 const pg = targetInfos.find(t => t.type === 'page');
+if (android) await send('Target.activateTarget', { targetId: pg.targetId });   // a background tab is paused
 await send('Target.attachToTarget', { targetId: pg.targetId, flatten: true });
 for (let t = 0; t < 20 && !page; t++) await sleep(100);
 await send('Page.navigate', { url }, page);
 const ev = async e => (await send('Runtime.evaluate', { expression: e, returnByValue: true }, page)).result?.result?.value;
-for (let t = 0; t < 120; t++) { await sleep(500); if (await ev("window.__bench && window.__bench.state==='running'")) break; }
+for (let t = 0; t < (android ? 1200 : 120); t++) { await sleep(500); if (await ev("window.__bench && window.__bench.state==='running'")) break; }
 console.error('workers:', workers.length);
 for (const w of workers) { await send('Profiler.enable', {}, w); await send('Profiler.setSamplingInterval', { interval: 100 }, w); await send('Profiler.start', {}, w); }
 await sleep((+secs || 5) * 1000);

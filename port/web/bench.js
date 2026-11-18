@@ -14,8 +14,12 @@
     if (!Module._SE1_DemoTime || !Module.se1Perf) return;
     var playing = Module._SE1_DemoTime() >= 0;
     var now = performance.now();
-    if (B.state === 'waiting' && playing) { B.state = 'warmup'; B.warmT = now; }
-    else if (B.state === 'warmup' && now - B.warmT > 1000) {
+    // warm-up: 1 s AND 60 engine frames after the demo starts. Wall-clock alone let a stall in the
+    // demo's first frames (the first video mode reloads textures the demo just loaded, ~1.4 s on a
+    // phone) leak into the measured window in the threaded build only: there this script keeps
+    // running while the engine thread is busy.
+    if (B.state === 'waiting' && playing) { B.state = 'warmup'; B.warmT = now; B.warmN = Module.se1Perf.n; }
+    else if (B.state === 'warmup' && now - B.warmT > 1000 && Module.se1Perf.n - B.warmN >= 60) {
       B.state = 'running'; B.startT = now; Module.se1Perf.n = 0;
       if (Module.se1Replay) Module.se1Replay.n = 0;   // threaded build: main-thread replay times
       // presented-frame intervals (what the player sees), independent of CPU work time
