@@ -188,7 +188,7 @@
       else if (s.kind === 'weapon' && !s.moved) {
         var c = Module.canvas;
         if (c) c.dispatchEvent(new WheelEvent('wheel',
-          { bubbles: true, deltaY: -100, deltaMode: 0, clientX: c.clientWidth / 2, clientY: c.clientHeight / 2 }));
+          { bubbles: true, deltaY: 100, deltaMode: 0, clientX: c.clientWidth / 2, clientY: c.clientHeight / 2 }));
       }
       else if (s.kind === 'menu' && !s.moved) {
         // hold Escape ~50 ms so the engine reads a frame with the key down (a keydown+keyup in the
