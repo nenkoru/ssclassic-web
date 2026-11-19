@@ -1374,18 +1374,11 @@ BOOL FileExists(const CTFileName &fnmFile)
     // it doesn't exist
     return FALSE;
   }
-  // try to
-  try {
-    // open the file for reading
-    CTFileStream strmFile;
-    strmFile.Open_t(fnmFile);
-    // if successful, it means that it exists,
-    return TRUE;
-  // if failed, it means that it doesn't exist
-  } catch (const char *strError) {
-    (void) strError;
-    return FALSE;
-  }
+  // web port: only resolve the path (a file on disk, or an entry in a .gro's directory), the same
+  // lookup Open_t starts with. Opening it decompressed the whole file when it was in an archive, and
+  // world loading calls this for each entity: starting a demo after the intro took many seconds.
+  CTFileName fnmExpanded;
+  return ExpandFilePath(EFP_READ, fnmFile, fnmExpanded) != EFP_NONE;
 }
 
 // Test if a file exists for writing. 
