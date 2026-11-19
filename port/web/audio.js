@@ -89,6 +89,7 @@ Module['se1audio'] = {
   initRing: function (rate, channels, ring, capFrames, ctl) {
     var A = Module.se1AudioRing;
     if (A) {                         // format change: retune the running worklet, keep the context
+      A.rate = rate;                 // (also used when the worklet is created after this call)
       if (A.node) A.node.port.postMessage({ rate: rate });
       return;
     }
@@ -118,7 +119,7 @@ Module['se1audio'] = {
     var url = URL.createObjectURL(new Blob([src], { type: 'application/javascript' }));
     A.ctx.audioWorklet.addModule(url).then(function () {
       A.node = new AudioWorkletNode(A.ctx, 'se1-ring-player', { numberOfInputs: 0, outputChannelCount: [2],
-        processorOptions: { mem: HEAP8.buffer, ring: ring, cap: capFrames, ctl: ctl, rate: rate } });
+        processorOptions: { mem: HEAP8.buffer, ring: ring, cap: capFrames, ctl: ctl, rate: A.rate } });   // the latest rate
       // ?mute=1 / ?bench=1: silent through a zero gain, so the worklet still consumes the ring
       // (a node with no path to the destination may not be processed, and the engine would stop mixing)
       var q = new URLSearchParams(location.search), out = A.ctx.destination;
