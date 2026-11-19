@@ -164,7 +164,8 @@ enum {
   OP_USEPROG = 22, OP_UNIFORM1I = 23, OP_UNIFORM1F = 24, OP_UNIFORM4F = 25, OP_UNIFORMMAT4 = 26,
   OP_ATTRIB_ON = 27, OP_ATTRIB_OFF = 28, OP_ATTRIB_CONST = 29, OP_ATTRIB_PTR = 30,
   OP_DRAW_ELEMENTS = 31, OP_DRAW_QUADS = 32, OP_DRAW_ARRAYS = 33,
-  OP_TEXIMAGE = 34, OP_PIXELSTORE = 35, OP_VSTREAMS = 36, OP_DEPTHPROBE = 37
+  OP_TEXIMAGE = 34, OP_PIXELSTORE = 35, OP_VSTREAMS = 36, OP_DEPTHPROBE = 37,
+  OP_NEWPROG = 38, OP_NEWULOC = 39
 };
 typedef union { int32_t i; float f; } Word;
 static Word *_cmd; static size_t _ncmd, _capcmd;
@@ -222,6 +223,11 @@ static uint8_t *arena_at(Arena *a, size_t off, size_t n) {
   a->n = off + n;
   return a->p + off;
 }
+/* Shader sources and uniform names of programs created in the threaded build: the main thread
+   reads them when it replays the batch, later. Each is a strdup'ed copy at a fixed address (a
+   growing arena would move under batches not replayed yet); never freed: a few KB per shader
+   combination, and combinations are cached. */
+static int src_str(const char *s) { return (int)(uintptr_t)strdup(s); }
 typedef struct { int valid, size, type, norm, stride; size_t base; } PtrCache;
 static PtrCache _ap[NSTREAMS];   /* attribute pointers recorded in this batch */
 static uint32_t _v0;             /* vertex cursor of this batch */
@@ -249,12 +255,43 @@ static void batch_reset(void) {
 #ifdef SE1_THREADS
 /* engine runs in a worker: the replayer (and WebGL/WebGPU) live on the page's main thread.
    Recorded batches go over asynchronously (hand_off below); the calls here are proxied
-   synchronously. Pointers are into shared memory, valid on both threads. */
+   synchronously. Pointers are into shared memory, valid on both threads.
+
+   createProgram / uniformLocation are NO LONGER synchronous (this task): the worker allocates
+   the handles itself (like genTexture) and the replayer creates the objects on first use, from
+   OP_NEWPROG / OP_NEWULOC commands in the stream (shader sources: strdup'ed copies, see src_str). The synchronous main-thread calls left on the per-frame hot path (with how often
+   they run):
+     gfx_get_param   once per engine boot, when the engine queries GL constants (limits);
+                     not per-frame
+     gfx_read_pixels engine read-backs: screenshots / thumbnails (rare, a few per session);
+                     the depth-read path is faked, no call
+     gfx_quad_capacity  when the quad index buffer must grow (first big quads draw per level,
+                     doubling; a handful per session)
+     gfx_tex_image   texture uploads in single-threaded builds only (threaded: recorded as
+                     OP_TEXIMAGE in the stream)
+     gfx_pixel_store unused by the engine (glPixelStorei is recorded as OP_PIXELSTORE)
+     hasAnisotropy   once, at the first glGetString(GL_EXTENSIONS) */
 #include <emscripten/threading.h>
+/* program / uniform-location handles are allocated here, never reused; the replayer creates the
+   objects on first use of a handle (OP_NEWPROG / OP_NEWULOC in the stream). A failed program
+   stays NULL in the replayer: useProgram(NULL) is a no-op and its uniform locations are -1, so
+   a bad shader combination can't crash the replay. */
+static int _nextProg = 1, _nextULoc = 1;
 static int gfx_create_program(const char *vs, const char *fs, unsigned key)
-  { return MAIN_THREAD_EM_ASM_INT({ return Module['se1gfx'].createProgram(UTF8ToString($0), UTF8ToString($1), $2 >>> 0); }, vs, fs, key); }
+  {
+    int p = _nextProg++;
+    Word *w = cmd(OP_NEWPROG, 6);
+    w[0].i = p; w[1].i = (int)key; w[2].i = src_str(vs); w[3].i = (int)strlen(vs) + 1; w[4].i = src_str(fs);
+    w[5].i = (int)strlen(fs) + 1;
+    return p;
+  }
 static int gfx_uniform_location(int prog, const char *name)
-  { return MAIN_THREAD_EM_ASM_INT({ return Module['se1gfx'].uniformLocation($0, UTF8ToString($1)); }, prog, name); }
+  {
+    int l = _nextULoc++;
+    Word *w = cmd(OP_NEWULOC, 4);
+    w[0].i = l; w[1].i = prog; w[2].i = src_str(name); w[3].i = (int)strlen(name) + 1;
+    return l;
+  }
 static void gfx_quad_capacity(int ctQuads) { MAIN_THREAD_EM_ASM({ Module['se1gfx'].quadCapacity($0); }, ctQuads); }
 static void gfx_tex_image(int sub, int target, int level, int x, int y, int w, int h, int fmt, int type, const void *data, int len)
   { MAIN_THREAD_EM_ASM({ Module['se1gfx'].texImage($0, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10); }, sub, target, level, x, y, w, h, fmt, type, data, len); }
@@ -408,7 +445,13 @@ static uint32_t state_key(void) {
   k |= (uint32_t)(S.clipPlane ? 1 : 0) << 20;
   return k;
 }
-
+/* in the threaded build uniform locations are worker-allocated handles defined at create time
+   (the replayer resolves missing uniforms to -1); in the single-threaded build -1 means absent */
+#ifndef SE1_THREADS
+#define defined_on_create() 0
+#else
+#define defined_on_create() 1
+#endif
 static Prog *get_prog(uint32_t key) {
   for (int i = 0; i < _ctProgs; i++) if (_progs[i].key == key) return &_progs[i];
   if (_ctProgs == 256) _ctProgs = 0; /* crude eviction; never expected in practice */
@@ -476,7 +519,11 @@ static Prog *get_prog(uint32_t key) {
   }
   pr->cValid = 0;
   use_program(p);
-  for (int i = 0; i < MAXUNITS; i++) if (pr->uSampler[i] >= 0) cmd_ii(OP_UNIFORM1I, pr->uSampler[i], i);
+  /* single-threaded: uniformLocation answered synchronously, so only record sets for existing
+     uniforms. Threaded: locations are worker-allocated handles (always >= 0); the replayer
+     resolves a missing uniform to -1 and no-ops the set, so record all. */
+  for (int i = 0; i < MAXUNITS; i++)
+    if (defined_on_create() || pr->uSampler[i] >= 0) cmd_ii(OP_UNIFORM1I, pr->uSampler[i], i);
   return pr;
 }
 

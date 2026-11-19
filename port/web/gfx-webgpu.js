@@ -32,6 +32,7 @@
   }]);
 
   function makeWebGPU(dev) {
+    var sync = { createProgram: 0, uniformLocation: 0, other: 0 };   // Module.se1GfxSync
     var fmt = navigator.gpu.getPreferredCanvasFormat();
     var errors = 0;
     dev.onuncapturederror = function (e) { if (errors++ < 20) console.error('se1gfx webgpu:', e.error.message); };
@@ -341,15 +342,17 @@
     var warnedRead = false, fences = [];
     var api = {
       backend: 'webgpu',
-      createProgram: function (vs, fs, key) { progs.push({ key: key >>> 0, shadow: new Float32Array(120), modules: {} }); return progs.length - 1; },
+      createProgram: function (vs, fs, key) { sync.createProgram++; progs.push({ key: key >>> 0, shadow: new Float32Array(120), modules: {} }); return progs.length - 1; },
       uniformLocation: function (p, name) {
+        sync.uniformLocation++;
         var o = UNIFORM_OFF[name];
-        if (!o) return name.charAt(1) === 'S' ? 0 : -1;  // samplers: fixed bindings, nothing to set
+        if (!o) { ulocs.push(-1); return ulocs.length - 1; }   // samplers: fixed bindings, nothing to set
         ulocs.push({ p: p, off: o[0], n: o[1] });
         return ulocs.length - 1;
       },
       genTexture: function () { texs.push(newTex()); return texs.length - 1; },   // (unused: handles come from gl1shim)
       quadCapacity: function (ctQuads) {
+        sync.other++;
         if (ctQuads <= qcap) return;
         var cap = 1024; while (cap < ctQuads) cap *= 2;
         var idx = new Uint32Array(cap * 6);
@@ -361,7 +364,12 @@
         dev.queue.writeBuffer(qbuf, 0, idx);
         qcap = cap;
       },
+      // synchronous entry counts as a sync call; the OP_TEXIMAGE replay calls texUpload directly
       texImage: function (sub, target, level, x, y, w, h, fmtGL, type, ptr, len) {
+        sync.other++;
+        api.texUpload(sub, target, level, x, y, w, h, fmtGL, type, ptr, len);
+      },
+      texUpload: function (sub, target, level, x, y, w, h, fmtGL, type, ptr, len) {
         var t = texs[st.bound[st.unit]];
         if (!t) return;
         if (!sub) {
@@ -380,6 +388,7 @@
         if (!sub) { t.have[level] = 1; updateView(t); }
       },
       readPixels: function (x, y, w, h, fmtGL, type, ptr, len) {
+        sync.other++;
         // engine read-backs (screenshots, thumbnails) need a synchronous answer WebGPU can't give
         HEAPU8.fill(0, ptr, ptr + len);
         if (!warnedRead) { warnedRead = true; console.warn('se1gfx webgpu: glReadPixels is not supported (returns black)'); }
@@ -387,6 +396,7 @@
       pixelStore: function () {},
       hasAnisotropy: function () { return true; },   // WebGPU samplers support maxAnisotropy
       getParam: function (pname, ptr, isFloat) {   // constants: SDL's WebGL2 context still exists
+        sync.other++;
         var gl = GL_ctx(), H32 = isFloat ? HEAPF32 : HEAP32, o = ptr >> 2, v;
         if (gl) v = gl.getParameter(pname);
         else v = ({ 0x0D33: dev.limits.maxTextureDimension2D, 0x84FF: 16, 0x84E2: 4 })[pname] || 0;  // threads build: no GL context
@@ -564,7 +574,7 @@
           case 23: c += 3; break;                                              // UNIFORM1I: samplers are fixed
           case 24: case 25: case 26: {                                         // UNIFORM1F / 4F / MAT4
             var ul = ulocs[I[c + 1]], cnt = I[c] === 24 ? 1 : I[c] === 25 ? 4 : 16;
-            if (ul) { progs[ul.p].shadow.set(F.subarray(c + 2, c + 2 + cnt), ul.off); if (ul.p === st.prog) uniDirty = true; }
+            if (ul && ul !== -1) { progs[ul.p].shadow.set(F.subarray(c + 2, c + 2 + cnt), ul.off); if (ul.p === st.prog) uniDirty = true; }
             c += 2 + cnt; break;
           }
           case 27: st.attrOn |= 1 << I[c + 1]; pipeDirty = true; c += 2; break;
@@ -606,11 +616,24 @@
           }
           case 34:                                                             // TEXIMAGE (data in the data arena)
             splitForUpload();
-            api.texImage(I[c + 1], I[c + 2], I[c + 3], I[c + 4], I[c + 5], I[c + 6], I[c + 7], I[c + 8], I[c + 9],
+            api.texUpload(I[c + 1], I[c + 2], I[c + 3], I[c + 4], I[c + 5], I[c + 6], I[c + 7], I[c + 8], I[c + 9],
                          I[c + 10] >= 0 ? dp + I[c + 10] : 0, I[c + 11]);
             texDirty = true;
             c += 12; break;
           case 35: c += 3; break;                                              // PIXELSTORE: n/a
+          case 38: {                                                           // NEWPROG h key vsOff vsLen fsOff:
+            var ph = I[c + 1];                                                 // the replayer keys off the key, not the source
+            if (!progs[ph]) progs[ph] = { key: I[c + 2] >>> 0, shadow: new Float32Array(120), modules: {} };
+            c += 7; break; }
+          case 39: {                                                           // NEWULOC h prog nameOff nameLen
+            var lh = I[c + 1];
+            if (ulocs[lh] === undefined) {                                   // name: strdup'ed, absolute address
+              var nso = I[c + 3] >>> 0, b = new Uint8Array(I[c + 4] - 1);
+              b.set(HEAPU8.subarray(nso, nso + I[c + 4] - 1));
+              var o = UNIFORM_OFF[new TextDecoder().decode(b)];
+              ulocs[lh] = o ? { p: I[c + 2], off: o[0], n: o[1] } : -1;
+            }
+            c += 5; break; }
           case 37: {                                                           // DEPTHPROBE: not implemented here yet,
             var pn = I[c + 1], pr = I[c + 2] >> 2;                             // so every point is visible (as before)
             for (var pk = 0; pk < pn; pk++) HEAP32[pr + I[c + 3 + 4 * pk]] = 1;
@@ -636,6 +659,7 @@
         dev.queue.submit([enc.finish()]);
       }
     };
+    Module['se1GfxSync'] = sync;
     return api;
   }
 })();

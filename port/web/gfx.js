@@ -6,9 +6,11 @@
 // read-backs, queries). That's one wasm->JS crossing and two buffer uploads per frame instead of
 // ~2000 crossings and ~390 uploads.
 //
-// JS owns every WebGL object; C refers to programs, uniform locations and textures by integer
 // handles (index into the tables below; 0 = none). OPCODES MUST MATCH the OP_* enum in gl1shim.c.
+// Module.se1GfxSync counts the synchronous main-thread calls (incremented here, on the main
+// thread) so a threaded build can prove the hot path stopped calling into it.
 Module['se1gfx'] = (function () {
+  var sync = { createProgram: 0, uniformLocation: 0, other: 0 };   // Module.se1GfxSync
   var gl = null, vao, vbuf, ibuf, qbuf, qcap = 0;
   var sb = [0, 0, 0, 0, 0, 0];   // this batch's vertex stream bases in vbuf (OP_VSTREAMS)
   // depth probes (OP_DEPTHPROBE): occlusion queries standing in for depth-buffer reads
@@ -69,6 +71,20 @@ Module['se1gfx'] = (function () {
   function sxr(v) { return Math.round(v * sx); }
   function syr(v) { return Math.round(v * sy); }
   var progs = [null], ulocs = [null], texs = [null];
+  // threaded build: program handles are allocated by the worker (OP_NEWPROG); the WebGL object is
+  // created here on first use. A failed program stays null: useProgram(null) is a no-op, its
+  // uniform locations resolve to -1, and the uniform sets no-op, so it can't crash the replay.
+  function buildProgram(h, key, vs, fs) {
+    var p = gl.createProgram(), v = shader(gl.VERTEX_SHADER, vs), f = shader(gl.FRAGMENT_SHADER, fs);
+    gl.attachShader(p, v); gl.attachShader(p, f); gl.linkProgram(p);
+    gl.deleteShader(v); gl.deleteShader(f);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+      console.error('gl1shim link error (program ' + h + ', key ' + key + '):', gl.getProgramInfoLog(p));
+      gl.deleteProgram(p);
+      return null;
+    }
+    return p;
+  }
 
   function init() {
     if (gl) return;
@@ -91,21 +107,28 @@ Module['se1gfx'] = (function () {
     return s;
   }
 
-  return {
+  // TextDecoder can't read SharedArrayBuffer (threaded build): copy the bytes first.
+  // len includes the trailing NUL from src_str; decode len-1 bytes so the string is clean.
+  function utf8(H, off, len) {
+    var b = new Uint8Array(len - 1);
+    b.set(H.subarray(off, off + len - 1));
+    return new TextDecoder().decode(b);
+  }
+
+  var api = {
     backend: 'webgl2',
     get gl() { return gl; },   // the replayer's context (?glstats=1 in port/web/bench.js)
     createProgram: function (vs, fs, key) {   // key: used by the WebGPU replayer only
+      sync.createProgram++;
       init();
-      var p = gl.createProgram(), v = shader(gl.VERTEX_SHADER, vs), f = shader(gl.FRAGMENT_SHADER, fs);
-      gl.attachShader(p, v); gl.attachShader(p, f); gl.linkProgram(p);
-      gl.deleteShader(v); gl.deleteShader(f);
-      if (!gl.getProgramParameter(p, gl.LINK_STATUS)) console.error('gl1shim link error:', gl.getProgramInfoLog(p));
+      var p = buildProgram(0, key >>> 0, vs, fs);
       progs.push(p);
       return progs.length - 1;
     },
     uniformLocation: function (p, name) {
-      var l = gl.getUniformLocation(progs[p], name);
-      if (!l) return -1;
+      sync.uniformLocation++;
+      var l = progs[p] ? gl.getUniformLocation(progs[p], name) : null;
+      if (!l) { ulocs.push(-1); return ulocs.length - 1; }
       ulocs.push(l);
       return ulocs.length - 1;
     },
@@ -114,6 +137,7 @@ Module['se1gfx'] = (function () {
     genTexture: function () { init(); texs.push(gl.createTexture()); return texs.length - 1; },   // (unused)
     // static index buffer turning quads (0,1,2,3) into triangles (0,1,2, 0,2,3)
     quadCapacity: function (ctQuads) {
+      sync.other++;
       if (ctQuads <= qcap) return;
       init();
       var cap = 1024; while (cap < ctQuads) cap *= 2;
@@ -128,13 +152,20 @@ Module['se1gfx'] = (function () {
       qcap = cap;
     },
     // immediate calls (C flushed the stream first, so WebGL state matches the engine's view)
+    // the synchronous entry (single-threaded build, or a direct call from C) counts as a sync call;
+    // the threaded build's OP_TEXIMAGE replay calls texUpload directly and is not one
     texImage: function (sub, target, level, x, y, w, h, fmt, type, ptr, len) {
+      sync.other++;
+      this.texUpload(sub, target, level, x, y, w, h, fmt, type, ptr, len);
+    },
+    texUpload: function (sub, target, level, x, y, w, h, fmt, type, ptr, len) {
       init();
       var data = ptr ? HEAPU8.subarray(ptr, ptr + len) : null;
       if (sub) gl.texSubImage2D(target, level, x, y, w, h, fmt, type, data);
       else gl.texImage2D(target, level, gl.RGBA8, w, h, 0, fmt, type, data); // engine always sends RGBA8 pixels
     },
     readPixels: function (x, y, w, h, fmt, type, ptr, len) {
+      sync.other++;
       init();
       if (sx === 1 && sy === 1) { gl.readPixels(x, y, w, h, fmt, type, HEAPU8.subarray(ptr, ptr + len)); return; }
       // logical-pixel request on a scaled backing store: read scaled, resample nearest (RGBA only)
@@ -151,8 +182,8 @@ Module['se1gfx'] = (function () {
     },
     // called once per frame after the swap flush: resolution changes take effect next frame
     endFrame: function () { if (gl) applyScale(); },
-    pixelStore: function (p, v) { init(); gl.pixelStorei(p, v); },
-    hasAnisotropy: function () { init(); return !!gl.getExtension('EXT_texture_filter_anisotropic'); },
+    pixelStore: function (p, v) { sync.other++; init(); gl.pixelStorei(p, v); },
+    hasAnisotropy: function () { sync.other++; init(); return !!gl.getExtension('EXT_texture_filter_anisotropic'); },
     sync: function () { if (gl) gl.finish(); return null; },
     // visual regression capture: bottom-up RGBA, delivered to cb (synchronously here)
     capture: function (cb) {
@@ -162,6 +193,7 @@ Module['se1gfx'] = (function () {
       cb(px, w, h);
     },
     getParam: function (pname, ptr, isFloat) {
+      sync.other++;
       init();
       var v = gl.getParameter(pname), H = isFloat ? HEAPF32 : HEAP32, o = ptr >> 2;
       if (v === null || v === undefined) { H[o] = 0; return 0; }
@@ -204,10 +236,10 @@ Module['se1gfx'] = (function () {
         case 20: gl.texParameterf(I[c + 1], I[c + 2], F[c + 3]); c += 4; break;
         case 21: if (texs[I[c + 1]]) gl.deleteTexture(texs[I[c + 1]]); texs[I[c + 1]] = null; c += 2; break;
         case 22: gl.useProgram(progs[I[c + 1]] || null); c += 2; break;
-        case 23: gl.uniform1i(ulocs[I[c + 1]], I[c + 2]); c += 3; break;
-        case 24: gl.uniform1f(ulocs[I[c + 1]], F[c + 2]); c += 3; break;
-        case 25: gl.uniform4f(ulocs[I[c + 1]], F[c + 2], F[c + 3], F[c + 4], F[c + 5]); c += 6; break;
-        case 26: gl.uniformMatrix4fv(ulocs[I[c + 1]], false, F.subarray(c + 2, c + 18)); c += 18; break;
+        case 23: if (ulocs[I[c + 1]] !== -1) gl.uniform1i(ulocs[I[c + 1]], I[c + 2]); c += 3; break;
+        case 24: if (ulocs[I[c + 1]] !== -1) gl.uniform1f(ulocs[I[c + 1]], F[c + 2]); c += 3; break;
+        case 25: if (ulocs[I[c + 1]] !== -1) gl.uniform4f(ulocs[I[c + 1]], F[c + 2], F[c + 3], F[c + 4], F[c + 5]); c += 6; break;
+        case 26: if (ulocs[I[c + 1]] !== -1) gl.uniformMatrix4fv(ulocs[I[c + 1]], false, F.subarray(c + 2, c + 18)); c += 18; break;
         case 27: gl.enableVertexAttribArray(I[c + 1]); c += 2; break;
         case 28: gl.disableVertexAttribArray(I[c + 1]); c += 2; break;
         case 29: gl.vertexAttrib4f(I[c + 1], F[c + 2], F[c + 3], F[c + 4], F[c + 5]); c += 6; break;
@@ -220,10 +252,27 @@ Module['se1gfx'] = (function () {
           c += 3; break;
         case 33: gl.drawArrays(I[c + 1], I[c + 2], I[c + 3]); c += 4; break;           // mode first count
         case 34:                                                                        // TEXIMAGE (data in the data arena)
-          this.texImage(I[c + 1], I[c + 2], I[c + 3], I[c + 4], I[c + 5], I[c + 6], I[c + 7], I[c + 8], I[c + 9],
+          this.texUpload(I[c + 1], I[c + 2], I[c + 3], I[c + 4], I[c + 5], I[c + 6], I[c + 7], I[c + 8], I[c + 9],
                         I[c + 10] >= 0 ? dp + I[c + 10] : 0, I[c + 11]);
           c += 12; break;
         case 35: gl.pixelStorei(I[c + 1], I[c + 2]); c += 3; break;                    // PIXELSTORE
+        case 38: {                                                                      // NEWPROG h key vsOff vsLen fsOff
+          var ph = I[c + 1];
+          if (!progs[ph]) {                                                            // sources: strdup'ed, absolute addresses
+            var vso = I[c + 3] >>> 0, fso = I[c + 5] >>> 0;
+            var vs = utf8(HEAPU8, vso, I[c + 4]);
+            var fs = utf8(HEAPU8, fso, I[c + 6]);
+            progs[ph] = buildProgram(ph, I[c + 2] >>> 0, vs, fs);
+          }
+          c += 7; break; }
+        case 39: {                                                                      // NEWULOC h prog nameOff nameLen
+          var lh = I[c + 1];
+          if (ulocs[lh] === undefined) {
+            var nso = I[c + 3] >>> 0, nm = utf8(HEAPU8, nso, I[c + 4]);
+            var P = progs[I[c + 2]];
+            ulocs[lh] = P ? (gl.getUniformLocation(P, nm) || -1) : -1;
+          }
+          c += 5; break; }
         case 37:                                                                        // DEPTHPROBE n res (slot x y depth) x n
           probeRes = I[c + 2]; depthProbes(I, F, c + 3, I[c + 1]); c += 3 + 4 * I[c + 1]; break;
         case 36: {                                                                      // VSTREAMS (ptr len) x6
@@ -232,8 +281,8 @@ Module['se1gfx'] = (function () {
           if (tot) {
             gl.bufferData(gl.ARRAY_BUFFER, tot, gl.STREAM_DRAW);
             for (k = 0; k < 6; k++) {
-              var sp = I[c + 1 + 2 * k] >>> 0, sn = I[c + 2 + 2 * k];
-              if (sn) gl.bufferSubData(gl.ARRAY_BUFFER, sb[k], HEAPU8.subarray(sp, sp + sn));
+              var vsp = I[c + 1 + 2 * k] >>> 0, sn = I[c + 2 + 2 * k];
+              if (sn) gl.bufferSubData(gl.ARRAY_BUFFER, sb[k], HEAPU8.subarray(vsp, vsp + sn));
             }
           }
           c += 13; break;
@@ -245,4 +294,6 @@ Module['se1gfx'] = (function () {
       }
     }
   };
+  Module['se1GfxSync'] = sync;
+  return api;
 })();
