@@ -194,6 +194,12 @@ extern "C" void SE1_YieldToBrowser(void)
     }
     lastResumed = t;
   }
+  /* SDL's keyboard/mouse/focus callbacks are registered from this thread, so the page queues them
+     to it; a thread only runs its queue when it returns to its event loop, which the engine's main
+     loop never does. Run them here, once per frame, right after the frame wait and before the engine
+     reads input for the next frame, so input that arrived during the wait isn't a frame late. */
+  emscripten_current_thread_process_queued_calls();
   _resumed = emscripten_get_now();
 }
 #endif
+
