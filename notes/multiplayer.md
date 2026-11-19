@@ -16,6 +16,11 @@ routes packets.
    - They join 10.77.0.1 with `+connect … +quickjoin`.
 4. Optional: `&net=ws://<switch>:9002` if the switch runs elsewhere.
    - The default is this page's host, port 9002.
+5. Optional: `&rtc=1` enables WebRTC peer-to-peer data channels for lower latency.
+   - Without it, all traffic goes through the switch (the default, unchanged).
+   - With it, unicast packets to peers with an open data channel go directly; broadcasts and
+     packets to peers without an open channel still go through the switch.
+   - `&ice=stun:stun.l.google.com:19302[,turn:...]` adds STUN/TURN servers (default: none, LAN only).
 
 The page must be served over HTTPS or from localhost, with COOP/COEP (threaded build). For other
 machines on the LAN, see the hosting item in notes/roadmap.md.
@@ -30,6 +35,12 @@ machines on the LAN, see the hosting item in notes/roadmap.md.
 - `port/web/net.js`, on the page's main thread, owns the WebSocket.
   - It sends the outbound ring every ~2 ms and writes received packets into the inbound ring.
   - The engine starts only after the switch has assigned this browser its address.
+  - With `&rtc=1`, it also opens WebRTC data channels to each peer (lower peer id offers). The
+    switch relays `{"type":"signal",...}` messages for ICE/SDP. Unicast packets to peers with an
+    open data channel go over the channel; everything else goes through the switch. If a channel
+    closes, traffic falls back to the switch without the game noticing.
+  - `Module.se1Net.rtc = { links: {<peer id>: <state>}, sent: n, recv: n }` shows the per-link
+    state and the packet counts that went over the data channels (vs `sent`/`recv` for the switch).
 - The switch rewrites the first header field to the sender's address and forwards the packet to the
   owner of the destination address. 10.77.0.255 broadcasts, for LAN server discovery.
 - Web-port fixes the engine needed:
@@ -41,15 +52,15 @@ machines on the LAN, see the hosting item in notes/roadmap.md.
 ## Test
 
 `node tools/mptest.mjs http://127.0.0.1:8094/serioussam.html Levels/KarnakDemo.wld`
+`node tools/mptest.mjs http://127.0.0.1:8094/serioussam.html Levels/KarnakDemo.wld --rtc`
 
 It starts the switch and two headless browsers (host and client), then checks addresses, packets in
-both directions and that the client keeps running. It saves both screenshots, which show the shared
-scoreboard ("Sam 1", "Sam 2"). `SE1_MPLOG=1500` prints the engine log tails on failure
-(single-threaded build).
+both directions and that the client keeps running. With `--rtc` it also checks that the WebRTC data
+channels open and that ≥80% of unicast traffic goes peer-to-peer. It saves both screenshots, which
+show the shared scoreboard ("Sam 1", "Sam 2"). `SE1_MPLOG=1500` prints the engine log tails on
+failure (single-threaded build).
 
 ## Next
 
 - Lobby UI: create/join rooms from the menu instead of URL parameters.
 - Interest management in the switch for large games (the 128-player goal).
-- WebRTC peer-to-peer as an optional lower-latency path; the switch would stay the fallback and the
-  signalling channel.

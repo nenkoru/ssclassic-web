@@ -12,6 +12,9 @@
 //! Control messages (JSON text frames, server -> client):
 //!   {"type":"welcome","id":N,"ip":"10.77.0.K","peers":[{"id":..,"ip":".."}]}
 //!   {"type":"join","id":N,"ip":".."}   {"type":"leave","id":N}   {"type":"error","message":".."}
+//!   {"type":"signal","from":N,"data":..}   (WebRTC signalling, relayed from a peer)
+//! Control messages (JSON text frames, client -> server):
+//!   {"type":"signal","to":N,"data":..}   relayed to peer N in the same room, dropped otherwise
 //! Packets (binary frames, big-endian):
 //!   client -> server  [dst ip u32][src port u16][dst port u16][payload]
 //!   server -> client  [src ip u32][src port u16][dst port u16][payload]
@@ -31,6 +34,7 @@ use tungstenite::{accept_hdr, Message};
 const MAX_PEERS: usize = 128;
 const NET: [u8; 3] = [10, 77, 0];
 const MAX_PACKET: usize = 8 + 4096;
+const MAX_SIGNAL: usize = 64 * 1024;
 
 struct Peer {
     ip: u8, // last octet of 10.77.0.x
@@ -139,6 +143,23 @@ fn handle(stream: TcpStream, rooms: Rooms, id: u32) {
                     for (pid, p) in &room.peers {
                         if *pid != id && (dst == 255 || p.ip == dst) {
                             let _ = p.tx.send(out.clone());
+                        }
+                    }
+                }
+            }
+            // WebRTC signalling: relay {"type":"signal","to":id,"data":..} to that peer in the same
+            // room. SDP offers and ICE candidates are a few KB; anything far bigger is dropped, so one
+            // client cannot push megabytes through the switch to another.
+            Ok(Message::Text(t)) if t.len() <= MAX_SIGNAL => {
+                if let Ok(v) = serde_json::from_str::<Value>(&t) {
+                    if v.get("type").and_then(Value::as_str) == Some("signal") {
+                        if let Some(to) = v.get("to").and_then(Value::as_u64).map(u32::try_from).transpose().ok().flatten() {
+                            let rooms = rooms.lock().unwrap();
+                            if let Some(room) = rooms.get(&room_name) {
+                                if let Some(p) = room.peers.get(&to) {
+                                    let _ = p.tx.send(text(json!({"type":"signal","from":id,"data":v.get("data").cloned().unwrap_or(Value::Null)})));
+                                }
+                            }
                         }
                     }
                 }

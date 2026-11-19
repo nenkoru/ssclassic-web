@@ -398,3 +398,71 @@ fn malformed_packets_ignored() {
     assert_eq!(g, vec![10, 77, 0, 2, 0x0a, 0x0b, 0x0c, 0x0d, b'o', b'k']);
     drop(server);
 }
+
+fn send_signal(ws: &mut Ws, to: u64, data: Value) {
+    ws.send(Message::text(serde_json::to_string(&serde_json::json!({"type":"signal","to":to,"data":data})).unwrap())).unwrap();
+}
+
+#[test]
+fn signal_relayed_within_room() {
+    let (server, port) = start_server();
+    let mut host = connect(port, "sig-r", true);
+    let mut a = connect(port, "sig-r", false);
+    set_timeout(&mut host, 500);
+    let hw = recv_json(&mut host);
+    assert_eq!(hw["type"], "welcome");
+    let host_id = hw["id"].as_u64().unwrap();
+    set_timeout(&mut a, 500);
+    let aw = recv_json(&mut a);
+    assert_eq!(aw["type"], "welcome");
+    let jv = recv_json(&mut host);
+    let a_id = jv["id"].as_u64().unwrap();
+    send_signal(&mut a, host_id, serde_json::json!({"sdp": "offer-1"}));
+    let s = recv_json(&mut host);
+    assert_eq!(s["type"], "signal");
+    assert_eq!(s["from"], a_id);
+    assert_eq!(s["data"], serde_json::json!({"sdp": "offer-1"}));
+    drop(server);
+}
+
+#[test]
+fn signal_not_relayed_across_rooms() {
+    let (server, port) = start_server();
+    let mut hx = connect(port, "sig-x", true);
+    let mut cx = connect(port, "sig-x", false);
+    let mut cy = connect(port, "sig-y", false);
+    for ws in [&mut hx, &mut cx, &mut cy] {
+        set_timeout(ws, 500);
+        assert_eq!(recv_json(ws)["type"], "welcome");
+    }
+    // cy's id: a second y client's welcome lists it
+    let mut cy2 = connect(port, "sig-y", false);
+    set_timeout(&mut cy2, 500);
+    let cy_id = recv_json(&mut cy2)["peers"][0]["id"].as_u64().unwrap();
+
+    send_signal(&mut cx, cy_id, serde_json::json!({"sdp": "x->y"}));
+    expect_silence(&mut cy, 300);
+    drop(server);
+}
+
+#[test]
+fn signal_to_unknown_peer_dropped() {
+    let (server, port) = start_server();
+    let mut host = connect(port, "sig-unk", true);
+    let mut a = connect(port, "sig-unk", false);
+    for ws in [&mut host, &mut a] {
+        set_timeout(ws, 500);
+        assert_eq!(recv_json(ws)["type"], "welcome");
+    }
+
+    // unknown peer id and missing "to": both dropped, no reply, no crash
+    send_signal(&mut a, 999, serde_json::json!({"sdp": "nope"}));
+    a.send(Message::text(r#"{"type":"signal","data":{}}"#)).unwrap();
+    expect_silence(&mut host, 300);
+
+    // sender's connection stays usable
+    send_bin(&mut a, &pkt(1, 0x0a0b, 0x0c0d, b"ok"));
+    let g = recv_bin(&mut host);
+    assert_eq!(g, vec![10, 77, 0, 2, 0x0a, 0x0b, 0x0c, 0x0d, b'o', b'k']);
+    drop(server);
+}
