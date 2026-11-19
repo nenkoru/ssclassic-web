@@ -49,7 +49,7 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
 | Input: mouse lock, keyboard | ✅ | port/web/input.js, SDLInput.cpp hooks | — | inputtest | — |
 | Touch controls | ✅ | port/web/touch.js, `SE1_TouchLook` | automatic on touch | touchtest | input |
 | Gamepad + aim assist + bullet magnetism | ✅ | port/web/gamepad.js, port/common/AimAssist.cpp, WorldRayCasting.cpp hook, Game.cpp hook | `?aimassist=0-3` | gamepadtest | input |
-| DualSense gyro (WebHID) | 🚧 | port/web/gyro.js | `?gyro=0`, `?gyrosens=` | gyrotest; tools/dualsense.html (manual) | gamepad |
+| DualSense gyro (WebHID) | ✅ | port/web/gyro.js | `?gyro=0`, `?gyrosens=` | gyrotest; tools/dualsense.html (manual) | gamepad |
 | Persistence (saves, settings) | ✅ | port/common/Persist.cpp, port/web/persist.js | — | persisttest | — |
 | Static hosting / packaging | ✅ | port/web/{isolate,coi-sw}.js, tools/package.sh, landing.html | — | packagetest | — |
 | Multiplayer: virtual LAN switch | ✅ | rust/se1-server, port/common/NetLan.c, port/web/net.js | `?room=`, `&host=1` | mptest | — |
