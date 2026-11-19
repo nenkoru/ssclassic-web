@@ -1011,3 +1011,15 @@ BOOL CInput::ScanJoystick(INDEX iJoy, BOOL bPreScan)
 // end of SDLInput.cpp ...
 
 
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+// Web port: does the game want the mouse captured right now (in play, not in a menu or console)?
+// The page reads this (port/web/input.js) to grab the pointer itself inside the click handler: in
+// the threaded build SDL's own re-grab runs on the engine thread, outside any user gesture, and
+// the browser refuses it.
+extern "C" EMSCRIPTEN_KEEPALIVE int SE1_WantPointer(void)
+{
+  return (_pInput != NULL && _pInput->IsInputEnabled() && inp_bSDLGrabInput) ? 1 : 0;
+}
+#endif

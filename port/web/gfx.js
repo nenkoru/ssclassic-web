@@ -54,17 +54,16 @@ Module['se1gfx'] = (function () {
   }
   // render scale (dynamic resolution): the engine keeps its logical size (SDL's canvas size, HUD
   // layout, input coordinates); we draw into a smaller backing store and scale viewport/scissor.
-  // The canvas keeps its CSS size, so the browser stretches the result to fill it.
+  // The page sets the canvas's CSS size, so the browser stretches the result to fill it.
   var logW = 0, logH = 0, backW = 0, backH = 0, sx = 1, sy = 1;
   function applyScale() {
     var c = Module['canvas'];
     if (c.width !== backW || c.height !== backH) { logW = c.width; logH = c.height; }  // SDL set a new mode
     var s = Math.min(1, Math.max(0.25, Module['se1Scale'] || 1));
     var bw = Math.max(1, Math.round(logW * s)), bh = Math.max(1, Math.round(logH * s));
-    if (bw !== c.width || bh !== c.height) {
-      if (!c.style.width || c.dataset.se1Scaled) { c.style.width = logW + 'px'; c.style.height = logH + 'px'; c.dataset.se1Scaled = '1'; }
-      c.width = bw; c.height = bh;
-    }
+    if (bw !== c.width || bh !== c.height) c.width = bw, c.height = bh;
+    // the page (port/web/shell.html) sizes the canvas on screen from the logical size
+    if (+c.dataset.logw !== logW || +c.dataset.logh !== logH) { c.dataset.logw = logW; c.dataset.logh = logH; }
     backW = bw; backH = bh; sx = bw / logW; sy = bh / logH;
   }
   function sxr(v) { return Math.round(v * sx); }

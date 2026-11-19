@@ -45,6 +45,8 @@
     if (!offer) return;
     offer = null; elModal.style.display = 'none';
     if (Module._SE1Mod_UiSend) Module._SE1Mod_UiSend(i);
+    Module.se1PointerHold = false;
+    if (Module.se1GrabPointer) Module.se1GrabPointer();   // back into the game (this is a gesture)
   }
   window.addEventListener('keydown', function (e) {
     if (!offer) return;
@@ -74,11 +76,13 @@
           c.onclick = function () { choose(i); };
         });
         elModal.style.display = 'flex';
+        Module.se1PointerHold = true;   // free the mouse for the cards (port/web/input.js)
         if (document.exitPointerLock) document.exitPointerLock();
       }
     } else if (m.type === 'dead') {
       elTitle.textContent = 'YOU DIED  —  level ' + m.level + ', ' + m.kills + ' kills, ' + fmt(m.time) + '   (reload to retry)';
       elCards.innerHTML = ''; elModal.style.display = 'flex';
+      Module.se1PointerHold = true; if (document.exitPointerLock) document.exitPointerLock();
     }
   };
 })();

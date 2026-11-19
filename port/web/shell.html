@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Serious Sam</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color: #ddd;
+               font: 14px/1.4 system-ui, sans-serif; overscroll-behavior: none; }
+  /* the page never scrolls: Space, arrows and the wheel belong to the game */
+  #stage { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: #000; }
+  #canvas { display: block; outline: none; image-rendering: auto; }
+  #status { position: fixed; left: 50%; bottom: 12%; transform: translateX(-50%); text-align: center;
+            text-shadow: 0 1px 3px #000; pointer-events: none; }
+  #status progress { display: block; width: 260px; margin: 8px auto 0; }
+  #hint { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); padding: 10px 18px;
+          background: rgba(0,0,0,.6); border: 1px solid #6b8f2a; border-radius: 6px; color: #ffd75e;
+          font-weight: 600; pointer-events: none; display: none; z-index: 10; }
+  #bar { position: fixed; right: 10px; bottom: 10px; display: flex; gap: 6px; z-index: 30; transition: opacity .3s; }
+  #bar button { font: 600 13px system-ui, sans-serif; color: #ddd; background: rgba(20,20,20,.7);
+                border: 1px solid #555; border-radius: 5px; padding: 5px 10px; cursor: pointer; }
+  #bar button:hover { border-color: #aaa; }
+  body.locked #bar { opacity: 0; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas></div>
+<div id="status">Downloading…<progress id="progress" hidden></progress></div>
+<div id="hint">Click to play</div>
+<div id="bar"><button id="fs" type="button" title="Fullscreen (F11 also works)">Fullscreen</button></div>
+<script>
+  var canvas = document.getElementById('canvas');
+  var statusEl = document.getElementById('status'), progressEl = document.getElementById('progress');
+  canvas.addEventListener('webglcontextlost', function (e) {
+    e.preventDefault(); statusEl.firstChild.nodeValue = 'WebGL context lost: reload the page.';
+  });
+  var setStatus = function (text) {
+    var m = text && text.match(/([^(]+)\((\d+(\.\d+)?)\/(\d+)\)/);
+    if (m) { text = m[1]; progressEl.value = +m[2]; progressEl.max = +m[4]; progressEl.hidden = false; }
+    else progressEl.hidden = true;
+    statusEl.firstChild.nodeValue = text || '';
+    statusEl.style.display = text ? '' : 'none';
+  };
+  var Module = {
+    print: function () { console.log.apply(console, arguments); },
+    canvas: canvas,
+    setStatus: setStatus,
+    totalDependencies: 0,
+    monitorRunDependencies: function (left) {
+      this.totalDependencies = Math.max(this.totalDependencies, left);
+      setStatus(left ? 'Preparing… (' + (this.totalDependencies - left) + '/' + this.totalDependencies + ')' : '');
+    }
+  };
+  setStatus('Downloading…');
+  window.onerror = function () { setStatus('Something went wrong: see the JavaScript console'); };
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>
