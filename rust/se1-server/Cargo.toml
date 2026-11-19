@@ -6,3 +6,5 @@ license.workspace = true
 description = "Native server for the Serious Sam web build: multiplayer relay, later mod catalog proxy"
 
 [dependencies]
+tungstenite = "0.24"
+serde_json = "1"
