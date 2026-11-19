@@ -50,6 +50,23 @@ Standard mapping (Xbox / PlayStation layout).
 | Right stick click (11) | Center view |
 | D-pad (12-15) | Move (in menus: navigate) |
 
+## Gyro (DualSense)
+
+Requires Chrome/Edge desktop with WebHID. Connect a PS5 DualSense (USB or Bluetooth).
+
+- On first use: an "Enable gyro" button appears (bottom-right); click it to grant HID access.
+  Chrome remembers the permission, so the button only shows once per browser profile.
+- Gyroscope turns the view (like Steam's "gyro to mouse").
+- Touchpad click: toggle gyro on/off.
+- URL params: `?gyro=0` (disable), `?gyrosens=<n>` (default 1.5), `?gyroinvx=1`, `?gyroinvy=1`.
+- The button appears once Chrome reports the controller, i.e. after its first button press.
+- Gyro goes through the same look input as the right stick, so aim assist applies to it too
+  (`?aimassist=0` turns that off).
+- Scale: 1.5 means turning the controller 10° turns the view 15°, at the default mouse sensitivity
+  (4 look counts per degree; an in-game sensitivity change scales gyro too).
+- `tools/dualsense.html` shows the controller's raw gyro and accelerometer readings, to check that
+  the browser gets them at all.
+
 In menus:
 
 - D-pad / left stick: navigate

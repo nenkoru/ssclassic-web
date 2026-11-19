@@ -208,6 +208,10 @@ for b in $NAMES; do
   if logged "pad-$b" node tools/gamepadtest.mjs "$url"; then result PASS "$b gamepad" "sticks, buttons, menus, aim assist off/high"
   else result FAIL "$b gamepad" "see $OUT/pad-$b.log"; fi
 
+  step "$b: gyro"
+  if logged "gyro-$b" node tools/gyrotest.mjs "$url"; then result PASS "$b gyro" "DualSense gyro aiming via WebHID"
+  else result FAIL "$b gyro" "see $OUT/gyro-$b.log"; fi
+
   step "$b: persistence"
   if logged "persist-$b" node tools/persisttest.mjs "$url"; then result PASS "$b persistence" "settings stored and kept across a reload"
   else result FAIL "$b persistence" "see $OUT/persist-$b.log"; fi
