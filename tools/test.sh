@@ -9,6 +9,7 @@
 # data (tools/fetch_demo_data.sh). Build dirs given as arguments are used as they are.
 # Then, for each build, behind its own tools/devserver.py:
 #   - flowtest:     tools/flowtest.mjs (intro runs, a click starts a demo, Escape opens the menu)
+#   - input:        tools/inputtest.mjs (mouse capture/re-capture, menu release, Space, fullscreen)
 #   - survivors:    tools/svtest.mjs (?mode=survivors: level-up offer, pause, upgrade, spawns)
 #   - determinism:  two visual-regression captures (bench.mjs --shots) must match within a tight
 #                   tolerance (SE1_SHOTDIFF_ARGS; a few muzzle-flash/flame pixels vary run to run)
@@ -171,6 +172,10 @@ for b in $NAMES; do
   step "$b: flow test"
   if logged "flow-$b" node tools/flowtest.mjs "$url" "$OUT/flow-$b"; then result PASS "$b flow test" "intro, click into a demo, Escape to menu"
   else result FAIL "$b flow test" "see $OUT/flow-$b.log"; fi
+
+  step "$b: input"
+  if logged "input-$b" node tools/inputtest.mjs "$url" "$OUT/input-$b"; then result PASS "$b input" "mouse capture and re-capture, menu release, Space, fullscreen"
+  else result FAIL "$b input" "see $OUT/input-$b.log"; fi
 
   step "$b: survivors"
   if logged "sv-$b" node tools/svtest.mjs "$url" "$OUT/sv-$b"; then result PASS "$b survivors" "level-up offer, pause, upgrade, spawns"
