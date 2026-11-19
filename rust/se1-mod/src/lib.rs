@@ -8,6 +8,7 @@
 
 mod config;
 mod host;
+pub mod bots;
 mod quality;
 mod survivors;
 
