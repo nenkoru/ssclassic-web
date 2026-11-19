@@ -11,11 +11,18 @@
 #   - flowtest:     tools/flowtest.mjs (intro runs, a click starts a demo, Escape opens the menu)
 #   - input:        tools/inputtest.mjs (mouse capture/re-capture, menu release, Space, fullscreen)
 #   - survivors:    tools/svtest.mjs (?mode=survivors: level-up offer, pause, upgrade, spawns)
+#   - touch, gamepad: tools/touchtest.mjs, tools/gamepadtest.mjs (emulated touches, fake gamepad,
+#                   aim assist)
+#   - persistence:  tools/persisttest.mjs (the user dir survives a reload: OPFS / IndexedDB)
+#   - damage hook:  tools/damagetest.mjs (host API v5: player hits reach the mod)
+#   - threaded only: tools/shimtest.mjs (no synchronous shader calls), tools/qualitytest.mjs
+#                   (?quality=auto under CPU throttling)
 #   - determinism:  two visual-regression captures (bench.mjs --shots) must match within a tight
 #                   tolerance (SE1_SHOTDIFF_ARGS; a few muzzle-flash/flame pixels vary run to run)
 #   - timedemo:     one timedemo run completes, no frame over SE1_MAX_FRAME_MS (no fps assertion)
-# plus a two-browser co-op test on the threaded build (tools/mptest.mjs; needs cargo for the LAN
-# switch, otherwise skipped), the unit tests (tests/run.sh) and the Rust tests (cargo test --workspace).
+# plus a two-browser co-op test on the threaded build (tools/mptest.mjs, also with --rtc for WebRTC,
+# and tools/lobbytest.mjs; needs cargo for the LAN switch, otherwise skipped), the static hosting
+# bundle on a plain static server (tools/package.sh + tools/packagetest.mjs), the unit tests (tests/run.sh) and the Rust tests (cargo test --workspace).
 # Prints a PASS/FAIL/SKIP summary; exit code 1 on any failure.
 #
 # Options:
@@ -97,6 +104,8 @@ emsdk_env() {
 
 rm -rf "$OUT" && mkdir -p "$OUT"
 
+python3 tools/cleantmp.py >/dev/null 2>&1 || true   # leftovers of earlier runs (idle > 30 min)
+
 # ---------------------------------------------------------------- build
 build_one() {   # dir threads(ON|OFF)
   local dir=$1 threads=$2
@@ -139,7 +148,10 @@ fi
 
 # ---------------------------------------------------------------- dev servers
 PIDS=()
-cleanup() { for p in ${PIDS[@]+"${PIDS[@]}"}; do kill "$p" 2>/dev/null; done; wait 2>/dev/null; }
+cleanup() {
+  for p in ${PIDS[@]+"${PIDS[@]}"}; do kill "$p" 2>/dev/null; done; wait 2>/dev/null
+  python3 tools/cleantmp.py --min-age 2 >/dev/null 2>&1 || true   # Chrome profiles the tests left behind (2 min: not a parallel run's fresh one)
+}
 trap cleanup EXIT
 trap 'cleanup; exit 130' INT TERM
 
@@ -186,6 +198,31 @@ for b in $NAMES; do
   if logged "sv-$b" node tools/svtest.mjs "$url" "$OUT/sv-$b"; then result PASS "$b survivors" "level-up offer, pause, upgrade, spawns"
   else result FAIL "$b survivors" "see $OUT/sv-$b.log"; fi
 
+  step "$b: touch"
+  if logged "touch-$b" node tools/touchtest.mjs "$url"; then result PASS "$b touch" "stick, look, buttons, two fingers, menu"
+  else result FAIL "$b touch" "see $OUT/touch-$b.log"; fi
+
+  step "$b: gamepad"
+  if logged "pad-$b" node tools/gamepadtest.mjs "$url"; then result PASS "$b gamepad" "sticks, buttons, menus, aim assist off/high"
+  else result FAIL "$b gamepad" "see $OUT/pad-$b.log"; fi
+
+  step "$b: persistence"
+  if logged "persist-$b" node tools/persisttest.mjs "$url"; then result PASS "$b persistence" "settings stored and kept across a reload"
+  else result FAIL "$b persistence" "see $OUT/persist-$b.log"; fi
+
+  step "$b: damage hook"
+  if logged "damage-$b" node tools/damagetest.mjs "$url"; then result PASS "$b damage hook" "player hits reach the mod and get the rank bonus"
+  else result FAIL "$b damage hook" "see $OUT/damage-$b.log"; fi
+
+  if [ "$b" = mt ]; then   # threaded build only: the single-threaded build keeps these calls synchronous
+    step "mt: shader programs"
+    if logged "shim-mt" node tools/shimtest.mjs "$url"; then result PASS "mt shader programs" "no synchronous createProgram/uniformLocation"
+    else result FAIL "mt shader programs" "see $OUT/shim-mt.log"; fi
+    step "mt: quality controller"
+    if logged "quality-mt" node tools/qualitytest.mjs "$url"; then result PASS "mt quality controller" "off by default, lowers under CPU load, restores"
+    else result FAIL "mt quality controller" "see $OUT/quality-mt.log"; fi
+  fi
+
   step "$b: capture determinism"
   ok=1
   logged "shots-$b-a" node tools/bench.mjs "$url" --shots "$b-a" || ok=0
@@ -223,12 +260,27 @@ done
 
 # ---------------------------------------------------------------- multiplayer (two browsers)
 step "multiplayer"
-if [ ! -x rust/target/release/se1-server ] && command -v cargo >/dev/null 2>&1; then
+# always (re)build: cargo is incremental, and a stale switch would test old relay code
+if command -v cargo >/dev/null 2>&1; then
   logged build-se1-server bash -c 'cd rust && cargo build -p se1-server --release' || true
 fi
 if [ ! -x rust/target/release/se1-server ]; then result SKIP "multiplayer" "no switch binary (cargo build -p se1-server --release)"
 elif logged mp node tools/mptest.mjs "$(url_of mt)" Levels/KarnakDemo.wld; then result PASS "multiplayer" "host + client over the LAN switch"
 else result FAIL "multiplayer" "see $OUT/mp.log"; fi
+if [ -x rust/target/release/se1-server ]; then
+  step "multiplayer: WebRTC"
+  if logged mp-rtc node tools/mptest.mjs "$(url_of mt)" Levels/KarnakDemo.wld --rtc; then result PASS "multiplayer WebRTC" "peer links open and carry the game traffic"
+  else result FAIL "multiplayer WebRTC" "see $OUT/mp-rtc.log"; fi
+  step "multiplayer: lobby"
+  if logged lobby node tools/lobbytest.mjs "$(url_of mt)"; then result PASS "multiplayer lobby" "host and join from the page"
+  else result FAIL "multiplayer lobby" "see $OUT/lobby.log"; fi
+fi
+
+# ---------------------------------------------------------------- static hosting bundle
+step "hosting bundle"
+if logged package bash tools/package.sh --force "$OUT/pkg" "$MT_DIR" "$ST_DIR" && logged package-test node tools/packagetest.mjs "$OUT/pkg"; then
+  result PASS "hosting bundle" "threaded via coi-sw.js, single-threaded fallback, plain static server"
+else result FAIL "hosting bundle" "see $OUT/package*.log"; fi
 
 # ---------------------------------------------------------------- optional extras
 if [ $WEBGPU = 1 ]; then
