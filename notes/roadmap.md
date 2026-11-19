@@ -39,8 +39,11 @@ What's next, in rough priority order. Details and measurements live in notes/ren
      split them now.
 3. **Model rendering** (RenderModel, UnpackFrame, ~12%). Look at per-frame vertex unpacking and
    lerping; wasm SIMD.
-4. **Shim vertex copies** (put_vertices, 4–7%). The per-attribute streams touch more memory than the
-   old packed arena; try copying only the vertex range a draw uses.
+4. **Shim vertex copies: done.** Indexed draws copy only the vertex range their indices use (min to
+   max, found in the loop that copies the indices) instead of everything up to the highest index
+   (`port/common/gl1shim.c`; `?vrange=0` restores the full copy for comparisons). Over a timedemo
+   that is 58% fewer vertex bytes (18.9 GB to 7.9 GB, `tools/vrangetest.mjs`); captures are
+   unchanged on WebGL2 and WebGPU (8/8).
 5. **Synchronous shader calls: done.** createProgram and uniformLocation are recorded in the frame
    stream with worker-allocated handles (`port/common/gl1shim.c`); a threaded session now has 6
    synchronous calls in all (start-up queries), counted in `Module.se1GfxSync`.

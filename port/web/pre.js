@@ -11,6 +11,9 @@
   if (q.get('spin') === '0' || q.get('spin') === '1') Module['se1Spin'] = +q.get('spin');   // threaded vsync wait (WebFrame.cpp)   // timedemo: no vsync wait (port/common/WebFrame.cpp)
   // ?quality=auto: the Rust mod layer lowers rendering cvars while frames keep missing
   if (q.get('quality') === 'auto') Module['se1QualityAuto'] = 1;
+  // ?vrange=0: gl1shim copies the whole client array [0, maxIndex] for indexed draws instead of
+  // just the range the indices use (A/B switch for tools/vrangetest.mjs; 1 is the default)
+  if (q.get('vrange') === '0') Module['se1VRange'] = 0;
   // ?scale=0.5 renders at half resolution (engine/HUD/input stay at full logical size);
   // ?scale=auto = dynamic resolution: lowers it while frames are GPU-bound, raises it with headroom
   var sc = q.get('scale');

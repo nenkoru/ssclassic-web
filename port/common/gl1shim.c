@@ -138,6 +138,17 @@ static struct {
   /* texture info for glGetTexLevelParameteriv */
   GLuint boundTex[MAXUNITS];
 } S;
+/* vertex bytes copied into the per-attribute streams (put_vertices), for A/B measurement
+   (tools/vrangetest.mjs). Read-only on the page: Module._SE1_GL1Shim_VertexBytes(). */
+static double _vertexBytes;
+#ifdef __cplusplus
+extern "C" EMSCRIPTEN_KEEPALIVE double SE1_GL1Shim_VertexBytes(void) { return _vertexBytes; }
+#else
+EMSCRIPTEN_KEEPALIVE double SE1_GL1Shim_VertexBytes(void) { return _vertexBytes; }
+#endif
+/* ?vrange=0 (port/web/pre.js, Module.se1VRange): copy the full client array [0, ctVerts) for
+   indexed draws instead of only the vertex range the indices use. Read once at shim init. */
+static int _vRange = 1;
 
 typedef struct { GLuint tex; GLint ifmt, w, h; } TexInfo;
 static TexInfo *_texInfo; static int _ctTexInfo, _capTexInfo;
@@ -407,6 +418,7 @@ static void shim_init(void) {
   S.alphaFunc = GL_ALWAYS;
   S.curColor[0] = S.curColor[1] = S.curColor[2] = S.curColor[3] = 1.0f;
   S.capDither = 1;
+  _vRange = MAIN_THREAD_EM_ASM_INT({ return Module['se1VRange'] === 0 ? 0 : 1; });
   /* VAO and stream buffers live in port/web/gfx.js */
 }
 
@@ -830,9 +842,18 @@ static void ensure_quad_capacity(int ctQuads) {
 }
 
 typedef struct { const uint8_t *ptr; int size; GLenum type; int norm; int stride; int compact; } VSrc;   /* stride: source */
-/* copy ctVerts vertices of every enabled attribute into its stream at the vertex cursor, record
-   attribute pointers only where needed; returns the base vertex to add to this draw's indices */
-static uint32_t put_vertices(const VSrc *src, int ctVerts) {
+/* Copy vertices [vFirst, vFirst + ctVerts) of every enabled attribute into its stream at the
+   vertex cursor, record attribute pointers only where needed; returns the base vertex to add to
+   this draw's indices, so vertex i of the draw reads stream vertex vFirst + i.
+
+   Indexed draws pass vFirst = the lowest index the draw uses (vrange): the engine often binds big
+   client arrays whose indices cover only a slice, and copying [0, maxIndex] wasted 4-7% of the
+   engine thread on copies the draw never reads. The caller scans the indices for the range in the
+   same loop that copies them into the index arena (shim_glDrawElements) and subtracts vFirst from
+   every copied index, so the rebase is one subtract in the existing loop. Non-indexed draws
+   (glDrawArrays, immediate mode) keep vFirst = 0, i.e. the old behavior. ?vrange=0 (page
+   option, _vRange) forces vFirst = 0 for indexed draws to A/B the copies. */
+static uint32_t put_vertices(const VSrc *src, int vFirst, int ctVerts) {
   int elem[NSTREAMS], dst[NSTREAMS];
   for (int l = 0; l < NSTREAMS; l++) {
     if (!src[l].ptr) continue;
@@ -877,32 +898,35 @@ static uint32_t put_vertices(const VSrc *src, int ctVerts) {
     }
     size_t off = c->base + (size_t)v0 * (size_t)st;
     int sst = src[l].stride ? src[l].stride : elem[l];
+    const uint8_t *sp = src[l].ptr + (size_t)vFirst * sst;
     if (sst == st) {                                 /* same layout: one block copy */
       size_t len = (size_t)(ctVerts - 1) * st + elem[l];
-      memcpy(arena_at(&_vs[l], off, len), src[l].ptr, len);
+      memcpy(arena_at(&_vs[l], off, len), sp, len);
+      _vertexBytes += (double)len;
     } else {                                         /* gather into the compact layout */
       uint8_t *d = arena_at(&_vs[l], off, (size_t)ctVerts * st);
-      for (int k = 0; k < ctVerts; k++) memcpy(d + (size_t)k * st, src[l].ptr + (size_t)k * sst, elem[l]);
+      for (int k = 0; k < ctVerts; k++) memcpy(d + (size_t)k * st, sp + (size_t)k * sst, elem[l]);
+      _vertexBytes += (double)ctVerts * (double)elem[l];
     }
   }
   _v0 = (v0 + (uint32_t)ctVerts + 3) & ~3u;        /* quads need a base vertex that's a multiple of 4 */
   return v0;
 }
 
-static uint32_t bind_client_arrays(int ctVerts) {
+static uint32_t bind_client_arrays(int vFirst, int ctVerts) {
   VSrc src[NSTREAMS] = { { 0 } };
   if (S.vtx.enabled) src[0] = (VSrc){ S.vtx.ptr, S.vtx.size, S.vtx.type, 0, S.vtx.stride };
   if (S.col.enabled) src[1] = (VSrc){ S.col.ptr, S.col.size, S.col.type, S.col.type == GL_UNSIGNED_BYTE, S.col.stride };
   for (int i = 0; i < MAXUNITS; i++)
     if (S.u[i].enabled && S.u[i].tc.enabled) src[2 + i] = (VSrc){ S.u[i].tc.ptr, S.u[i].tc.size, S.u[i].tc.type, 0, S.u[i].tc.stride };
-  return put_vertices(src, ctVerts);
+  return put_vertices(src, vFirst, ctVerts);
 }
 
 static void shim_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
   shim_init();
   if (count <= 0) return;
   apply_program();
-  uint32_t v0 = bind_client_arrays(first + count);
+  uint32_t v0 = bind_client_arrays(0, first + count);   /* [0, first+count): the draw offsets by first */
   if (mode == GL1_QUADS) {
     ensure_quad_capacity((int)((v0 + first + count) / 4));
     cmd_ii(OP_DRAW_QUADS, count / 4 * 6, (int)((v0 + first) / 4 * 6 * 4));
@@ -914,19 +938,23 @@ static void shim_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
 static void shim_glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices) {
   shim_init();
   if (count <= 0) return;
-  int maxIdx = 0;
+  /* min/max of the indices: the vertex range [minIdx, maxIdx] is all the draw reads. The scan
+     runs in the same loop that copies the indices into the index arena below (the rebase is the
+     subtract of minIdx, vrange); locked arrays keep the old full-range behavior. */
+  int minIdx = 0, maxIdx = 0;
   if (S.lockedCount > 0) maxIdx = S.lockedCount - 1;
-  else if (type == GL_UNSIGNED_INT) { const uint32_t *ix = indices; for (int i = 0; i < count; i++) if ((int)ix[i] > maxIdx) maxIdx = ix[i]; }
-  else if (type == GL_UNSIGNED_SHORT) { const uint16_t *ix = indices; for (int i = 0; i < count; i++) if (ix[i] > maxIdx) maxIdx = ix[i]; }
-  else { const uint8_t *ix = indices; for (int i = 0; i < count; i++) if (ix[i] > maxIdx) maxIdx = ix[i]; }
+  else if (type == GL_UNSIGNED_INT) { const uint32_t *ix = indices; for (int i = 0; i < count; i++) { int v = ix[i]; if (i == 0 || v < minIdx) minIdx = v; if (v > maxIdx) maxIdx = v; } }
+  else if (type == GL_UNSIGNED_SHORT) { const uint16_t *ix = indices; for (int i = 0; i < count; i++) { int v = ix[i]; if (i == 0 || v < minIdx) minIdx = v; if (v > maxIdx) maxIdx = v; } }
+  else { const uint8_t *ix = indices; for (int i = 0; i < count; i++) { int v = ix[i]; if (i == 0 || v < minIdx) minIdx = v; if (v > maxIdx) maxIdx = v; } }
   apply_program();
-  uint32_t v0 = bind_client_arrays(maxIdx + 1);
+  int vBase = _vRange ? minIdx : 0;   /* ?vrange=0: the old full copy, and no rebase */
+  uint32_t v0 = bind_client_arrays(vBase, maxIdx + 1 - vBase);
   /* indices are rebased onto the vertex cursor, always as 32-bit */
   size_t ioff = arena_alloc(&_ia, (size_t)count * 4, 4);
   uint32_t *o = (uint32_t *)(_ia.p + ioff);
-  if (type == GL_UNSIGNED_INT) { const uint32_t *ix = indices; for (int i = 0; i < count; i++) o[i] = ix[i] + v0; }
-  else if (type == GL_UNSIGNED_SHORT) { const uint16_t *ix = indices; for (int i = 0; i < count; i++) o[i] = ix[i] + v0; }
-  else { const uint8_t *ix = indices; for (int i = 0; i < count; i++) o[i] = ix[i] + v0; }
+  if (type == GL_UNSIGNED_INT) { const uint32_t *ix = indices; for (int i = 0; i < count; i++) o[i] = ix[i] - vBase + v0; }
+  else if (type == GL_UNSIGNED_SHORT) { const uint16_t *ix = indices; for (int i = 0; i < count; i++) o[i] = ix[i] - vBase + v0; }
+  else { const uint8_t *ix = indices; for (int i = 0; i < count; i++) o[i] = ix[i] - vBase + v0; }
   cmd_iiii(OP_DRAW_ELEMENTS, (int)mode, count, GL_UNSIGNED_INT, (int)ioff);
 }
 
@@ -941,7 +969,7 @@ static void shim_glEnd(void) {
   VSrc src[NSTREAMS];
   for (int l = 0; l < NSTREAMS; l++)   /* texcoords only for enabled units: the shader reads no others */
     src[l] = (l < 2 || S.u[l - 2].enabled) ? (VSrc){ (const uint8_t *)(S.imm + 4 * l), 4, GL_FLOAT, 0, IMM_FLOATS * 4, 1 } : (VSrc){ 0 };
-  uint32_t v0 = put_vertices(src, n);
+  uint32_t v0 = put_vertices(src, 0, n);
   switch (S.beginMode) {
   case GL1_QUADS: ensure_quad_capacity((int)((v0 + n) / 4)); cmd_ii(OP_DRAW_QUADS, n / 4 * 6, (int)(v0 / 4 * 6 * 4)); break;
   case GL1_QUAD_STRIP: cmd_iii(OP_DRAW_ARRAYS, GL_TRIANGLE_STRIP, (int)v0, n); break;
