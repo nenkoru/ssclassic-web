@@ -153,9 +153,10 @@ fn post_telemetry(host: &Host, world: &str) {
     let (ammo, _) = host.ammo();
     let ammo: Vec<String> = ammo.iter().map(|a| a.to_string()).collect();
     host.ui_post(&format!(
-        r#"{{"type":"tel","gt":{gt:.1},"world":"{}","hp":{hp},"armor":{armor:.0},"weapon":{},"ammo":[{}],"pos":{pos}}}"#,
+        r#"{{"type":"tel","gt":{gt:.1},"world":"{}","hp":{hp},"armor":{armor:.0},"weapon":{},"owned":{},"ammo":[{}],"pos":{pos}}}"#,
         world.replace('"', "'"),
         host.weapon(),
+        host.weapons_owned(), // bit (1 << (WeaponType - 1)) per weapon the player has
         ammo.join(",")
     ));
 }
