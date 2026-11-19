@@ -99,6 +99,14 @@ public:
   /* Make synchronization test message and add it to game stream. */
   void MakeSynchronisationCheck(void);
 
+  /* Web port: server-side virtual players (bots, notes/bots.md). They belong to the server's own
+     client 0, other clients see normal players, and their actions come from code
+     (_pSE1ServerTickHook) instead of the network. */
+  INDEX AddVirtualPlayer(const CPlayerCharacter &pc);        // player index, or -1
+  void RemoveVirtualPlayer(INDEX iPlayer);
+  void SetVirtualAction(INDEX iPlayer, const CPlayerAction &pa);
+  BOOL IsVirtualPlayer(INDEX iPlayer);
+
   /* Handle incoming network messages. */
   void HandleAll();
   void HandleAllForAClient(INDEX iClient);
@@ -108,4 +116,8 @@ public:
 
 
 #endif  /* include-once check. */
+
+/* Web port: called on the server once per simulated tick, right before the tick's actions are
+   sent out, so bots can set theirs (port/common/Se1ModBots.cpp). */
+ENGINE_API extern void (*_pSE1ServerTickHook)(void);
 

@@ -31,6 +31,7 @@ public:
   BOOL plb_Active;                      // set if this player exists
   INDEX plb_Index;
   INDEX plb_iClient;                    // client that controls this player
+  BOOL plb_bVirtual;                    // web port: a bot added by the server itself (CServer::AddVirtualPlayer)
   INDEX plb_iPing;  // ping in milliseconds
   CPlayerAction plb_paLastAction;       // last action sent (used for delta-packing)
   CActionBuffer plb_abReceived;         // buffer of actions that were received, but not sent yet

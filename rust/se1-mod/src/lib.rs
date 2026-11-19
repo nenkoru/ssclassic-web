@@ -244,6 +244,14 @@ pub extern "C" fn se1mod_damage(target: c_int, source: c_int, dmt: c_int, amount
     survivors::damage_hook(target, source, dmt, amount, weapon)
 }
 
+/// Called on the server once per simulated tick, before the tick's actions go out (host API v8).
+/// The bots set their actions here.
+#[no_mangle]
+pub extern "C" fn se1mod_bot_tick() {
+    let Some(_st) = state() else { return };
+    // bots::runtime comes here (notes/bots.md, phase 2)
+}
+
 /// Called when a session (level) has started.
 #[no_mangle]
 pub extern "C" fn se1mod_level_started(world_file: *const c_char) {

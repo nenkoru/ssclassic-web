@@ -748,6 +748,8 @@ void CServer::ServerLoop(void)
 
       // for each tick
       for( INDEX i=0; i<iSpeed; i++) {
+        // web port: bots set this tick's actions
+        if (_pSE1ServerTickHook != NULL) _pSE1ServerTickHook();
         // make allaction messages for one tick
         MakeAllActions();
       }
@@ -765,6 +767,54 @@ void CServer::ServerLoop(void)
   }
 
   _pfNetworkProfile.StopTimer(CNetworkProfile::PTI_SERVER_LOOP);
+}
+
+void (*_pSE1ServerTickHook)(void) = NULL;
+
+INDEX CServer::AddVirtualPlayer(const CPlayerCharacter &pc)
+{
+  // the same as a client's MSG_REQ_CONNECTPLAYER, for the server's own client 0
+  CPlayerCharacter pcCharacter = pc;
+  if (!srv_bActive || CharacterNameIsUsed(pcCharacter)) return -1;
+  CPlayerBuffer *pplb = FirstInactivePlayer();
+  if (pplb == NULL) return -1;
+  pplb->Activate(0);
+  pplb->plb_bVirtual = TRUE;
+  pplb->plb_pcCharacter = pcCharacter;
+  INDEX iNewPlayer = pplb->plb_Index;
+  CNetworkStreamBlock nsbAddClientData(MSG_SEQ_ADDPLAYER, ++srv_iLastProcessedSequence);
+  nsbAddClientData<<iNewPlayer;
+  nsbAddClientData<<pcCharacter;
+  AddBlockToAllSessions(nsbAddClientData);
+  return iNewPlayer;
+}
+
+BOOL CServer::IsVirtualPlayer(INDEX iPlayer)
+{
+  return iPlayer >= 0 && iPlayer < srv_aplbPlayers.Count() && srv_aplbPlayers[iPlayer].IsActive() &&
+    srv_aplbPlayers[iPlayer].plb_bVirtual;
+}
+
+void CServer::RemoveVirtualPlayer(INDEX iPlayer)
+{
+  if (!IsVirtualPlayer(iPlayer)) return;
+  CPlayerBuffer &plb = srv_aplbPlayers[iPlayer];
+  CNetworkStreamBlock nsbRemPlayerData(MSG_SEQ_REMPLAYER, ++srv_iLastProcessedSequence);
+  nsbRemPlayerData<<iPlayer;
+  AddBlockToAllSessions(nsbRemPlayerData);
+  plb.Deactivate();
+}
+
+void CServer::SetVirtualAction(INDEX iPlayer, const CPlayerAction &pa)
+{
+  if (!IsVirtualPlayer(iPlayer)) return;   // never a human player, even on the server's client
+  CPlayerBuffer &plb = srv_aplbPlayers[iPlayer];
+  // the buffer drops actions with a time tag it already has, and sorts by it
+  static __int64 llTag = 0;
+  CPlayerAction paTagged = pa;
+  paTagged.pa_llCreated = ++llTag;
+  plb.plb_abReceived.AddAction(paTagged);
+  while (plb.plb_abReceived.GetCount() > 2) plb.plb_abReceived.RemoveOldest();
 }
 
 // make allaction messages for one tick

@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-#define SE1MOD_API_VERSION 7
+#define SE1MOD_API_VERSION 8
 
 typedef struct SE1ModHost {
   uint32_t api_version;   /* SE1MOD_API_VERSION */
@@ -85,6 +85,21 @@ typedef struct SE1ModHost {
   float (*armor)(float add, float max);         /* add armor up to max; returns the armor */
   int (*player_eye)(float *pos3, float *dir3);  /* eye position and view direction */
   int (*player_hurt)(float *from, float *amount);  /* where the player was last hit from (position) and accumulated damage; 1 if new */
+  /* v8: bots (port/common/Se1ModBots.cpp, notes/bots.md). Bots exist on the server only; their
+     actions are set from se1mod_bot_tick, once per simulated tick. */
+  int   (*bot_add)(const char *name);          /* a server-side player; its player index, or -1 */
+  void  (*bot_remove)(int id);
+  int   (*bot_state)(int id, float *out8);     /* eye x y z, heading, pitch (deg; heading +left, pitch +up), health, armor, weapon; 0 if gone */
+  void  (*bot_action)(int id, const float *move3, const float *rot3, uint32_t buttons);
+        /* move: strafe (+right), up (+jump), forward (NEGATIVE is forward), m/s up to 10;
+           rot: ABSOLUTE accumulated heading, pitch, bank (only the change since the last action counts);
+           buttons: TFE Player.es bits (fire 1, reload 2, next 4, prev 8, use 32, weapon select type<<9) */
+  float (*ray)(const float *from3, const float *to3, int hit_models);   /* distance to the first solid hit, -1 if clear */
+  int   (*enemies)(int32_t *ids, float *pos4, int max);   /* live enemies: entity id; x y z health */
+  int   (*items)(int32_t *kinds, float *pos3, int max);   /* pickable now: 0 health, 1 armor, 2 ammo, 3 weapon */
+  int   (*humans)(float *pos3, int max);                  /* live players that are not bots */
+  int   (*world_bounds)(float *min3, float *max3);        /* union of the level's brush boxes; 0 if none */
+  int   (*is_server)(void);
 } SE1ModHost;
 
 /* called once after the engine and game library are initialized; returns 0 on success */
@@ -102,6 +117,9 @@ int  se1mod_init(const SE1ModHost *host);
      bullets, melee, or not a player projectile). Lets the mod scale and credit the
      hit to the gun that fired the projectile, not the gun held when it lands. */
 float se1mod_damage(int target, int source, int damage_type, float amount, int weapon);
+/* v8: called on the server once per simulated tick, before the tick's actions go out: set the
+   bots' actions here (host->bot_action) */
+void se1mod_bot_tick(void);
 /* called when a new session (level) has started */
 void se1mod_level_started(const char *world_file);
 /* called before the engine shuts down */

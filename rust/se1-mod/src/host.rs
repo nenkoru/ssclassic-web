@@ -4,7 +4,7 @@ use std::ffi::{c_char, c_int, CStr, CString};
 
 use crate::config::CvarValue;
 
-pub const API_VERSION: u32 = 7;
+pub const API_VERSION: u32 = 8;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -55,6 +55,40 @@ pub struct SE1ModHost {
     pub armor: Option<extern "C" fn(f32, f32) -> f32>,
     pub player_eye: Option<extern "C" fn(*mut f32, *mut f32) -> c_int>,
     pub player_hurt: Option<extern "C" fn(*mut f32, *mut f32) -> c_int>,
+    // v8: bots (port/common/Se1ModBots.cpp)
+    pub bot_add: Option<extern "C" fn(*const c_char) -> c_int>,
+    pub bot_remove: Option<extern "C" fn(c_int)>,
+    pub bot_state: Option<extern "C" fn(c_int, *mut f32) -> c_int>,
+    pub bot_action: Option<extern "C" fn(c_int, *const f32, *const f32, u32)>,
+    pub ray: Option<extern "C" fn(*const f32, *const f32, c_int) -> f32>,
+    pub enemies: Option<extern "C" fn(*mut i32, *mut f32, c_int) -> c_int>,
+    pub items: Option<extern "C" fn(*mut i32, *mut f32, c_int) -> c_int>,
+    pub humans: Option<extern "C" fn(*mut f32, c_int) -> c_int>,
+    pub world_bounds: Option<extern "C" fn(*mut f32, *mut f32) -> c_int>,
+    pub is_server: Option<extern "C" fn() -> c_int>,
+}
+
+/// What a bot's player entity looks like right now (`Host::bot_state`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BotState {
+    pub eye: [f32; 3],
+    /// The engine's angles in degrees: heading +left, pitch +up.
+    pub heading: f32,
+    pub pitch: f32,
+    pub health: f32,
+    pub armor: f32,
+    pub weapon: i32,
+}
+
+/// TFE player action buttons (src/SamTFE/Sources/Entities/Player.es).
+pub mod buttons {
+    pub const FIRE: u32 = 1 << 0;
+    pub const RELOAD: u32 = 1 << 1;
+    pub const NEXT_WEAPON: u32 = 1 << 2;
+    pub const PREV_WEAPON: u32 = 1 << 3;
+    pub const USE: u32 = 1 << 5;
+    /// Select a weapon: `weapon_type << SELECT_WEAPON_SHIFT` (5 bits).
+    pub const SELECT_WEAPON_SHIFT: u32 = 9;
 }
 
 /// Options for `Host::spawn_enemy`.
@@ -358,5 +392,78 @@ impl Host {
         let f = self.raw.player_hurt?;
         let (mut from, mut amount) = ([0f32; 3], 0f32);
         (f(from.as_mut_ptr(), &mut amount) != 0).then_some((from, amount))
+    }
+
+    // ---- v8: bots ----
+    /// Add a server-side bot player; its player index. None when this isn't the server or the
+    /// game is full or the name is taken.
+    pub fn bot_add(&self, name: &str) -> Option<i32> {
+        let f = self.raw.bot_add?;
+        let c = std::ffi::CString::new(name).ok()?;
+        let id = f(c.as_ptr());
+        (id >= 0).then_some(id)
+    }
+    pub fn bot_remove(&self, id: i32) {
+        if let Some(f) = self.raw.bot_remove {
+            f(id)
+        }
+    }
+    /// The bot's player entity, None once it's gone.
+    pub fn bot_state(&self, id: i32) -> Option<BotState> {
+        let f = self.raw.bot_state?;
+        let mut o = [0f32; 8];
+        (f(id, o.as_mut_ptr()) != 0).then(|| BotState {
+            eye: [o[0], o[1], o[2]],
+            heading: o[3],
+            pitch: o[4],
+            health: o[5],
+            armor: o[6],
+            weapon: o[7] as i32,
+        })
+    }
+    /// The bot's action for this tick. `mv` = strafe (+right), up (+jump), forward (NEGATIVE is
+    /// forward), m/s; `rot` = ABSOLUTE accumulated heading, pitch, bank in degrees (the engine turns by
+    /// the change since the last action); `buttons` from `host::buttons`.
+    pub fn bot_action(&self, id: i32, mv: [f32; 3], rot: [f32; 3], buttons: u32) {
+        if let Some(f) = self.raw.bot_action {
+            f(id, mv.as_ptr(), rot.as_ptr(), buttons)
+        }
+    }
+    /// Distance to the first solid (collision) hit from `from` toward `to`, None if clear.
+    /// `hit_models`: also hit entities' collision boxes (monsters, players), not just the level.
+    pub fn ray(&self, from: [f32; 3], to: [f32; 3], hit_models: bool) -> Option<f32> {
+        let f = self.raw.ray?;
+        let d = f(from.as_ptr(), to.as_ptr(), hit_models as c_int);
+        (d >= 0.0).then_some(d)
+    }
+    /// Live enemies: (entity id, position, health).
+    pub fn enemies(&self, max: usize) -> Vec<(i32, [f32; 3], f32)> {
+        let Some(f) = self.raw.enemies else { return Vec::new() };
+        let (mut ids, mut p) = (vec![0i32; max], vec![0f32; max * 4]);
+        let n = f(ids.as_mut_ptr(), p.as_mut_ptr(), max as c_int).max(0) as usize;
+        (0..n.min(max)).map(|i| (ids[i], [p[i * 4], p[i * 4 + 1], p[i * 4 + 2]], p[i * 4 + 3])).collect()
+    }
+    /// Items that can be picked up now: (kind 0 health, 1 armor, 2 ammo, 3 weapon; position).
+    pub fn items(&self, max: usize) -> Vec<(i32, [f32; 3])> {
+        let Some(f) = self.raw.items else { return Vec::new() };
+        let (mut k, mut p) = (vec![0i32; max], vec![0f32; max * 3]);
+        let n = f(k.as_mut_ptr(), p.as_mut_ptr(), max as c_int).max(0) as usize;
+        (0..n.min(max)).map(|i| (k[i], [p[i * 3], p[i * 3 + 1], p[i * 3 + 2]])).collect()
+    }
+    /// Positions of the live players that are not bots.
+    pub fn humans(&self, max: usize) -> Vec<[f32; 3]> {
+        let Some(f) = self.raw.humans else { return Vec::new() };
+        let mut p = vec![0f32; max * 3];
+        let n = f(p.as_mut_ptr(), max as c_int).max(0) as usize;
+        (0..n.min(max)).map(|i| [p[i * 3], p[i * 3 + 1], p[i * 3 + 2]]).collect()
+    }
+    /// The level's bounds (union of its brush boxes).
+    pub fn world_bounds(&self) -> Option<([f32; 3], [f32; 3])> {
+        let f = self.raw.world_bounds?;
+        let (mut a, mut b) = ([0f32; 3], [0f32; 3]);
+        (f(a.as_mut_ptr(), b.as_mut_ptr()) != 0).then_some((a, b))
+    }
+    pub fn is_server(&self) -> bool {
+        self.raw.is_server.map_or(false, |f| f() != 0)
     }
 }

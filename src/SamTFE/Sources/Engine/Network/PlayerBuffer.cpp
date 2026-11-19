@@ -26,6 +26,7 @@ CPlayerBuffer::CPlayerBuffer(void) {
   plb_abReceived.Clear();
   plb_paLastAction.Clear();
   plb_iClient = -1;
+  plb_bVirtual = FALSE;
 }
 
 /*
@@ -42,6 +43,7 @@ void CPlayerBuffer::Activate(INDEX iClient)
   ASSERT(!plb_Active);
   plb_Active = TRUE;
   plb_iClient = iClient;
+  plb_bVirtual = FALSE;
   // make packets dummy before receiving something
   plb_abReceived.Clear();
   plb_paLastAction.Clear();
@@ -55,6 +57,7 @@ void CPlayerBuffer::Deactivate(void)
   ASSERT(plb_Active);
   plb_Active = FALSE;
   plb_iClient = -1;
+  plb_bVirtual = FALSE;
 }
 
 /*

@@ -61,12 +61,15 @@ static int _iHurtSerial = 0;
 static float _hurtPos[3] = {0, 0, 0};
 static float _hurtAmount = 0.0f;
 
+void SE1ModBots_Register(SE1ModHost &host);   /* Se1ModBots.cpp */
+bool SE1ModBots_IsBot(CEntity *pen);
 static CEntity *local_player(void)
 {
-  /* single player: the first live player entity */
+  /* the first live player entity that isn't one of this server's bots */
   FOREACHINDYNAMICCONTAINER(_pNetwork->ga_World.wo_cenEntities, CEntity, iten) {
     CEntity *pen = &*iten;
-    if (!(pen->GetFlags() & ENF_DELETED) && (pen->GetFlags() & ENF_ALIVE) && IsDerivedFromClass(pen, "Player")) return pen;
+    if (!(pen->GetFlags() & ENF_DELETED) && (pen->GetFlags() & ENF_ALIVE) && IsDerivedFromClass(pen, "Player") &&
+        !SE1ModBots_IsBot(pen)) return pen;
   }
   return NULL;
 }
@@ -343,6 +346,7 @@ void SE1Mod_Init(void)
   host.armor = host_armor;
   host.player_eye = host_player_eye;
   host.player_hurt = host_player_hurt;
+  SE1ModBots_Register(host);
   _bModReady = se1mod_init(&host) == 0;
   if (!_bModReady) host_log("se1mod: init failed (API version mismatch?)");
 }
