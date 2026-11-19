@@ -18,6 +18,7 @@
 //    (pointer-events: none) and input still reaches SDL's canvas underneath.
 (function () {
   if (new URLSearchParams(location.search).get('gfx') !== 'webgpu') return;
+  if (new URLSearchParams(location.search).get('post')) console.warn('se1gfx: ?post= ignored with ?gfx=webgpu');
   Module['preRun'] = (Module['preRun'] || []).concat([function () {
     if (!navigator.gpu) { console.warn('se1gfx: WebGPU not available, using WebGL2'); return; }
     addRunDependency('se1-webgpu');

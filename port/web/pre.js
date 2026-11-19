@@ -19,6 +19,14 @@
   var sc = q.get('scale');
   if (sc === 'auto') Module['se1Drs'] = { min: 0.5 };
   else if (sc && +sc > 0) Module['se1Scale'] = Math.min(1, +sc);
+  // ?post=fxaa,sharpen enables the post-processing chain (gfx.js); ?postsharp=0..1 scales the
+  // sharpen strength (default 0.5)
+  var post = q.get('post');
+  if (post) {
+    var ps = +q.get('postsharp');
+    Module['se1PostOpts'] = { effects: post.split(',').map(function (s) { return s.trim(); }).filter(Boolean),
+                              sharp: isNaN(ps) ? 0.5 : Math.min(1, Math.max(0, ps)) };
+  }
   // ?shots=<label>: deterministic demo replay, capture frames at fixed demo times and POST them
   // to the dev server (tools/devserver.py saves them under data/shots/<label>/). Starts at 3 s:
   // lens flares fade on wall-clock time, so the first second varies run to run.

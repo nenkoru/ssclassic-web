@@ -413,3 +413,25 @@ phase must also pass the visual regression test from phase 0 before it lands.
   MakeSpan) ~25%, models (RenderModel, UnpackFrame, …) ~12%, put_vertices 4%, sound timer 2.5%,
   runtime mipmap filtering 1.5%.
 - The spin loop called the clock (a JS call) on every iteration; it now checks every 1024.
+
+### Post-processing pass (`?post=`, WebGL2 only)
+- `?post=fxaa,sharpen` runs a post pass after the replayer's present: the frame is drawn into an
+  offscreen RGBA8 + depth FBO sized to the backing store (recreated on resize), the selected effects
+  run ping-pong through a second texture, and a fullscreen triangle blits the result to the default
+  framebuffer at the end of the frame.
+- State: the C shim records `useProgram`/`activeTexture`/`bindTexture` only when they change, so
+  the pass gives back the exact program, active unit, unit-0 texture, VAO, ARRAY_BUFFER (the vertex
+  arena), viewport, colour mask and enables. Setup and resize restore their bindings too, and a
+  resize re-attaches the new textures to both FBOs (missing either gave a flat green frame).
+- Effects: the compact FXAA (Lottes' PC version) and a contrast-adaptive sharpen (`?postsharp=0..1`,
+  default 0.5). Each is a small fragment shader; the pass is off by default and costs one extra
+  full-screen blit per frame. The blit samples texel centres (a half-texel shift blurred everything).
+- No per-frame allocations: FBOs and textures are created once per size and reused.
+- `?shots=` captures the final post-processed image, so captures include the pass.
+- `?gfx=webgpu` ignores `?post=` for now (the WebGPU replayer presents directly).
+- API: `Module.se1Post = { effects, ms }` — the parsed effect list and the measured per-frame pass
+  time; `Module.se1gfx.glError()` exposes `gl.getError()` for tests.
+- Test: `tools/posttest.mjs <url>` (in `tools/test.sh`) — off by default, fxaa alone, fxaa+sharpen,
+  a picture after a render-scale resize, no GL errors, no page exceptions. The image itself is
+  checked with `?shots=`: without `?post=` frames match the base; with `?post=fxaa` every frame
+  changes, by a mean of about 1 (edges only).

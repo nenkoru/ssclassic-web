@@ -15,6 +15,7 @@
 #                   aim assist)
 #   - persistence:  tools/persisttest.mjs (the user dir survives a reload: OPFS / IndexedDB)
 #   - damage hook:  tools/damagetest.mjs (host API v5: player hits reach the mod)
+#   - post pass:    tools/posttest.mjs (?post=fxaa,sharpen runs, survives a resize, off by default)
 #   - threaded only: tools/shimtest.mjs (no synchronous shader calls), tools/qualitytest.mjs
 #                   (?quality=auto under CPU throttling)
 #   - determinism:  two visual-regression captures (bench.mjs --shots) must match within a tight
@@ -217,6 +218,10 @@ for b in $NAMES; do
   step "$b: playtest recorder"
   if logged "rec-$b" node tools/playtesttest.mjs "$url" "$OUT/playtests"; then result PASS "$b playtest recorder" "timeline, markers and survey reach the dev server"
   else result FAIL "$b playtest recorder" "see $OUT/rec-$b.log"; fi
+
+  step "$b: post-processing"
+  if logged "post-$b" node tools/posttest.mjs "$url"; then result PASS "$b post-processing" "fxaa and sharpen run, picture survives a resize, off by default"
+  else result FAIL "$b post-processing" "see $OUT/post-$b.log"; fi
 
   if [ "$b" = mt ]; then   # threaded build only: the single-threaded build keeps these calls synchronous
     step "mt: shader programs"

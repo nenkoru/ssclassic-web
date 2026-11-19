@@ -67,9 +67,213 @@ Module['se1gfx'] = (function () {
     // the page (port/web/shell.html) sizes the canvas on screen from the logical size
     if (+c.dataset.logw !== logW || +c.dataset.logh !== logH) { c.dataset.logw = logW; c.dataset.logh = logH; }
     backW = bw; backH = bh; sx = bw / logW; sy = bh / logH;
+    postResize(bw, bh);
   }
   function sxr(v) { return Math.round(v * sx); }
   function syr(v) { return Math.round(v * sy); }
+  // ---- post-processing (?post=fxaa,sharpen) ----
+  // The frame renders into an offscreen FBO, then a chain of fullscreen-triangle passes runs on it
+  // (ping-pong between two textures), and the final texture is blitted to the canvas. Everything
+  // is created once; per-frame work is a handful of binds and draws, no allocations.
+  var postFx = [], postSharp = 0.5, postOn = false, postDirty = false;
+  var postTex = [null, null], postFbo = [null, null], postDepth = null;
+  var postVao = null, postVbo = null, postBlit = null, postUv = null, postLocs = {};
+  var postTexW = 0, postTexH = 0;
+  var FXAA_VS = '#version 300 es\n' +
+    'in vec2 aP;\nout vec2 vP;\n' +
+    'void main() { vP = aP * 0.5 + 0.5; gl_Position = vec4(aP, 0.0, 1.0); }';
+  var FXAA_FS = '#version 300 es\n' +
+    'precision highp float;\n' +
+    'uniform sampler2D t; uniform vec2 uTexel; in vec2 vP; out vec4 o;\n' +
+    '// FXAA (Lottes\' compact PC version, as used in many WebGL demos)\n' +
+    'void main() {\n' +
+    '  vec3 rgbNW = texture(t, vP + vec2(-1.0, -1.0) * uTexel).rgb;\n' +
+    '  vec3 rgbNE = texture(t, vP + vec2( 1.0, -1.0) * uTexel).rgb;\n' +
+    '  vec3 rgbSW = texture(t, vP + vec2(-1.0,  1.0) * uTexel).rgb;\n' +
+    '  vec3 rgbSE = texture(t, vP + vec2( 1.0,  1.0) * uTexel).rgb;\n' +
+    '  vec4 texM = texture(t, vP); vec3 rgbM = texM.rgb;\n' +
+    '  vec3 luma = vec3(0.299, 0.587, 0.114);\n' +
+    '  float lumaNW = dot(rgbNW, luma), lumaNE = dot(rgbNE, luma), lumaSW = dot(rgbSW, luma), lumaSE = dot(rgbSE, luma), lumaM = dot(rgbM, luma);\n' +
+    '  float lumaMin = min(lumaM, min(min(lumaNW, lumaNE), min(lumaSW, lumaSE)));\n' +
+    '  float lumaMax = max(lumaM, max(max(lumaNW, lumaNE), max(lumaSW, lumaSE)));\n' +
+    '  vec2 dir = vec2(-((lumaNW + lumaNE) - (lumaSW + lumaSE)), (lumaNW + lumaSW) - (lumaNE + lumaSE));\n' +
+    '  float dirReduce = max((lumaNW + lumaNE + lumaSW + lumaSE) * (0.25 * (1.0 / 8.0)), 1.0 / 128.0);\n' +
+    '  float rcpDirMin = 1.0 / (min(abs(dir.x), abs(dir.y)) + dirReduce);\n' +
+    '  dir = min(vec2(8.0), max(vec2(-8.0), dir * rcpDirMin)) * uTexel;\n' +
+    '  vec3 rgbA = 0.5 * (texture(t, vP + dir * (1.0 / 3.0 - 0.5)).rgb + texture(t, vP + dir * (2.0 / 3.0 - 0.5)).rgb);\n' +
+    '  vec3 rgbB = rgbA * 0.5 + 0.25 * (texture(t, vP + dir * -0.5).rgb + texture(t, vP + dir * 0.5).rgb);\n' +
+    '  float lumaB = dot(rgbB, luma);\n' +
+    '  o = vec4((lumaB < lumaMin || lumaB > lumaMax) ? rgbA : rgbB, 1.0);\n' +
+    '}';
+  var SHARPEN_FS = '#version 300 es\n' +
+    'precision highp float;\n' +
+    'uniform sampler2D t; uniform vec2 uTexel; uniform float uS; in vec2 vP; out vec4 o;\n' +
+    '// simple contrast-adaptive sharpen on all three channels\n' +
+    'void main() {\n' +
+    '  vec3 c = texture(t, vP).rgb;\n' +
+    '  vec3 n = texture(t, vP + vec2(0.0, -uTexel.y)).rgb, s = texture(t, vP + vec2(0.0, uTexel.y)).rgb;\n' +
+    '  vec3 w = texture(t, vP + vec2(-uTexel.x, 0.0)).rgb, e = texture(t, vP + vec2(uTexel.x, 0.0)).rgb;\n' +
+    '  vec3 mn = min(c, min(min(n, s), min(w, e))), mx = max(c, max(max(n, s), max(w, e)));\n' +
+    '  float amount = uS * clamp(1.0 - (max(mx.r, max(mx.g, mx.b)) - min(mn.r, min(mn.g, mn.b))), 0.0, 1.0);\n' +
+    '  o = vec4(clamp(c + (4.0 * c - n - s - w - e) * amount * 0.25, 0.0, 1.0), 1.0);\n' +
+    '}';
+  var BLIT_FS = '#version 300 es\n' +
+    'precision highp float;\n' +
+    'uniform sampler2D t; in vec2 vP; out vec4 o;\n' +
+    'void main() { o = texture(t, vP); }';
+  function postMake() {   // one-time setup; called from init() after the size is known
+    if (postOn) return;
+    // leave the replayer's bindings as they were (its vertex arena must stay on ARRAY_BUFFER)
+    var keep = { vao: gl.getParameter(gl.VERTEX_ARRAY_BINDING), ab: gl.getParameter(gl.ARRAY_BUFFER_BINDING),
+                 tex: gl.getParameter(gl.TEXTURE_BINDING_2D) };
+    postMakeInner();
+    gl.bindVertexArray(keep.vao); gl.bindBuffer(gl.ARRAY_BUFFER, keep.ab); gl.bindTexture(gl.TEXTURE_2D, keep.tex);
+    gl.bindRenderbuffer(gl.RENDERBUFFER, null); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+  function postMakeInner() {
+    postTex[0] = gl.createTexture(); postTex[1] = gl.createTexture();
+    postTexW = gl.drawingBufferWidth; postTexH = gl.drawingBufferHeight;
+    for (var i = 0; i < 2; i++) {
+      gl.bindTexture(gl.TEXTURE_2D, postTex[i]);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, postTexW, postTexH);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);   // FXAA samples between texels
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    }
+    postFbo[0] = gl.createFramebuffer(); postFbo[1] = gl.createFramebuffer();
+    postDepth = gl.createRenderbuffer();
+    gl.bindRenderbuffer(gl.RENDERBUFFER, postDepth);
+    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH24_STENCIL8, postTexW, postTexH);
+    for (var j = 0; j < 2; j++) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, postFbo[j]);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, postTex[j], 0);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, postDepth);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+        console.error('se1gfx: post framebuffer incomplete (' + gl.checkFramebufferStatus(gl.FRAMEBUFFER) + '), post disabled');
+        postOn = false; return;
+      }
+    }
+    gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    postVao = gl.createVertexArray();
+    postVbo = gl.createBuffer();
+    gl.bindVertexArray(postVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, postVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+    var mk = function (vs, fs) {
+      var p = gl.createProgram(), v = shader(gl.VERTEX_SHADER, vs), f = shader(gl.FRAGMENT_SHADER, fs);
+      if (!gl.getShaderParameter(v, gl.COMPILE_STATUS) || !gl.getShaderParameter(f, gl.COMPILE_STATUS)) {
+        console.error('se1gfx post shader compile error:', gl.getShaderInfoLog(v), gl.getShaderInfoLog(f));
+        gl.deleteShader(v); gl.deleteShader(f); gl.deleteProgram(p); return null;
+      }
+      gl.attachShader(p, v); gl.attachShader(p, f);
+      gl.bindAttribLocation(p, 0, 'aP');
+      gl.linkProgram(p);
+      gl.deleteShader(v); gl.deleteShader(f);
+      if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+        console.error('se1gfx post shader link error:', gl.getProgramInfoLog(p));
+        gl.deleteProgram(p); return null;
+      }
+      return p;
+    };
+    var fxaaP = mk(FXAA_VS, FXAA_FS), sharpP = mk(FXAA_VS, SHARPEN_FS), blitP = mk(FXAA_VS, BLIT_FS);
+    if (!fxaaP && postFx.indexOf('fxaa') >= 0) { console.error('se1gfx: fxaa program failed, post disabled'); postOn = false; return; }
+    if (!sharpP && postFx.indexOf('sharpen') >= 0) { console.error('se1gfx: sharpen program failed, post disabled'); postOn = false; return; }
+    if (!blitP) { console.error('se1gfx: blit program failed, post disabled'); postOn = false; return; }
+    if (fxaaP) postLocs.fxaa = { p: fxaaP, t: gl.getUniformLocation(fxaaP, 't'), texel: gl.getUniformLocation(fxaaP, 'uTexel') };
+    if (sharpP) postLocs.sharpen = { p: sharpP, t: gl.getUniformLocation(sharpP, 't'), texel: gl.getUniformLocation(sharpP, 'uTexel'), uS: gl.getUniformLocation(sharpP, 'uS') };
+    postBlit = blitP;
+    postUv = { t: gl.getUniformLocation(blitP, 't') };
+    postOn = true;
+  }
+  function postResize(w, h) {   // called from applyScale when the backing store changes
+    if (!postOn) return;
+    if (w === postTexW && h === postTexH) return;
+    postTexW = w; postTexH = h;
+    var tex = gl.getParameter(gl.TEXTURE_BINDING_2D);   // the engine's texture on the active unit
+    for (var i = 0; i < 2; i++) {
+      gl.deleteTexture(postTex[i]);
+      postTex[i] = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, postTex[i]);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    }
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.bindRenderbuffer(gl.RENDERBUFFER, postDepth);
+    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH24_STENCIL8, w, h);
+    gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+    // the new textures must be attached again (the FBOs still point at the deleted ones)
+    var fb = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+    for (var j = 0; j < 2; j++) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, postFbo[j]);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, postTex[j], 0);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, postDepth);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  }
+  function postRun() {   // runs the effect chain, then blits the result to the canvas
+    if (!postDirty) return;
+    postDirty = false;
+    if (!postOn) return;
+    var t0 = performance.now();
+    // save the state the replayer keeps (it caches enables/viewport, so restore exactly)
+    var s = {
+      blend: gl.isEnabled(gl.BLEND), depth: gl.isEnabled(gl.DEPTH_TEST), cull: gl.isEnabled(gl.CULL_FACE),
+      scissor: gl.isEnabled(gl.SCISSOR_TEST), stencil: gl.isEnabled(gl.STENCIL_TEST),
+      vp: gl.getParameter(gl.VIEWPORT), cm: gl.getParameter(gl.COLOR_WRITEMASK),
+      prog: gl.getParameter(gl.CURRENT_PROGRAM), unit: gl.getParameter(gl.ACTIVE_TEXTURE),
+      vao: gl.getParameter(gl.VERTEX_ARRAY_BINDING), ab: gl.getParameter(gl.ARRAY_BUFFER_BINDING)
+    };
+    gl.activeTexture(gl.TEXTURE0);
+    s.tex0 = gl.getParameter(gl.TEXTURE_BINDING_2D);
+    gl.disable(gl.BLEND); gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE);
+    gl.disable(gl.SCISSOR_TEST); gl.disable(gl.STENCIL_TEST);
+    gl.colorMask(true, true, true, true);
+    gl.viewport(0, 0, postTexW, postTexH);
+    gl.bindVertexArray(postVao);
+    var from = 0;
+    for (var i = 0; i < postFx.length; i++) {
+      var L = postLocs[postFx[i]];
+      if (!L) continue;
+      gl.useProgram(L.p);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, postFbo[from ^ 1]);
+      gl.bindTexture(gl.TEXTURE_2D, postTex[from]);
+      gl.uniform1i(L.t, 0);
+      gl.uniform2f(L.texel, 1 / postTexW, 1 / postTexH);
+      if (postFx[i] === 'sharpen') gl.uniform1f(L.uS, postSharp);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      from ^= 1;
+    }
+    // blit the final texture to the canvas
+    gl.useProgram(postBlit);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, backW, backH);
+    gl.bindTexture(gl.TEXTURE_2D, postTex[from]);
+    gl.uniform1i(postUv.t, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    // restore exactly what the replayer had: the C shim records binds only when they change, so
+    // the program, active unit and unit-0 texture must be what the next frame's commands expect
+    gl.bindVertexArray(s.vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, s.ab);
+    gl.bindTexture(gl.TEXTURE_2D, s.tex0);
+    gl.activeTexture(s.unit);
+    gl.useProgram(s.prog);
+    gl.colorMask(s.cm[0], s.cm[1], s.cm[2], s.cm[3]);
+    gl.viewport(s.vp[0], s.vp[1], s.vp[2], s.vp[3]);
+    if (s.blend) gl.enable(gl.BLEND);
+    if (s.depth) gl.enable(gl.DEPTH_TEST);
+    if (s.cull) gl.enable(gl.CULL_FACE);
+    if (s.scissor) gl.enable(gl.SCISSOR_TEST);
+    if (s.stencil) gl.enable(gl.STENCIL_TEST);
+    Module.se1Post.ms = performance.now() - t0;
+  }
   var progs = [null], ulocs = [null], texs = [null];
   // threaded build: program handles are allocated by the worker (OP_NEWPROG); the WebGL object is
   // created here on first use. A failed program stays null: useProgram(null) is a no-op, its
@@ -98,7 +302,18 @@ Module['se1gfx'] = (function () {
     vbuf = gl.createBuffer(); ibuf = gl.createBuffer(); qbuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, vbuf);    // every attribute points into the vertex arena
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibuf);
+    var po = Module['se1PostOpts'];
+    if (po) {
+      for (var i = 0; i < po.effects.length; i++) {
+        var e = po.effects[i];
+        if (e !== 'fxaa' && e !== 'sharpen') { console.warn('se1gfx: unknown post effect "' + e + '" ignored'); continue; }
+        if (postFx.indexOf(e) < 0) postFx.push(e);
+      }
+      postSharp = po.sharp;
+    }
+    Module.se1Post = { effects: postFx, ms: 0, get on() { return postOn; } };
     applyScale();
+    if (postFx.length) postMake();
   }
   function shader(type, src) {
     var s = gl.createShader(type);
@@ -181,13 +396,15 @@ Module['se1gfx'] = (function () {
       }
     },
     // called once per frame after the swap flush: resolution changes take effect next frame
-    endFrame: function () { if (gl) applyScale(); },
+    endFrame: function () { if (gl) { applyScale(); postRun(); } },
+    glError: function () { return gl ? gl.getError() : 0; },
     pixelStore: function (p, v) { sync.other++; init(); gl.pixelStorei(p, v); },
     hasAnisotropy: function () { sync.other++; init(); return !!gl.getExtension('EXT_texture_filter_anisotropic'); },
     sync: function () { if (gl) gl.finish(); return null; },
     // visual regression capture: bottom-up RGBA, delivered to cb (synchronously here)
     capture: function (cb) {
       init();
+      if (postOn) postRun();   // capture the final post-processed image (endFrame then skips it)
       var w = gl.drawingBufferWidth, h = gl.drawingBufferHeight, px = new Uint8Array(w * h * 4);
       gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
       cb(px, w, h);
@@ -204,6 +421,7 @@ Module['se1gfx'] = (function () {
 
     replay: function (cp, n, vp, vn, ip, inn, dp, dn) {
       init();
+      if (postOn) { gl.bindFramebuffer(gl.FRAMEBUFFER, postFbo[0]); postDirty = true; }   // render into the offscreen FBO
       var I = HEAP32, F = HEAPF32, c = cp >> 2, end = c + n;
       if (probeRes) probePoll();
       if (vn) gl.bufferData(gl.ARRAY_BUFFER, HEAPU8.subarray(vp, vp + vn), gl.STREAM_DRAW);
