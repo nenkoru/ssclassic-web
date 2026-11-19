@@ -1516,6 +1516,9 @@ impl Survivors {
     /// `?svstress=N`: hold N monsters in front of a god-mode player (tools/stress.mjs).
     fn stress_frame(&mut self, host: &Host) {
         host.shell_execute("cht_bGod = 1");
+        if self.time < self.started_at + 15.0 {
+            host.close_computer(); // as in run(): the NETRICSA briefing would take the input
+        }
         let Some((pos, _)) = host.player() else { return };
         self.pos = pos;
         let d = host.player_view().unwrap_or([0.0, 0.0, -1.0]);
