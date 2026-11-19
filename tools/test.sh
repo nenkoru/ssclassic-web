@@ -15,7 +15,8 @@
 #                   tolerance (SE1_SHOTDIFF_ARGS; a few muzzle-flash/flame pixels vary run to run)
 #   - timedemo:     one timedemo run completes, no frame over SE1_MAX_FRAME_MS (no fps assertion)
 # plus a two-browser co-op test on the threaded build (tools/mptest.mjs; needs cargo for the LAN
-# switch, otherwise skipped) and the unit tests (tests/run.sh). Prints a PASS/FAIL/SKIP summary; exit code 1 on any failure.
+# switch, otherwise skipped), the unit tests (tests/run.sh) and the Rust tests (cargo test --workspace).
+# Prints a PASS/FAIL/SKIP summary; exit code 1 on any failure.
 #
 # Options:
 #   --build-only   only build (and bootstrap) the default build dirs, run no tests
@@ -130,6 +131,10 @@ if [ $UNIT = 1 ]; then
   step "unit tests"
   if emsdk_env && logged unit tests/run.sh "$ROOT/build-tests"; then result PASS "unit tests" "FastSort, CaseFs"
   else result FAIL "unit tests" "see $OUT/unit.log"; fi
+  step "rust tests"
+  if ! command -v cargo >/dev/null 2>&1; then result SKIP "rust tests" "no cargo"
+  elif logged rust bash -c 'cd rust && cargo test --workspace'; then result PASS "rust tests" "mod config, Survivors tables, LAN switch"
+  else result FAIL "rust tests" "see $OUT/rust.log"; fi
 fi
 
 # ---------------------------------------------------------------- dev servers
