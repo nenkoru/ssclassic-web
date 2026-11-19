@@ -10,6 +10,7 @@
 #include "se1mod.h"
  #include "Se1ModEntities.h"
 #include <unordered_map>
+#include <unordered_set>
 #include <Engine/Sound/SoundObject.h>
 
 static ShellTypeType symbol_type(const char *name)
@@ -213,11 +214,20 @@ static int host_weapons_owned(void) { return SE1ModEnt_WeaponsOwned(local_player
 static void host_ammo(int32_t *out) { int a[12]; SE1ModEnt_Ammo(local_player(), a); for (int i = 0; i < 12; i++) out[i] = a[i]; }
 static void host_give_ammo(int type, int amount) { SE1ModEnt_GiveAmmo(local_player(), type, amount); }
 static void host_give_weapon(int type) { SE1ModEnt_GiveWeapon(local_player(), type); }
+static std::unordered_set<ULONG> _setModProjectiles;   // entity ids of projectiles host_projectile launched
 static void host_projectile(int type, const float *pos, const float *dir, float speed)
 {
   CEntity *penPlayer = local_player();
   if (penPlayer == NULL) return;
-  try { SE1ModEnt_Projectile(_pNetwork->ga_World, penPlayer, type, FLOAT3D(pos[0], pos[1], pos[2]), FLOAT3D(dir[0], dir[1], dir[2]), speed); }
+  try {
+    CEntity *pen = SE1ModEnt_Projectile(_pNetwork->ga_World, penPlayer, type, FLOAT3D(pos[0], pos[1], pos[2]), FLOAT3D(dir[0], dir[1], dir[2]), speed);
+    // the mod's projectiles (abilities, evolutions) fly as the player's, but their hits are the
+    // mod's damage (source 2), not the player's gun: remember them for SE1Mod_Damage
+    if (pen != NULL) {
+      if (_setModProjectiles.size() > 4096) _setModProjectiles.clear();   // old ones are long gone
+      _setModProjectiles.insert(pen->en_ulID);
+    }
+  }
   catch (const char *strError) { CPrintF("se1mod: projectile: %s\n", strError); }
 }
 static float host_armor(float add, float max)
@@ -327,12 +337,17 @@ void SE1Mod_Frame(void) { if (_bModReady) se1mod_frame(_pTimer->GetHighPrecision
 void SE1Mod_LevelStarted(const char *strWorld) { if (_bModReady) se1mod_level_started(strWorld); }
 void SE1Mod_Shutdown(void) { if (_bModReady) se1mod_shutdown(); _bModReady = FALSE; }
 
-/* Damage hook (API v5): ask the mod to scale the damage before it is applied. */
-FLOAT SE1Mod_Damage(CEntity *penTarget, CEntity *penInflictor, INDEX iDmt, FLOAT fAmount)
+/* Damage hook (API v6): ask the mod to scale the damage before it is applied.
+   penDealing is the entity that deals the damage (this in CEntity::Inflict*); for a
+   projectile it is the projectile itself, and SE1ModEnt_ProjectileWeapon maps it to
+   the gun that fired it so the mod can credit the hit to that gun. */
+FLOAT SE1Mod_Damage(CEntity *penDealing, CEntity *penTarget, CEntity *penInflictor, INDEX iDmt, FLOAT fAmount)
 {
   if (!_bModReady || penTarget == NULL) return fAmount;
   int src = _iInModDamage > 0 ? 2 : (penInflictor != NULL && penInflictor == local_player() ? 1 : 0);
+  if (src == 1 && penDealing != NULL && _setModProjectiles.count(penDealing->en_ulID)) src = 2;   // a mod projectile
   std::unordered_map<ULONG, int>::const_iterator it = _mapHandleOf.find(penTarget->en_ulID);
   int h = it == _mapHandleOf.end() ? 0 : it->second;
-  return se1mod_damage(h, src, (int)iDmt, fAmount);
+  int weapon = penDealing != NULL ? SE1ModEnt_ProjectileWeapon(penDealing) : 0;
+  return se1mod_damage(h, src, (int)iDmt, fAmount, weapon);
 }

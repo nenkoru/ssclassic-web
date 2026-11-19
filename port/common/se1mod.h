@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-#define SE1MOD_API_VERSION 5
+#define SE1MOD_API_VERSION 6
 
 typedef struct SE1ModHost {
   uint32_t api_version;   /* SE1MOD_API_VERSION */
@@ -96,8 +96,11 @@ int  se1mod_init(const SE1ModHost *host);
    source: 0 = other (monsters, barrels, the world), 1 = the local player (bullets,
      projectiles, melee: their inflictor is the player), 2 = the mod's own damage
      (made inside host.damage).
-   damage_type: the engine's DamageType (DMT_*) value. */
-float se1mod_damage(int target, int source, int damage_type, float amount);
+   damage_type: the engine's DamageType (DMT_*) value.
+   weapon: v6: the WeaponType of the projectile that dealt the damage (0 = hit-scan
+     bullets, melee, or not a player projectile). Lets the mod scale and credit the
+     hit to the gun that fired the projectile, not the gun held when it lands. */
+float se1mod_damage(int target, int source, int damage_type, float amount, int weapon);
 /* called when a new session (level) has started */
 void se1mod_level_started(const char *world_file);
 /* called before the engine shuts down */

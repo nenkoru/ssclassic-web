@@ -60,8 +60,10 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <Engine/Templates/DynamicArray.cpp>
 
 #ifdef SE1_WITH_RUSTMOD
-// port/common/Se1ModHost.cpp: the Rust mod layer's damage hook (API v5)
-FLOAT SE1Mod_Damage(CEntity *penTarget, CEntity *penInflictor, INDEX iDmt, FLOAT fAmount);
+// port/common/Se1ModHost.cpp: the Rust mod layer's damage hook (API v6)
+// penDealing is the entity that deals the damage (this); for a projectile it is the
+// projectile, and the mod uses it to credit the hit to the gun that fired it.
+FLOAT SE1Mod_Damage(CEntity *penDealing, CEntity *penTarget, CEntity *penInflictor, INDEX iDmt, FLOAT fAmount);
 #endif
 #include <Engine/Templates/DynamicContainer.cpp>
 #include <Engine/Templates/StaticArray.cpp>
@@ -2987,7 +2989,7 @@ void CEntity::InflictDirectDamage(CEntity *penToDamage, CEntity *penInflictor, e
    // if significant damage
    if (fDamageAmmount>0) {
 #ifdef SE1_WITH_RUSTMOD
-    fDamageAmmount = SE1Mod_Damage(penToDamage, penInflictor, dmtType, fDamageAmmount);
+    fDamageAmmount = SE1Mod_Damage(this, penToDamage, penInflictor, dmtType, fDamageAmmount);
     if (fDamageAmmount <= 0) return;
 #endif
      penToDamage->ReceiveDamage(penInflictor, dmtType, fDamageAmmount, vHitPoint, vDirection);
@@ -3126,7 +3128,7 @@ void CEntity::InflictRangeDamage(CEntity *penInflictor, enum DamageType dmtType,
        // if significant
        if (fAmmount>0) {
 #ifdef SE1_WITH_RUSTMOD
-        fAmmount = SE1Mod_Damage(&en, penInflictor, dmtType, fAmmount);
+        fAmmount = SE1Mod_Damage(this, &en, penInflictor, dmtType, fAmmount);
         if (fAmmount <= 0) continue;
 #endif
          // inflict damage to it
@@ -3170,7 +3172,7 @@ void CEntity::InflictBoxDamage(CEntity *penInflictor, enum DamageType dmtType,
      // if significant damage
      if (fDamageAmmount>0) {
 #ifdef SE1_WITH_RUSTMOD
-      fDamageAmmount = SE1Mod_Damage(&en, penInflictor, dmtType, fDamageAmmount);
+      fDamageAmmount = SE1Mod_Damage(this, &en, penInflictor, dmtType, fDamageAmmount);
       if (fDamageAmmount <= 0) continue;
 #endif
        // inflict damage to it

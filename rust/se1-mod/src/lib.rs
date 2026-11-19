@@ -226,19 +226,22 @@ pub extern "C" fn se1mod_frame(tm_real: f64) {
     }
 }
 
- /// Called by the engine when an entity is about to receive damage (API v5).
- /// Returns the amount to apply. The mod may scale it; returning the input leaves it unchanged.
- ///
- /// Reentrancy: this can be called from within the mod's own `host.damage` calls
- /// (abilities fire during `se1mod_frame`). At that point `se1mod_frame` holds a `&mut`
- /// to the mod state. To avoid a second `&mut` (undefined behaviour), the hook only
- /// reads precomputed atomic fields (the current gun multiplier) and pushes the event
- /// into a queue that the mod drains at the start of its next frame. No `&mut` is
- /// created here.
- #[no_mangle]
- pub extern "C" fn se1mod_damage(target: c_int, source: c_int, dmt: c_int, amount: f32) -> f32 {
-     survivors::damage_hook(target, source, dmt, amount)
- }
+/// Called by the engine when an entity is about to receive damage (API v6).
+/// Returns the amount to apply. The mod may scale it; returning the input leaves it unchanged.
+/// `weapon` is the WeaponType of the projectile that dealt the damage (0 = hit-scan
+/// bullets, melee, or not a player projectile), so the mod can credit the hit to the
+/// gun that fired it, not the gun held when it lands.
+///
+/// Reentrancy: this can be called from within the mod's own `host.damage` calls
+/// (abilities fire during `se1mod_frame`). At that point `se1mod_frame` holds a `&mut`
+/// to the mod state. To avoid a second `&mut` (undefined behaviour), the hook only
+/// reads precomputed atomic fields (the per-gun multipliers) and pushes the event
+/// into a queue that the mod drains at the start of its next frame. No `&mut` is
+/// created here.
+#[no_mangle]
+pub extern "C" fn se1mod_damage(target: c_int, source: c_int, dmt: c_int, amount: f32, weapon: c_int) -> f32 {
+    survivors::damage_hook(target, source, dmt, amount, weapon)
+}
 
 /// Called when a session (level) has started.
 #[no_mangle]

@@ -27,10 +27,23 @@ use std::sync::Mutex;
 /// the mod's own `host.damage` calls go through the same engine path). So this hook
 /// must not touch the mod state: it only reads/writes these statics.
 static HOOK_ON: AtomicBool = AtomicBool::new(false);
-static GUN_MULT_BITS: AtomicU32 = AtomicU32::new(0); // f32::to_bits of the current gun multiplier
+/// Per-gun damage multipliers (f32::to_bits), one per gun in `data::ALL` order.
+/// Updated every frame from the ranks; the hook reads the one for the gun that
+/// fired the projectile (API v6), falling back to the held gun's.
+static GUN_MULTS: [AtomicU32; 9] = [
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+];
+/// Index (in `data::ALL` order) of the gun the player holds; the hook's fallback.
+static HELD_GUN: AtomicU32 = AtomicU32::new(0);
 static HOOK_CALLS: AtomicU32 = AtomicU32::new(0);
 static HOOK_FROM_PLAYER: AtomicU32 = AtomicU32::new(0);
 static HOOK_SCALED: AtomicU32 = AtomicU32::new(0);
+/// Per-gun hit counts for the debug log; the hook increments, the frame loop swaps to 0.
+static HOOK_GUN_HITS: [AtomicU32; 9] = [
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+];
 static QUEUE: Mutex<Vec<DamageEvent>> = Mutex::new(Vec::new());
 static CRIT_BITS: AtomicU32 = AtomicU32::new(0); // f32::to_bits of the current gun's crit chance
 static CRIT_RNG: AtomicU32 = AtomicU32::new(0x9E37_79B9);
@@ -45,16 +58,24 @@ fn hook_rand() -> f32 {
     (x >> 8) as f32 / (1u32 << 24) as f32
 }
 
-/// The engine's damage hook (API v5). Called from `se1mod_damage` in lib.rs.
+/// The engine's damage hook (API v6). Called from `se1mod_damage` in lib.rs.
 /// Must not touch the mod state (reentrancy — see above).
-pub fn damage_hook(target: i32, source: i32, dmt: i32, amount: f32) -> f32 {
+/// `weapon` is the WeaponType of the projectile that dealt the damage (0 = hit-scan
+/// or not a player projectile). When it maps to a gun, that gun's multiplier is used
+/// and the hit is credited to that gun; otherwise the held gun's.
+pub fn damage_hook(target: i32, source: i32, dmt: i32, amount: f32, weapon: i32) -> f32 {
     if !HOOK_ON.load(Ordering::Relaxed) {
         return amount;
     }
     HOOK_CALLS.fetch_add(1, Ordering::Relaxed);
     let mut crit = false;
-    let scaled = if source == 1 && target != 0 {
-        let mut mult = f32::from_bits(GUN_MULT_BITS.load(Ordering::Relaxed));
+    let gun = if source == 1 && target != 0 {
+        // the gun that fired the projectile (API v6), falling back to the held gun
+        let g = match weapon {
+            0 => HELD_GUN.load(Ordering::Relaxed) as usize,
+            w => Up::from_weapon(w).map(|u| ALL.iter().position(|&a| a == u).unwrap()).unwrap_or(HELD_GUN.load(Ordering::Relaxed) as usize),
+        };
+        let mut mult = f32::from_bits(GUN_MULTS[g].load(Ordering::Relaxed));
         // critical hits (Luck, Lucky Pyramid, the Revolver's rank): double damage
         if hook_rand() < f32::from_bits(CRIT_BITS.load(Ordering::Relaxed)) {
             mult *= 2.0;
@@ -62,12 +83,18 @@ pub fn damage_hook(target: i32, source: i32, dmt: i32, amount: f32) -> f32 {
         }
         HOOK_FROM_PLAYER.fetch_add(1, Ordering::Relaxed);
         HOOK_SCALED.fetch_add(1, Ordering::Relaxed);
-        amount * mult
+        HOOK_GUN_HITS[g].fetch_add(1, Ordering::Relaxed);
+        Some((g, amount * mult))
     } else {
-        amount
+        None
+    };
+    let scaled = match &gun {
+        Some((_, s)) => *s,
+        None => amount,
     };
     if target != 0 {
-        QUEUE.lock().unwrap().push(DamageEvent { target, source, dmt, amount: scaled, crit });
+        let gun_idx = gun.map(|(g, _)| g).unwrap_or(HELD_GUN.load(Ordering::Relaxed) as usize);
+        QUEUE.lock().unwrap().push(DamageEvent { target, source, dmt, amount: scaled, crit, gun: gun_idx });
     }
     scaled
 }
@@ -116,6 +143,8 @@ struct DamageEvent {
     dmt: i32,
     amount: f32,
     crit: bool,
+    /// Index (in `data::ALL` order) of the gun that dealt this hit (API v6).
+    gun: usize,
 }
 struct Gem {
     h: i32,
@@ -249,6 +278,7 @@ pub struct Survivors {
     debug_chest: u32,
     started_at: f64,
     hook_log_t: f64,
+    weapons_t: f64,   // last check that every ranked gun is really owned (ensure_weapons)
     // debug / test
     stress: usize,
     stress_kind: usize,
@@ -278,7 +308,7 @@ impl Survivors {
             weapon: 0, ammo: [0; 6], ammo_acc: [0.0; 6], shots: [0; 17], firing_until: -1.0,
             revolver_hits: 0, typewriter_kills: 0, hurricane_t: 0.0,
             hits: Vec::new(), flash: false, stats: Vec::new(), powers: Vec::new(), speed_set: 1.0,
-            hud_t: 0.0, sound_t: 0.0, procs: Vec::new(), achieved: Vec::new(), dead_posted: false, debug_chest: 0, started_at: 0.0, hook_log_t: 0.0,
+            hud_t: 0.0, sound_t: 0.0, procs: Vec::new(), achieved: Vec::new(), dead_posted: false, debug_chest: 0, started_at: 0.0, hook_log_t: 0.0, weapons_t: 0.0,
             stress: host.page_option("se1SurvivorsStress").max(0.0) as usize,
             stress_kind: match host.page_option("se1SurvivorsStressKind") as i32 {
                 1 => K_KLEER, 2 => K_GNAAR, 3 => K_ARACH, 4 => K_BULL, _ => K_FIRE,
@@ -420,12 +450,17 @@ impl Survivors {
             }
             State::Run => {
                 self.time += dt;
-                // update the gun multiplier for the damage hook
-                let gun = Up::from_weapon(self.weapon).unwrap_or(Up::Knife);
-                let r = self.rank(gun).max(1);
-                let per_rank = if gun == Up::Knife { 0.25 } else { 0.20 };
-                GUN_MULT_BITS.store((self.might() * (1.0 + per_rank * (r - 1) as f32)).to_bits(), Ordering::Relaxed);
-                let crit = self.luck() * 0.5 + if gun == Up::Revolver { 0.05 * r as f32 } else { 0.0 };
+                // update the per-gun multipliers and held gun for the damage hook (API v6)
+                for (i, &g) in ALL.iter().enumerate().take(9) {
+                    let r = self.rank(g).max(1);
+                    let per_rank = if g == Up::Knife { 0.25 } else { 0.20 };
+                    GUN_MULTS[i].store((self.might() * (1.0 + per_rank * (r - 1) as f32)).to_bits(), Ordering::Relaxed);
+                }
+                let held = Up::from_weapon(self.weapon).unwrap_or(Up::Knife);
+                HELD_GUN.store(ALL.iter().position(|&a| a == held).unwrap_or(0) as u32, Ordering::Relaxed);
+                // crit chance for the held gun (Luck, the Revolver's rank)
+                let r = self.rank(held).max(1);
+                let crit = self.luck() * 0.5 + if held == Up::Revolver { 0.05 * r as f32 } else { 0.0 };
                 CRIT_BITS.store(crit.to_bits(), Ordering::Relaxed);
                 // drain the damage hook queue
                 let events = std::mem::take(&mut *QUEUE.lock().unwrap());
@@ -438,8 +473,19 @@ impl Survivors {
                     let calls = HOOK_CALLS.swap(0, Ordering::Relaxed);
                     let from_player = HOOK_FROM_PLAYER.swap(0, Ordering::Relaxed);
                     let scaled = HOOK_SCALED.swap(0, Ordering::Relaxed);
-                    host.log(&format!("damage hook: {} calls, {} from player, {} scaled", calls, from_player, scaled));
+                    // per-gun credit counts for the log line
+                    let mut by_gun: Vec<(usize, u32)> = Vec::new();
+                    for i in 0..9 {
+                        let c = HOOK_GUN_HITS[i].swap(0, Ordering::Relaxed);
+                        if c > 0 {
+                            by_gun.push((i, c));
+                        }
+                    }
+                    let gun_str = by_gun.iter().map(|&(i, c)| format!("{} {}", ALL[i].name(), c)).collect::<Vec<_>>().join(", ");
+                    let tail = if gun_str.is_empty() { String::new() } else { format!(", by gun: {}", gun_str) };
+                    host.log(&format!("damage hook: {} calls, {} from player, {} scaled{}", calls, from_player, scaled, tail));
                 }
+                self.ensure_weapons(host);
                 if self.stress > 0 {
                     self.stress_frame(host);
                 } else {
@@ -449,11 +495,11 @@ impl Survivors {
         }
     }
 
-    /// Process damage events from the engine's damage hook (API v5).
+    /// Process damage events from the engine's damage hook (API v6).
     /// Called once per frame with the drained queue. For each event whose target is a
-    /// tracked enemy: credit the damage, push the damage number, and fire per-hit gun
-    /// effects. The rank bonus is already applied by the hook (scaling), so we don't
-    /// add an extra `host.damage` here.
+    /// tracked enemy: credit the damage to the gun that fired it (ev.gun), push the
+    /// damage number, and fire per-hit gun effects. The rank bonus is already applied
+    /// by the hook (scaling), so we don't add an extra `host.damage` here.
     fn drain_events(&mut self, host: &Host, events: Vec<DamageEvent>) {
         for ev in events {
             let Some(i) = self.enemies.iter().position(|e| e.h == ev.target) else { continue };
@@ -462,13 +508,34 @@ impl Survivors {
                 continue;
             }
             if ev.source == 1 {
-                // player gun damage: credit + per-hit effects (the hook already scaled it)
-                let gun = Up::from_weapon(self.weapon).unwrap_or(Up::Knife);
+                // player gun damage: credit to the gun that fired it (API v6)
+                let gun = ALL[ev.gun.min(8)];
                 self.enemies[i].last_src = Src::Gun(gun);
                 self.stat(Src::Gun(gun), ev.amount);
                 let p = self.enemies[i].pos;
                 self.push_hit(p, ev.amount, if ev.crit { 2.0 } else { 0.0 });
                 self.on_gun_hit_effects(host, i, ev.amount, gun);
+            }
+        }
+    }
+
+    /// Once a second: every gun with a rank must really be in the player's hands. The engine can
+    /// take weapons away after we gave them (a grant at the very start of a run is undone when the
+    /// player's weapons are set up for the level; a respawn resets them too), and a gun card that
+    /// leaves the gun unusable is the worst bug a run can have.
+    fn ensure_weapons(&mut self, host: &Host) {
+        if self.time - self.weapons_t < 1.0 {
+            return;
+        }
+        self.weapons_t = self.time;
+        let owned = host.weapons_owned();
+        for &(u, r) in self.ranks.iter() {
+            if u.cat() != Cat::Gun || r == 0 || u.weapon_item() == 0 {
+                continue;
+            }
+            let has = u.weapon_types().iter().any(|&wt| owned & (1 << (wt - 1)) != 0);
+            if !has {
+                host.give_weapon(u.weapon_item());
             }
         }
     }
@@ -517,11 +584,29 @@ impl Survivors {
         if host.page_option("se1SurvivorsGod") > 0.0 {
             host.shell_execute("cht_bGod = 1");
         }
+        // debug/test: ?svweapon=<WeaponType> selects that weapon at run start
+        let w = host.page_option("se1SurvivorsWeapon") as i32;
+        if w > 0 {
+            let idx = match w {
+                2 | 3 => 1, 4 | 5 => 2, 6 | 7 => 3, 8 | 9 => 4, 14 => 6, 16 => 8, _ => 0,
+            };
+            if idx > 0 {
+                host.shell_execute(&format!("ctl_bSelectWeapon[{}] = 1", idx));
+                host.shell_execute(&format!("ctl_bSelectWeapon[{}] = 0", idx));
+            }
+        }
         self.precache(host);
         HOOK_ON.store(true, Ordering::Relaxed);
+        for m in GUN_MULTS.iter() {
+            m.store(0, Ordering::Relaxed);
+        }
+        HELD_GUN.store(0, Ordering::Relaxed);
         HOOK_CALLS.store(0, Ordering::Relaxed);
         HOOK_FROM_PLAYER.store(0, Ordering::Relaxed);
         HOOK_SCALED.store(0, Ordering::Relaxed);
+        for m in HOOK_GUN_HITS.iter() {
+            m.store(0, Ordering::Relaxed);
+        }
         QUEUE.lock().unwrap().clear();
         self.hook_log_t = 0.0;
         self.state = State::Run;
@@ -1564,7 +1649,7 @@ impl Survivors {
         // touch controls (port/web/touch.js) + tools/touchtest.mjs read these
         let yaw = host.player_view().map(|d| (d[2] as f64).atan2(d[0] as f64).to_degrees()).unwrap_or(0.0);
         host.ui_post(&format!(
-            r#"{{"type":"hud","time":{:.1},"run":{:.0},"level":{},"xp":{:.1},"next":{:.0},"kills":{},"score":{},"combo":{},"gold":{:.0},"alive":{},"gems":{},"guns":[{}],"abilities":[{}],"passives":[{}],"ranks":[{}],"boss":{},"arrows":[{}],"powers":[{}],"procs":[{}],"endless":{},"state":"{}","pos":[{:.2},{:.2},{:.2}],"yaw":{:.1}}}"#,
+            r#"{{"type":"hud","time":{:.1},"run":{:.0},"level":{},"xp":{:.1},"next":{:.0},"kills":{},"score":{},"combo":{},"gold":{:.0},"alive":{},"gems":{},"guns":[{}],"abilities":[{}],"passives":[{}],"ranks":[{}],"boss":{},"arrows":[{}],"powers":[{}],"procs":[{}],"endless":{},"state":"{}","pos":[{:.2},{:.2},{:.2}],"yaw":{:.1},"weapon":{}}}"#,
             self.time,
             RUN_S,
             self.level,
@@ -1596,6 +1681,7 @@ impl Survivors {
             self.pos[1] as f64,
             self.pos[2] as f64,
             yaw,
+            host.weapon(), // from the engine: self.weapon is only tracked in a normal run, not in stress mode
         ));
     }
 
@@ -1669,54 +1755,115 @@ fn norm2(x: f32, z: f32) -> (f32, f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{damage_hook, HOOK_ON, GUN_MULT_BITS, HOOK_CALLS, HOOK_FROM_PLAYER, HOOK_SCALED, QUEUE};
+    use super::{damage_hook, HOOK_ON, GUN_MULTS, HELD_GUN, HOOK_CALLS, HOOK_FROM_PLAYER, HOOK_SCALED, HOOK_GUN_HITS, QUEUE};
+    use super::data::*;
     use std::sync::atomic::Ordering;
-    #[test]
-    fn hook_behavior() {
-        // hook off: returns input unchanged
+
+    fn reset() {
         HOOK_ON.store(false, Ordering::Relaxed);
-        assert_eq!(damage_hook(1, 1, 0, 10.0), 10.0);
-        assert_eq!(damage_hook(0, 0, 0, 5.0), 5.0);
-          QUEUE.lock().unwrap().clear();
- 
-        // hook on: scales player damage, passes through the rest
-        HOOK_ON.store(true, Ordering::Relaxed);
-        GUN_MULT_BITS.store(1.6f32.to_bits(), Ordering::Relaxed);
+        for m in GUN_MULTS.iter() { m.store(0, Ordering::Relaxed); }
+        HELD_GUN.store(0, Ordering::Relaxed);
         HOOK_CALLS.store(0, Ordering::Relaxed);
         HOOK_FROM_PLAYER.store(0, Ordering::Relaxed);
         HOOK_SCALED.store(0, Ordering::Relaxed);
- 
-        // source 1, target != 0: scaled
-        let r = damage_hook(42, 1, 0, 10.0);
+        for m in HOOK_GUN_HITS.iter() { m.store(0, Ordering::Relaxed); }
+        QUEUE.lock().unwrap().clear();
+    }
+
+    fn gun_idx(u: Up) -> usize {
+        ALL.iter().position(|&a| a == u).unwrap()
+    }
+
+    /// The hook tests share the hook's statics (HOOK_ON, QUEUE, the counters): run them one at a time.
+    static HOOK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn hook_behavior() {
+        let _serial = HOOK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        // hook off: returns input unchanged
+        assert_eq!(damage_hook(1, 1, 0, 10.0, 0), 10.0);
+        assert_eq!(damage_hook(0, 0, 0, 5.0, 0), 5.0);
+        QUEUE.lock().unwrap().clear();
+
+        // hook on: scales player damage, passes through the rest
+        HOOK_ON.store(true, Ordering::Relaxed);
+        let shotgun = gun_idx(Up::Shotgun);
+        GUN_MULTS[shotgun].store(1.6f32.to_bits(), Ordering::Relaxed);
+        HELD_GUN.store(shotgun as u32, Ordering::Relaxed);
+
+        // source 1, target != 0, weapon 0 (hit-scan): scaled by held gun
+        let r = damage_hook(42, 1, 0, 10.0, 0);
         assert!((r - 16.0).abs() < 1e-6);
- 
+
         // source 0: unchanged
-        let r = damage_hook(42, 0, 0, 10.0);
+        let r = damage_hook(42, 0, 0, 10.0, 0);
         assert_eq!(r, 10.0);
- 
+
         // source 2: unchanged
-        let r = damage_hook(42, 2, 0, 10.0);
+        let r = damage_hook(42, 2, 0, 10.0, 0);
         assert_eq!(r, 10.0);
- 
+
         // target 0: unchanged, no queue entry
-        let r = damage_hook(0, 1, 0, 10.0);
+        let r = damage_hook(0, 1, 0, 10.0, 0);
         assert_eq!(r, 10.0);
- 
+
         assert_eq!(HOOK_CALLS.load(Ordering::Relaxed), 4);
         assert_eq!(HOOK_FROM_PLAYER.load(Ordering::Relaxed), 1);
         assert_eq!(HOOK_SCALED.load(Ordering::Relaxed), 1);
- 
-          let q = QUEUE.lock().unwrap();
+
+        let q = QUEUE.lock().unwrap();
         assert_eq!(q.len(), 3);
         assert_eq!(q[0].target, 42);
         assert!((q[0].amount - 16.0).abs() < 1e-6);
+        assert_eq!(q[0].gun, shotgun);
         assert_eq!(q[1].target, 42);
         assert_eq!(q[1].amount, 10.0);
         assert_eq!(q[2].target, 42);
         assert_eq!(q[2].amount, 10.0);
-        drop(q); // release the lock before clearing below (std Mutex is not reentrant)
- 
+        drop(q);
+
         HOOK_ON.store(false, Ordering::Relaxed);
-          QUEUE.lock().unwrap().clear();
+        QUEUE.lock().unwrap().clear();
+    }
+
+    #[test]
+    fn hook_projectile_weapon() {
+        let _serial = HOOK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        HOOK_ON.store(true, Ordering::Relaxed);
+        let shotgun = gun_idx(Up::Shotgun);
+        let rocket = gun_idx(Up::RocketLauncher);
+        GUN_MULTS[shotgun].store(1.6f32.to_bits(), Ordering::Relaxed);
+        GUN_MULTS[rocket].store(2.0f32.to_bits(), Ordering::Relaxed);
+        HELD_GUN.store(shotgun as u32, Ordering::Relaxed);
+
+        // weapon = 8 (RocketLauncher) while holding Shotgun: uses RocketLauncher's multiplier
+        let r = damage_hook(42, 1, 0, 10.0, 8);
+        assert!((r - 20.0).abs() < 1e-6, "expected 20.0, got {}", r);
+
+        let q = QUEUE.lock().unwrap();
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].gun, rocket, "should be credited to RocketLauncher");
+        drop(q);
+        QUEUE.lock().unwrap().clear();
+
+        // weapon = 0 (hit-scan): uses held gun (Shotgun)
+        let r = damage_hook(43, 1, 0, 10.0, 0);
+        assert!((r - 16.0).abs() < 1e-6, "expected 16.0, got {}", r);
+        let q = QUEUE.lock().unwrap();
+        assert_eq!(q[0].gun, shotgun, "should be credited to Shotgun");
+        drop(q);
+        QUEUE.lock().unwrap().clear();
+
+        // unknown weapon number: falls back to held gun
+        let r = damage_hook(44, 1, 0, 10.0, 99);
+        assert!((r - 16.0).abs() < 1e-6, "expected 16.0, got {}", r);
+        let q = QUEUE.lock().unwrap();
+        assert_eq!(q[0].gun, shotgun, "should fall back to Shotgun");
+        drop(q);
+
+        HOOK_ON.store(false, Ordering::Relaxed);
+        QUEUE.lock().unwrap().clear();
     }
 }

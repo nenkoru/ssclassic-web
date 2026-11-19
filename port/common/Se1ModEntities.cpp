@@ -97,7 +97,7 @@ void SE1ModEnt_Lightning(CWorld &wo, const FLOAT3D &from, const FLOAT3D &to, flo
   pen->Initialize(ese);
 }
 
-void SE1ModEnt_Projectile(CWorld &wo, CEntity *penLauncher, int type, const FLOAT3D &pos, const FLOAT3D &dir, float speed)
+CEntity *SE1ModEnt_Projectile(CWorld &wo, CEntity *penLauncher, int type, const FLOAT3D &pos, const FLOAT3D &dir, float speed)
 {
   ANGLE3D ang;
   DirectionVectorToAngles(dir, ang);
@@ -107,6 +107,24 @@ void SE1ModEnt_Projectile(CWorld &wo, CEntity *penLauncher, int type, const FLOA
   elp.prtType = (ProjectileType)type;
   elp.fSpeed = speed;
   pen->Initialize(elp);
+  return pen;
+}
+int SE1ModEnt_ProjectileWeapon(CEntity *pen)
+{
+  /* the dealing entity is the projectile itself; map its type to the WeaponType of
+   * the gun that fired it (0 = not a player projectile, hit-scan bullets, melee) */
+  if (pen == NULL) return 0;
+  if (IsOfClass(pen, "Projectile")) {
+    ProjectileType t = ((CProjectile *)pen)->m_prtType;
+    switch (t) {
+    case PRT_ROCKET:     return 8;   /* RocketLauncher */
+    case PRT_GRENADE:    return 9;   /* GrenadeLauncher (no Survivors upgrade) */
+    case PRT_LASER_RAY:  return 14;  /* Laser */
+    default:             return 0;
+    }
+  }
+  if (IsOfClass(pen, "Cannon ball")) return 16;   /* Cannon */
+  return 0;
 }
 
 float SE1ModEnt_MaxHealth(CEntity *pen)

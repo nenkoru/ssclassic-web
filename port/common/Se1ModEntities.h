@@ -10,7 +10,7 @@ CEntity *SE1ModEnt_SpawnEnemy(CWorld &wo, const char *cls, int variant, const FL
 CEntity *SE1ModEnt_SpawnItem(CWorld &wo, const char *cls, int type, const FLOAT3D &pos);
 void SE1ModEnt_Effect(CWorld &wo, int type, const FLOAT3D &pos, float size);
 void SE1ModEnt_Lightning(CWorld &wo, const FLOAT3D &from, const FLOAT3D &to, float size, float life);
-void SE1ModEnt_Projectile(CWorld &wo, CEntity *penLauncher, int type, const FLOAT3D &pos, const FLOAT3D &dir, float speed);
+CEntity *SE1ModEnt_Projectile(CWorld &wo, CEntity *penLauncher, int type, const FLOAT3D &pos, const FLOAT3D &dir, float speed);   /* returns the projectile */
 float SE1ModEnt_MaxHealth(CEntity *pen);
 int SE1ModEnt_Weapon(CEntity *penPlayer);
 int SE1ModEnt_WeaponsOwned(CEntity *penPlayer);
@@ -20,3 +20,4 @@ void SE1ModEnt_GiveWeapon(CEntity *penPlayer, int witType);
 void SE1ModEnt_Armor(CEntity *penPlayer, float add, float max);
 float SE1ModEnt_Armor(CEntity *penPlayer);
 void SE1ModEnt_Eye(CEntity *penPlayer, FLOAT3D &pos, FLOAT3D &dir);
+int SE1ModEnt_ProjectileWeapon(CEntity *pen);   /* WeaponType the projectile was fired with, 0 if not a player projectile */

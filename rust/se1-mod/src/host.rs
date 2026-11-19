@@ -4,7 +4,7 @@ use std::ffi::{c_char, c_int, CStr, CString};
 
 use crate::config::CvarValue;
 
-pub const API_VERSION: u32 = 5;
+pub const API_VERSION: u32 = 6;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
