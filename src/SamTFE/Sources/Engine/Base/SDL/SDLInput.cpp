@@ -40,6 +40,9 @@ extern INDEX inp_bInvert2ndMouse;
 // Web port: look deltas from touch controls (port/web/touch.js), in mouse counts; the page adds,
 // the engine thread takes them when it reads the mouse.
 static int _iTouchLookX = 0, _iTouchLookY = 0;
+static int _iPadLookX = 0, _iPadLookY = 0;
+extern "C" float SE1Aim_Friction(void);
+extern "C" void SE1Aim_NoteAssistedInput(void);
 #endif
 
 static BOOL inp_bSDLPermitCtrlG = TRUE;
@@ -768,8 +771,22 @@ void CInput::GetInput(BOOL bPreScan)
   mouse_relative_y = iMy;
   #endif
   #ifdef __EMSCRIPTEN__
-  mouse_relative_x += __atomic_exchange_n(&_iTouchLookX, 0, __ATOMIC_ACQ_REL);
-  mouse_relative_y += __atomic_exchange_n(&_iTouchLookY, 0, __ATOMIC_ACQ_REL);
+  {
+    // touch and pad look (assisted inputs): scaled by the aim assist's friction near a target
+    // (port/common/AimAssist.cpp); the fractions carry over so slow aiming slows, not stops
+    static float fRestX = 0, fRestY = 0;
+    int ax = __atomic_exchange_n(&_iTouchLookX, 0, __ATOMIC_ACQ_REL) + __atomic_exchange_n(&_iPadLookX, 0, __ATOMIC_ACQ_REL);
+    int ay = __atomic_exchange_n(&_iTouchLookY, 0, __ATOMIC_ACQ_REL) + __atomic_exchange_n(&_iPadLookY, 0, __ATOMIC_ACQ_REL);
+    if (ax || ay) {
+      SE1Aim_NoteAssistedInput();
+      float fr = SE1Aim_Friction();
+      float fx = ax * fr + fRestX, fy = ay * fr + fRestY;
+      int ix = (int)fx, iy = (int)fy;
+      fRestX = fx - ix; fRestY = fy - iy;
+      mouse_relative_x += ix;
+      mouse_relative_y += iy;
+    }
+  }
   #endif
   #ifndef USE_MOUSEWARP
   if ((mouse_relative_x != 0) || (mouse_relative_y != 0))
@@ -1039,5 +1056,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void SE1_TouchLook(int dx, int dy)
 {
   __atomic_fetch_add(&_iTouchLookX, dx, __ATOMIC_ACQ_REL);
   __atomic_fetch_add(&_iTouchLookY, dy, __ATOMIC_ACQ_REL);
+}
+
+// Web port: gamepad look deltas (port/web/gamepad.js) add here; the engine thread takes them
+// in the mouse-reading code above.
+extern "C" EMSCRIPTEN_KEEPALIVE void SE1_PadLook(int dx, int dy)
+{
+  __atomic_fetch_add(&_iPadLookX, dx, __ATOMIC_ACQ_REL);
+  __atomic_fetch_add(&_iPadLookY, dy, __ATOMIC_ACQ_REL);
 }
 #endif

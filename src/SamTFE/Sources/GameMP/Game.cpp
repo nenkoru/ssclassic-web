@@ -36,6 +36,9 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "Entities/Common/LightFixes.h"
 #include "Camera.h"
 #include "LCDDrawing.h"
+#ifdef PLATFORM_EMSCRIPTEN
+extern "C" void SE1Aim_Apply(const CPlayerCharacter *ppc, float *pfHeading, float *pfPitch);   // port/common/AimAssist.cpp
+#endif
 
 FLOAT con_fHeightFactor = 0.5f;
 FLOAT con_tmLastLines   = 5.0f;
@@ -779,6 +782,13 @@ void CControls::CreateAction(const CPlayerCharacter &pc, CPlayerAction &paAction
   if (!bPreScan) {
     DoButtonActions();
   }
+
+  #ifdef PLATFORM_EMSCRIPTEN
+  if (!bPreScan) {
+    // web port: aim assist for gamepad/touch look adds its pull to this action's rotation
+    SE1Aim_Apply(&pc, (float *)&paAction.pa_aRotation(1), (float *)&paAction.pa_aRotation(2));
+  }
+  #endif
   //CPrintF("creating: prescan %d, x:%g\n", bPreScan, paAction.pa_aRotation(1));
 
   // make the player class create the action packet

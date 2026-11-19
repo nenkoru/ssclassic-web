@@ -25,7 +25,7 @@
   function locked() { return !!cv() && document.pointerLockElement === cv(); }
   function grab() {
     var c = cv();
-    if (!c || locked() || Module.se1PointerHold || (Module.se1Touch && Module.se1Touch.enabled) || !c.requestPointerLock) return;
+    if (!c || locked() || Module.se1PointerHold || (Module.se1Touch && Module.se1Touch.enabled) || (Module.se1Pad && Module.se1Pad.connected && Module.se1Pad.lastDevice === 'pad') || !c.requestPointerLock) return;
     try { var p = c.requestPointerLock(); if (p && p.catch) p.catch(function () {}); } catch (e) {}
   }
   Module.se1GrabPointer = function () { if (want()) grab(); };
@@ -35,6 +35,8 @@
   document.addEventListener('mousedown', function (e) {
     if (e.target === cv() && want()) grab();
   }, true);
+  document.addEventListener('mousemove', function () { if (Module.se1Pad) Module.se1Pad.lastDevice = 'mouse'; }, true);
+  document.addEventListener('mousedown', function () { if (Module.se1Pad) Module.se1Pad.lastDevice = 'mouse'; }, true);
 
   // browser default actions for keys the game uses
   var BLOCK = { Tab: 1, ArrowUp: 1, ArrowDown: 1, ArrowLeft: 1, ArrowRight: 1, PageUp: 1, PageDown: 1,
@@ -91,6 +93,6 @@
     prev = w;
     document.body && document.body.classList.toggle('locked', l);
     var hint = document.getElementById('hint');
-    if (hint) hint.style.display = (w && !l && !Module.se1PointerHold && !(Module.se1Touch && Module.se1Touch.enabled)) ? 'block' : 'none';
+    if (hint) hint.style.display = (w && !l && !Module.se1PointerHold && !(Module.se1Touch && Module.se1Touch.enabled) && !(Module.se1Pad && Module.se1Pad.connected && Module.se1Pad.lastDevice === 'pad')) ? 'block' : 'none';
   }, 100);
 })();
