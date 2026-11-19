@@ -104,20 +104,24 @@ impl Host {
         Some(Host { game: from_c(raw.game), data_dir: from_c(raw.data_dir), raw })
     }
 
+    /// Game name: "SamTFE" or "SamTSE".
     pub fn game(&self) -> &str {
         &self.game
     }
 
+    /// Game data root in the (virtual) filesystem, e.g. "/".
     pub fn data_dir(&self) -> &str {
         &self.data_dir
     }
 
+    /// Print a message to the engine console / log.
     pub fn log(&self, msg: &str) {
         if let Some(f) = self.raw.log {
             f(cstr(msg).as_ptr());
         }
     }
 
+    /// Run a console script, exactly as typed in the in-game console (appends `;` if missing).
     pub fn shell_execute(&self, script: &str) {
         if let Some(f) = self.raw.shell_execute {
             // the engine's shell wants complete statements
@@ -129,12 +133,14 @@ impl Host {
         }
     }
 
+    /// Read a console INDEX symbol; `None` if the symbol doesn't exist or has another type.
     pub fn get_index(&self, name: &str) -> Option<i32> {
         let f = self.raw.get_index?;
         let mut v = 0;
         (f(cstr(name).as_ptr(), &mut v) != 0).then_some(v)
     }
 
+    /// Read a console FLOAT symbol; `None` if the symbol doesn't exist or has another type.
     pub fn get_float(&self, name: &str) -> Option<f32> {
         let f = self.raw.get_float?;
         let mut v = 0.0;
@@ -142,6 +148,7 @@ impl Host {
     }
 
     // ---- API 2: gameplay ----
+    /// Simulation time in seconds; it stops while the game is paused.
     pub fn game_time(&self) -> f64 {
         self.raw.game_time.map_or(0.0, |f| f())
     }
@@ -151,6 +158,7 @@ impl Host {
         let (mut p, mut h) = ([0f32; 3], 0f32);
         (f(p.as_mut_ptr(), &mut h) != 0).then_some((p, h))
     }
+    /// Add health to the local player, never above `max`.
     pub fn player_heal(&self, amount: f32, max: f32) {
         if let Some(f) = self.raw.player_heal {
             f(amount, max)
@@ -162,24 +170,29 @@ impl Host {
         let h = f(cstr(class_file).as_ptr(), pos.as_ptr());
         (h > 0).then_some(h)
     }
+    /// Whether an entity handle is alive (`false` if dead, gone, or unknown).
     pub fn alive(&self, h: i32) -> bool {
         self.raw.alive.map_or(false, |f| f(h) != 0)
     }
+    /// Position (x, y, z; y is up) of a live entity handle; `None` if dead or gone.
     pub fn position(&self, h: i32) -> Option<[f32; 3]> {
         let f = self.raw.position?;
         let mut p = [0f32; 3];
         (f(h, p.as_mut_ptr()) != 0).then_some(p)
     }
+    /// Damage an entity handle as if the local player hit it.
     pub fn damage(&self, h: i32, amount: f32) {
         if let Some(f) = self.raw.damage {
             f(h, amount)
         }
     }
+    /// Forget an entity handle (frees the slot).
     pub fn release(&self, h: i32) {
         if let Some(f) = self.raw.release {
             f(h)
         }
     }
+    /// Pause (`true`) or unpause (`false`) the local game.
     pub fn set_pause(&self, on: bool) {
         if let Some(f) = self.raw.set_pause {
             f(on as c_int)
@@ -202,6 +215,7 @@ impl Host {
         let mut d = [0f32; 3];
         (f(d.as_mut_ptr()) != 0).then_some(d)
     }
+    /// Close the in-game computer (NETRICSA) if it is open.
     pub fn close_computer(&self) {
         if let Some(f) = self.raw.close_computer {
             f()
@@ -238,54 +252,66 @@ impl Host {
         let h = f(c.as_ptr(), o.variant, pos.as_ptr(), o.hp_mul, o.stretch, o.glow, o.boss as c_int);
         (h > 0).then_some(h)
     }
+    /// Health of an entity handle; 0 when dead or gone.
     pub fn health(&self, h: i32) -> f32 {
         self.raw.health.map_or(0.0, |f| f(h))
     }
+    /// Maximum health of an entity handle; 0 when dead or gone.
     pub fn max_health(&self, h: i32) -> f32 {
         self.raw.max_health.map_or(0.0, |f| f(h))
     }
+    /// Whether a file exists in the game data; spawn classes whose assets are missing are fatal.
     pub fn file_exists(&self, path: &str) -> bool {
         let c = cstr(path);
         self.raw.file_exists.is_some_and(|f| f(c.as_ptr()) != 0)
     }
+    /// Play a `BasicEffect` (`BET_*` type) at a position: visual plus sound.
     pub fn effect(&self, kind: i32, pos: [f32; 3], size: f32) {
         if let Some(f) = self.raw.effect {
             f(kind, pos.as_ptr(), size);
         }
     }
+    /// Play a lightning arc between two positions, with the given size and life.
     pub fn lightning(&self, from: [f32; 3], to: [f32; 3], size: f32, life: f32) {
         if let Some(f) = self.raw.lightning {
             f(from.as_ptr(), to.as_ptr(), size, life);
         }
     }
+    /// Play a 2D sound from a file path; it plays while the game is paused too.
     pub fn sound(&self, path: &str, volume: f32) {
         if let Some(f) = self.raw.sound {
             let c = cstr(path);
             f(c.as_ptr(), volume);
         }
     }
+    /// Spawn an item class of a given type at a position; returns a handle, `None` on failure.
     pub fn spawn_item(&self, class: &str, kind: i32, pos: [f32; 3]) -> Option<i32> {
         let f = self.raw.spawn_item?;
         let c = cstr(class);
         let h = f(c.as_ptr(), kind, pos.as_ptr());
         (h > 0).then_some(h)
     }
+    /// Whether an entity handle (items, effects) is still in the world.
     pub fn exists(&self, h: i32) -> bool {
         self.raw.exists.is_some_and(|f| f(h) != 0)
     }
+    /// Move an entity handle to a new position.
     pub fn set_position(&self, h: i32, pos: [f32; 3]) {
         if let Some(f) = self.raw.set_position {
             f(h, pos.as_ptr());
         }
     }
+    /// Remove an entity and free its handle.
     pub fn destroy(&self, h: i32) {
         if let Some(f) = self.raw.destroy {
             f(h);
         }
     }
+    /// The local player's current `WeaponType`; 0 if unavailable.
     pub fn weapon(&self) -> i32 {
         self.raw.weapon.map_or(0, |f| f())
     }
+    /// Owned weapons as a bitmask: bit `1 << (WeaponType-1)` per owned weapon.
     pub fn weapons_owned(&self) -> i32 {
         self.raw.weapons_owned.map_or(0, |f| f())
     }
@@ -297,16 +323,19 @@ impl Host {
         }
         ([a[0], a[1], a[2], a[3], a[4], a[5]], [a[6], a[7], a[8], a[9], a[10], a[11]])
     }
+    /// Give the player ammo of an `AmmoItemType`; capped by the player's maximum.
     pub fn give_ammo(&self, ait_type: i32, amount: i32) {
         if let Some(f) = self.raw.give_ammo {
             f(ait_type, amount);
         }
     }
+    /// Give the player a weapon of a `WeaponItemType`.
     pub fn give_weapon(&self, wit_type: i32) {
         if let Some(f) = self.raw.give_weapon {
             f(wit_type);
         }
     }
+    /// Launch a projectile of the given type from a position along a direction; launched by the player.
     pub fn projectile(&self, kind: i32, pos: [f32; 3], dir: [f32; 3], speed: f32) {
         if let Some(f) = self.raw.projectile {
             f(kind, pos.as_ptr(), dir.as_ptr(), speed);
