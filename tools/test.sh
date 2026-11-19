@@ -15,6 +15,7 @@
 #                   aim assist)
 #   - persistence:  tools/persisttest.mjs (the user dir survives a reload: OPFS / IndexedDB)
 #   - damage hook:  tools/damagetest.mjs (host API v5: player hits reach the mod)
+#   - threat:       tools/threattest.mjs (enemies behind produce edge markers and hit glow)
 #   - post pass:    tools/posttest.mjs (?post=fxaa,sharpen runs, survives a resize, off by default)
 #   - threaded only: tools/shimtest.mjs (no synchronous shader calls), tools/qualitytest.mjs
 #                   (?quality=auto under CPU throttling)
@@ -214,6 +215,10 @@ for b in $NAMES; do
   step "$b: damage hook"
   if logged "damage-$b" node tools/damagetest.mjs "$url"; then result PASS "$b damage hook" "player hits reach the mod and get the rank bonus"
   else result FAIL "$b damage hook" "see $OUT/damage-$b.log"; fi
+
+  step "$b: threat warnings"
+  if logged "threat-$b" node tools/threattest.mjs "$url"; then result PASS "$b threat warnings" "edge markers for enemies behind, hit-direction glow"
+  else result FAIL "$b threat warnings" "see $OUT/threat-$b.log"; fi
 
   step "$b: playtest recorder"
   if logged "rec-$b" node tools/playtesttest.mjs "$url" "$OUT/playtests"; then result PASS "$b playtest recorder" "timeline, markers and survey reach the dev server"

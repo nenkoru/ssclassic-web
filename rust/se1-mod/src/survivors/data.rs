@@ -53,6 +53,12 @@ pub const KINDS: &[Kind] = &[
     Kind { name: "Lava Golem", class: "Classes\\Elemental.ecl", model: "Models\\Enemies\\ElementalLava\\ElementalLava.mdl", variant: 0, xp: 10.0, score: 5000 },
     Kind { name: "Big Lava Golem", class: "Classes\\Elemental.ecl", model: "Models\\Enemies\\ElementalLava\\ElementalLava.mdl", variant: 1, xp: 40.0, score: 20000 },
 ];
+/// Whether a kind attacks from range (projectiles) vs. melee.
+pub fn ranged(kind: usize) -> bool {
+    !matches!(KINDS[kind].name,
+        "Beheaded Kamikaze" | "Gnaar" | "Gnaar Sergeant" | "Sirian Werebull"
+        | "Marsh Hopper" | "Lava Golem" | "Big Lava Golem")
+}
 /// Stand-ins when a kind's data is missing (demo data): same role, available class.
 pub fn fallback(k: usize) -> usize {
     match k {
@@ -647,6 +653,15 @@ mod tests {
                 (10.0..=16.0).contains(&step),
                 "xp step at level {l} is {step}, expected 10..=16"
             );
+        }
+    }
+
+    #[test]
+    fn ranged_classifies_all_kinds() {
+        let melee = ["Beheaded Kamikaze", "Gnaar", "Gnaar Sergeant", "Sirian Werebull", "Marsh Hopper", "Lava Golem", "Big Lava Golem"];
+        for (i, k) in KINDS.iter().enumerate() {
+            let expect = !melee.contains(&k.name);
+            assert_eq!(ranged(i), expect, "kind {} ({})", i, k.name);
         }
     }
 }

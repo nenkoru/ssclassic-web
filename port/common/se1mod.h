@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-#define SE1MOD_API_VERSION 6
+#define SE1MOD_API_VERSION 7
 
 typedef struct SE1ModHost {
   uint32_t api_version;   /* SE1MOD_API_VERSION */
@@ -84,6 +84,7 @@ typedef struct SE1ModHost {
   void (*projectile)(int type, const float *pos3, const float *dir3, float speed);   /* launched by the player */
   float (*armor)(float add, float max);         /* add armor up to max; returns the armor */
   int (*player_eye)(float *pos3, float *dir3);  /* eye position and view direction */
+  int (*player_hurt)(float *from, float *amount);  /* where the player was last hit from (position) and accumulated damage; 1 if new */
 } SE1ModHost;
 
 /* called once after the engine and game library are initialized; returns 0 on success */

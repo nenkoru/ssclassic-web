@@ -4,7 +4,7 @@ use std::ffi::{c_char, c_int, CStr, CString};
 
 use crate::config::CvarValue;
 
-pub const API_VERSION: u32 = 6;
+pub const API_VERSION: u32 = 7;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -54,6 +54,7 @@ pub struct SE1ModHost {
     pub projectile: Option<extern "C" fn(c_int, *const f32, *const f32, f32)>,
     pub armor: Option<extern "C" fn(f32, f32) -> f32>,
     pub player_eye: Option<extern "C" fn(*mut f32, *mut f32) -> c_int>,
+    pub player_hurt: Option<extern "C" fn(*mut f32, *mut f32) -> c_int>,
 }
 
 /// Options for `Host::spawn_enemy`.
@@ -350,5 +351,12 @@ impl Host {
         let f = self.raw.player_eye?;
         let (mut p, mut d) = ([0f32; 3], [0f32; 3]);
         (f(p.as_mut_ptr(), d.as_mut_ptr()) != 0).then_some((p, d))
+    }
+    /// Where the player was last hit from (inflictor position) and accumulated damage since the last call.
+    /// Returns Some((from, amount)) if a new hit was recorded since the previous call.
+    pub fn player_hurt(&self) -> Option<([f32; 3], f32)> {
+        let f = self.raw.player_hurt?;
+        let (mut from, mut amount) = ([0f32; 3], 0f32);
+        (f(from.as_mut_ptr(), &mut amount) != 0).then_some((from, amount))
     }
 }

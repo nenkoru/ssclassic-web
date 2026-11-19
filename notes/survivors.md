@@ -134,6 +134,20 @@ Background:
   | `svgod=1` | god mode |
   | `svcap=N` | monster cap |
   | `svstress=N` with `svkind=K` | monster stress test (`tools/stress.mjs`) |
+  | `svbehind=N` | spawn one enemy of kind N-1 behind the player at run start |
+  | `svthreats=0` | hide the threat markers and hit glow |
+
+## Threat warnings
+
+- **Edge markers** (`threats` in the HUD): nearby enemies outside the view are grouped into 8
+  directional sectors. Each sector shows a red marker on the screen edge, sized and brightened by
+  the threat level (distance, ranged vs. melee, boss/elite). A count badge appears when more than
+  one enemy is in the sector. Markers within 8 m pulse.
+- **Hit glow** (`hurt` in the HUD): when the player is hit, a red radial glow appears on the screen
+  edge in the direction the damage came from, fading over 1.5 s. The engine records the inflictor's
+  position in the damage hook (host API v7, `player_hurt`).
+- **Test:** `tools/threattest.mjs` spawns a Beheaded Rocketeer behind the player (`?svbehind=2`)
+  and checks that the threat marker and hit glow appear.
 
 ## Next
 

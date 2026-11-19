@@ -284,6 +284,7 @@ pub struct Survivors {
     stress: usize,
     stress_kind: usize,
     max_alive: usize, // performance budget (notes/big-ideas.md: ~300 on a fast Mac, fewer on phones)
+    hurt: Option<(f32, f32, f64)>,   // (rel_angle, amount, time) of the last hit on the player
 }
 
 impl Survivors {
@@ -315,6 +316,7 @@ impl Survivors {
                 1 => K_KLEER, 2 => K_GNAAR, 3 => K_ARACH, 4 => K_BULL, _ => K_FIRE,
             },
             max_alive: match host.page_option("se1SurvivorsCap") as usize { 0 => 110, n => n.clamp(20, 400) },
+            hurt: None,
         };
         host.log(&format!("se1mod: Serious Survivors ready ({} data)", if full_data { "full" } else { "demo" }));
         if s.stress > 0 || host.page_option("se1SurvivorsAuto") > 0.0 {
@@ -617,6 +619,16 @@ impl Survivors {
         self.started_at = self.time;
         self.weapons_t = self.time - 1.0; // check the guns on the first frame (the clock restarted)
         self.debug_chest = host.page_option("se1SurvivorsChest").max(0.0) as u32;
+        self.hurt = None;
+        let _ = host.player_hurt(); // drop a hit left over from before this run
+        // debug/test: ?svbehind=N spawns one enemy of kind N-1 behind the player at run start
+        let behind = host.page_option("se1SurvivorsBehind").max(0.0) as usize;
+        if behind > 0 && behind <= KINDS.len() {
+            let d = host.player_view().unwrap_or([0.0, 0.0, -1.0]);
+            let (fx, fz) = norm2(d[0], d[2]);
+            let p = [self.pos[0] - fx * 12.0, self.pos[1], self.pos[2] - fz * 12.0];
+            self.spawn_at(host, behind - 1, p, 1.0, false, false);
+        }
         if host.page_option("se1SurvivorsGod") > 0.0 {
             host.shell_execute("cht_bGod = 1");
         }
@@ -724,6 +736,9 @@ impl Survivors {
         self.abilities(host);
         self.passives(host, dt);
         self.update_powers(host);
+        if let Some((from, amount)) = host.player_hurt() {
+            self.hurt = Some((self.rel_angle(from), amount, self.time));
+        }
         if self.combo > 0 && t > self.combo_t + 2.0 {
             self.combo = 0;
         }
@@ -1680,13 +1695,42 @@ impl Survivors {
             })
             .collect();
         arrows.extend(self.enemies.iter().filter(|e| e.boss && e.hp > 0.0).map(|e| format!(r#"{{"a":{:.0},"d":{:.0},"label":"boss"}}"#, self.rel_angle(e.pos), dist(e.pos, self.pos))));
+        // threat sectors: nearby enemies outside the view, grouped by direction
+        let mut sectors: [f32; 8] = [0.0; 8];
+        let mut sector_n: [usize; 8] = [0; 8];
+        let mut sector_d: [f32; 8] = [f32::MAX; 8];
+        for e in &self.enemies {
+            if e.hp <= 0.0 { continue; }
+            let a = self.rel_angle(e.pos);
+            let d = dist(e.pos, self.pos);
+            let r = ranged(e.kind);
+            let range = if r { 50.0 } else { 20.0 };
+            if a.abs() <= 45.0 || d >= range { continue; }
+            let w = (1.0 - d / range) * if r { 1.0 } else { 0.8 } * if e.boss || e.elite { 1.5 } else { 1.0 };
+            let s = ((a / 45.0).round() as i32).rem_euclid(8) as usize; // sector centred on s·45°
+            sectors[s] += w;
+            sector_n[s] += 1;
+            sector_d[s] = sector_d[s].min(d);
+        }
+        let threats: Vec<String> = (0..8)
+            .filter(|&s| sector_n[s] > 0)
+            .map(|s| {
+                let centre = if s > 4 { s as f32 * 45.0 - 360.0 } else { s as f32 * 45.0 };
+                let lvl = (sectors[s].min(1.0)) as f64;
+                format!(r#"{{"a":{:.0},"lvl":{:.2},"n":{},"d":{:.0}}}"#, centre, lvl, sector_n[s], sector_d[s])
+            })
+            .collect();
+        let hurt = self.hurt.as_ref()
+            .filter(|(_, _, t)| self.time - t < 1.5)
+            .map(|(a, amt, t)| format!(r#"{{"a":{:.0},"amt":{:.1},"age":{:.2}}}"#, a, *amt, self.time - t))
+            .unwrap_or_else(|| "null".into());
         let powers: Vec<String> = self.powers.iter().map(|(p, u)| format!(r#"{{"name":"{}","left":{:.0}}}"#, p.name(), u - self.time)).collect();
         let procs: Vec<String> = self.procs.iter().map(|l| format!("\"{}\"", l.replace('"', "'"))).collect();
         let ranks: Vec<String> = self.ranks.iter().map(|(u, r)| format!(r#"{{"id":"{}","name":"{}","rank":{}}}"#, u.id(), u.name(), r)).collect();
         // touch controls (port/web/touch.js) + tools/touchtest.mjs read these
         let yaw = host.player_view().map(|d| (d[2] as f64).atan2(d[0] as f64).to_degrees()).unwrap_or(0.0);
         host.ui_post(&format!(
-            r#"{{"type":"hud","time":{:.1},"run":{:.0},"level":{},"xp":{:.1},"next":{:.0},"kills":{},"score":{},"combo":{},"gold":{:.0},"alive":{},"gems":{},"guns":[{}],"abilities":[{}],"passives":[{}],"ranks":[{}],"boss":{},"arrows":[{}],"powers":[{}],"procs":[{}],"endless":{},"state":"{}","pos":[{:.2},{:.2},{:.2}],"yaw":{:.1},"weapon":{}}}"#,
+            r#"{{"type":"hud","time":{:.1},"run":{:.0},"level":{},"xp":{:.1},"next":{:.0},"kills":{},"score":{},"combo":{},"gold":{:.0},"alive":{},"gems":{},"guns":[{}],"abilities":[{}],"passives":[{}],"ranks":[{}],"boss":{},"arrows":[{}],"threats":[{}],"hurt":{},"powers":[{}],"procs":[{}],"endless":{},"state":"{}","pos":[{:.2},{:.2},{:.2}],"yaw":{:.1},"weapon":{}}}"#,
             self.time,
             RUN_S,
             self.level,
@@ -1704,6 +1748,8 @@ impl Survivors {
             ranks.join(","),
             boss,
             arrows.join(","),
+            threats.join(","),
+            hurt,
             powers.join(","),
             procs.join(","),
             self.endless,

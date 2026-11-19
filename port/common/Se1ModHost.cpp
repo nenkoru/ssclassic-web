@@ -57,6 +57,9 @@ static int host_set_string(const char *name, const char *v) {
  static CEntityPointer _apenHandles[MAX_HANDLES];   /* references keep the entity's memory valid */
 static std::unordered_map<ULONG, int> _mapHandleOf;   /* entity ID -> handle, for the damage hook */
 static int _iInModDamage = 0;   /* > 0 while the mod's own host.damage is in flight */
+static int _iHurtSerial = 0;
+static float _hurtPos[3] = {0, 0, 0};
+static float _hurtAmount = 0.0f;
 
 static CEntity *local_player(void)
 {
@@ -246,6 +249,16 @@ static int host_player_eye(float *pos, float *dir)
   dir[0] = d(1); dir[1] = d(2); dir[2] = d(3);
   return 1;
 }
+static int host_player_hurt(float *from, float *amount)
+{
+  static int lastSerial = 0;
+  if (_iHurtSerial == lastSerial) return 0;
+  lastSerial = _iHurtSerial;
+  from[0] = _hurtPos[0]; from[1] = _hurtPos[1]; from[2] = _hurtPos[2];
+  *amount = _hurtAmount;
+  _hurtAmount = 0.0f;
+  return 1;
+}
 
 /* The game executable's main loop re-decides the pause every frame (SeriousSam.cpp
    UpdatePauseState), so the mod's pause is a flag it ORs in, and game-side actions go through a
@@ -329,6 +342,7 @@ void SE1Mod_Init(void)
   host.projectile = host_projectile;
   host.armor = host_armor;
   host.player_eye = host_player_eye;
+  host.player_hurt = host_player_hurt;
   _bModReady = se1mod_init(&host) == 0;
   if (!_bModReady) host_log("se1mod: init failed (API version mismatch?)");
 }
@@ -344,6 +358,15 @@ void SE1Mod_Shutdown(void) { if (_bModReady) se1mod_shutdown(); _bModReady = FAL
 FLOAT SE1Mod_Damage(CEntity *penDealing, CEntity *penTarget, CEntity *penInflictor, INDEX iDmt, FLOAT fAmount)
 {
   if (!_bModReady || penTarget == NULL) return fAmount;
+  // where the local player was hit from: only attacks by monsters (a rocket's inflictor is the
+  // one who fired it); lava, falls and the world have no direction worth showing
+  if (penTarget == local_player() && penInflictor != NULL && penInflictor != penTarget &&
+      IsDerivedFromClass(penInflictor, "Enemy Base")) {
+    const FLOAT3D &iv = penInflictor->GetPlacement().pl_PositionVector;
+    _hurtPos[0] = iv(1); _hurtPos[1] = iv(2); _hurtPos[2] = iv(3);
+    _hurtAmount += fAmount;
+    _iHurtSerial++;
+  }
   int src = _iInModDamage > 0 ? 2 : (penInflictor != NULL && penInflictor == local_player() ? 1 : 0);
   if (src == 1 && penDealing != NULL && _setModProjectiles.count(penDealing->en_ulID)) src = 2;   // a mod projectile
   std::unordered_map<ULONG, int>::const_iterator it = _mapHandleOf.find(penTarget->en_ulID);

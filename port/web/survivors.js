@@ -23,6 +23,8 @@
   if (q.get('svtime')) Module.se1SurvivorsTime = +q.get('svtime');     // start the run clock here
   if (q.get('svchest')) Module.se1SurvivorsChest = +q.get('svchest');  // open a chest with N items
   if (q.get('svgod')) Module.se1SurvivorsGod = 1;
+  if (q.get('svbehind')) Module.se1SurvivorsBehind = +q.get('svbehind');   // spawn one enemy of kind N-1 behind the player
+  if (q.get('svthreats') === '0') Module.se1SurvivorsThreats = 0;
   // monster cap: phones and small CPUs get fewer (notes/big-ideas.md, "How many enemies on screen")
   Module.se1SurvivorsCap = +q.get('svcap') || (/Android|iPhone|iPad/.test(navigator.userAgent) || (navigator.hardwareConcurrency || 8) <= 4 ? 60 : 110);
   Module.se1SurvivorsLast = null;    // last HUD message (tests read these)
@@ -104,6 +106,11 @@
     '#svv .shop{display:grid;grid-template-columns:1fr 1fr;gap:4px}#svv .shop .opt{margin:0;font-size:13px}#svv .shop .lvl{color:#ffd75e}' +
     '#svv table{border-collapse:collapse;font-size:14px}#svv td{padding:2px 10px}#svv td.bar{width:240px}#svv td.bar i{display:block;height:10px;background:linear-gradient(90deg,#ffd75e,#ff9f5e);border-radius:5px}' +
     '#svv .roll{font-size:22px;color:#ffd75e;min-height:30px}' +
+    '#svv .threat{position:absolute;width:12px;height:12px;background:#f44;border-radius:50%;transform:translate(-50%,-50%);text-align:center}' +
+    '#svv .threat.close{animation:svpulse .3s infinite alternate}' +
+    '@keyframes svpulse{from{transform:translate(-50%,-50%) scale(1)}to{transform:translate(-50%,-50%) scale(1.6)}}' +
+    '#svv .threat .cnt{position:absolute;top:14px;left:50%;transform:translateX(-50%);font-size:11px;color:#f88;text-shadow:0 1px 2px #000}' +
+    '#svv .hurt{position:absolute;inset:0;pointer-events:none}' +
     '@media (max-width:760px){#svv .lobby{grid-template-columns:1fr}#svv .card{width:150px}#svv h1{font-size:30px}}';
 
   var root, E = {}, offer = null, chestOpen = false, endShown = false, nums = [];
@@ -120,6 +127,7 @@
     E.boss = el('div', 'boss', root); E.bossName = el('div', null, E.boss); E.bossBar = el('i', null, el('div', 'bar', E.boss));
     E.powers = el('div', 'powers', root); E.procs = el('div', 'procs', root);
     E.banner = el('div', 'banner', root); E.arrows = el('div', null, root); E.nums = el('div', null, root);
+    E.threats = el('div', null, root); E.hurt = el('div', 'hurt', root);
     E.flash = el('div', 'flash', root);
     E.modal = el('div', 'modal', root);
   }
@@ -203,6 +211,7 @@
     E.powers.innerHTML = ''; m.powers.forEach(function (p) { el('div', null, E.powers, p.name + '  ' + p.left + 's'); });
     E.procs.innerHTML = ''; m.procs.forEach(function (p) { el('div', null, E.procs, p); });
     arrows(m.arrows);
+    threats(m.threats, m.hurt);
   }
   var warns = [];
   // edge markers for things outside the view: chests, relics, bosses, incoming stampedes
@@ -220,6 +229,33 @@
       var t = el('div', cls, E.arrows, a.warn ? a.text : a.label + (a.d ? ' ' + a.d + 'm' : ''));
       t.style.left = x + 'px'; t.style.top = (y + 18) + 'px';
     });
+  }
+  // edge markers for enemies outside the view, grouped by sector; and a red glow where a hit came from
+  function threats(list, hurt) {
+    E.threats.innerHTML = '';
+    var show = Module.se1SurvivorsThreats !== 0;
+    if (!show) { E.hurt.style.opacity = 0; return; }
+    var cx = innerWidth / 2, cy = innerHeight / 2;
+    (list || []).forEach(function (t) {
+      var r = t.a * Math.PI / 180;
+      var x = cx + Math.sin(r) * cx * 0.88, y = cy - Math.cos(r) * cy * 0.85;
+      var sz = 10 + 14 * t.lvl;
+      var d = el('div', 'threat' + (t.d < 8 ? ' close' : ''), E.threats);
+      d.style.left = x + 'px'; d.style.top = y + 'px';
+      d.style.width = sz + 'px'; d.style.height = sz + 'px';
+      d.style.opacity = 0.35 + 0.65 * t.lvl;
+      d.style.transform = 'translate(-50%,-50%) rotate(' + t.a + 'deg)';
+      if (t.n > 1) el('div', 'cnt', d, t.n);
+    });
+    if (hurt) {
+      var hr = hurt.a * Math.PI / 180;
+      var hx = cx + Math.sin(hr) * cx * 0.88, hy = cy - Math.cos(hr) * cy * 0.85;
+      var w = innerWidth * 0.35;
+      E.hurt.style.background = 'radial-gradient(circle at ' + hx + 'px ' + hy + 'px, rgba(255,40,40,.7) 0%, transparent ' + w + 'px)';
+      E.hurt.style.opacity = Math.max(0, 1 - hurt.age / 1.5);
+    } else {
+      E.hurt.style.opacity = 0;
+    }
   }
   var bannerTimer = 0;
   function banner(text) {
