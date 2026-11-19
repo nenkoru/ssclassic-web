@@ -55,7 +55,7 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
 | Multiplayer: virtual LAN switch | ✅ | rust/se1-server, port/common/NetLan.c, port/web/net.js | `?room=`, `&host=1` | mptest | — |
 | Multiplayer: WebRTC data channels | 🧪 | port/web/net.js, se1-server signal relay | `&rtc=1` | mptest --rtc (local only; internet needs STUN/TURN) | LAN |
 | Lobby | ✅ | port/web/lobby.js | Multiplayer button | lobbytest | LAN |
-| Rust mod layer (host API v7) | ✅ | port/common/{Se1ModHost,Se1ModEntities}.cpp, se1mod.h, rust/se1-mod/src/{lib,host,config}.rs | build `SE1_RUSTMOD` | cargo test | — |
+| Rust mod layer (host API v8) | ✅ | port/common/{Se1ModHost,Se1ModEntities}.cpp, se1mod.h, rust/se1-mod/src/{lib,host,config}.rs | build `SE1_RUSTMOD` | cargo test | — |
 | Damage hook + projectile attribution | ✅ | Entity.cpp hooks (3 call sites), Se1ModHost.cpp | used by Survivors | damagetest, projtest¹ | mod |
 | Serious Survivors mode (a minigame; war is the main mode) | ✅ | rust/se1-mod/src/survivors/, port/web/survivors.js | `?mode=survivors` | svtest, cargo test | mod, damage hook |
 | Threat warnings + hit direction | ✅ | survivors (mod + page) for now; move to a shared HUD module when war mode needs it. Host `player_hurt` (API v7) | `?svthreats=0` | threattest | Survivors |
@@ -63,7 +63,7 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
 | Benchmarks, visual regression | ✅ | port/web/bench.js, tools/{bench.mjs,shotdiff.py} | `?timedemo`, `?shots=` | test.sh | — |
 | Bots: navigation graph | ✅ | rust/se1-mod/src/bots/nav.rs (pure Rust, behind the `World` trait); `impl Paths for NavGraph` in bots/mod.rs | — | tests/bots_nav_accept.rs | — |
 | Bots: brain | ✅ | rust/se1-mod/src/bots/brain.rs (pure Rust, behind the `Paths` trait) | — | tests/bots_brain_accept.rs, bots_brain_accept2.rs | — |
-| Bots: engine wiring (virtual players) | 📝 | Server.cpp hook, new port/common/Bots.cpp, host API v8 | `?bots=N` | bottest | nav, brain, mod |
+| Bots: engine wiring (virtual players) | 🚧 | engine: `CServer::AddVirtualPlayer`/`SetVirtualAction`, `_pSE1ServerTickHook` (landed); glue: port/common/Se1ModBots.cpp, host API v8 (landed); runtime: rust/se1-mod/src/bots/runtime.rs (omp) | `?bots=N`, `?botskill=` | bottest, tests/bots_runtime_accept.rs | nav, brain, mod |
 | More than 16 players | 📝 | Network.h limits, wire format | — | mptest at 32+ | LAN |
 | War mode (lines, side missions, game master, roles, building) | 📝 | rust/se1-mod/src/war/, port/web/war.js | `?mode=war` | — | bots, >16 players |
 | War map (persistent front) | 📝 | rust/se1-server | — | — | war mode |
@@ -72,11 +72,16 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
 
 ## Engine changes since `vanilla`
 
-`git diff --stat vanilla -- src/` touches 5 files (+180 −18, as of 2026-11-20):
+`git diff --stat vanilla -- src/` touches 9 files (as of 2026-11-20):
 - `SDLInput.cpp`: touch, pad and pointer exports.
 - `Entity.cpp`: the damage hook.
 - `WorldRayCasting.cpp`: the bullet-magnetism ray radius.
 - `Game.cpp`: the aim-assist call.
 - `SeriousSam.cpp`: the web frame loop, save requests and settings.
+- `Network/Server.cpp`, `Server.h`: virtual players for bots (`AddVirtualPlayer`, `RemoveVirtualPlayer`,
+  `SetVirtualAction`, `IsVirtualPlayer`) and `_pSE1ServerTickHook`, called once per tick before
+  `MakeAllActions`.
+- `Network/PlayerBuffer.cpp`, `PlayerBuffer.h`: the `plb_bVirtual` mark, so bot calls can never reach a
+  human player.
 
 Update this list when an engine change lands.
