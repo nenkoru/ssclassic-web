@@ -58,6 +58,11 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include <Engine/Templates/BSP.h>
 #include <Engine/Templates/DynamicArray.cpp>
+
+#ifdef SE1_WITH_RUSTMOD
+// port/common/Se1ModHost.cpp: the Rust mod layer's damage hook (API v5)
+FLOAT SE1Mod_Damage(CEntity *penTarget, CEntity *penInflictor, INDEX iDmt, FLOAT fAmount);
+#endif
 #include <Engine/Templates/DynamicContainer.cpp>
 #include <Engine/Templates/StaticArray.cpp>
 #include <Engine/Templates/StaticStackArray.cpp>
@@ -2979,10 +2984,14 @@ void CEntity::InflictDirectDamage(CEntity *penToDamage, CEntity *penInflictor, e
     return;
   }
 
-  // if significant damage
-  if (fDamageAmmount>0) {
-    penToDamage->ReceiveDamage(penInflictor, dmtType, fDamageAmmount, vHitPoint, vDirection);
-  }
+   // if significant damage
+   if (fDamageAmmount>0) {
+#ifdef SE1_WITH_RUSTMOD
+    fDamageAmmount = SE1Mod_Damage(penToDamage, penInflictor, dmtType, fDamageAmmount);
+    if (fDamageAmmount <= 0) return;
+#endif
+     penToDamage->ReceiveDamage(penInflictor, dmtType, fDamageAmmount, vHitPoint, vDirection);
+   }
 }
 
 // find intensity of current entity at given distance
@@ -3114,11 +3123,15 @@ void CEntity::InflictRangeDamage(CEntity *penInflictor, enum DamageType dmtType,
       // find damage ammount
       FLOAT fAmmount = IntensityAtDistance(fDamageAmmount, fHotSpotRange, fFallOffRange, fMinD);
 
-      // if significant
-      if (fAmmount>0) {
-        // inflict damage to it
-        en.ReceiveDamage(penInflictor, dmtType, fAmmount, vHitPos, (vHitPos-vCenter).Normalize());
-      }
+       // if significant
+       if (fAmmount>0) {
+#ifdef SE1_WITH_RUSTMOD
+        fAmmount = SE1Mod_Damage(&en, penInflictor, dmtType, fAmmount);
+        if (fAmmount <= 0) continue;
+#endif
+         // inflict damage to it
+         en.ReceiveDamage(penInflictor, dmtType, fAmmount, vHitPos, (vHitPos-vCenter).Normalize());
+       }
     }
   }
 }
@@ -3154,13 +3167,17 @@ void CEntity::InflictBoxDamage(CEntity *penInflictor, enum DamageType dmtType,
       continue;
     }
 
-    // if significant damage
-    if (fDamageAmmount>0) {
-      // inflict damage to it
-      en.ReceiveDamage(penInflictor, dmtType,
-        fDamageAmmount, box.Center(), 
-        (box.Center()-en.GetPlacement().pl_PositionVector).Normalize());
-    }
+     // if significant damage
+     if (fDamageAmmount>0) {
+#ifdef SE1_WITH_RUSTMOD
+      fDamageAmmount = SE1Mod_Damage(&en, penInflictor, dmtType, fDamageAmmount);
+      if (fDamageAmmount <= 0) continue;
+#endif
+       // inflict damage to it
+       en.ReceiveDamage(penInflictor, dmtType,
+         fDamageAmmount, box.Center(), 
+         (box.Center()-en.GetPlacement().pl_PositionVector).Normalize());
+     }
   }
 }
 

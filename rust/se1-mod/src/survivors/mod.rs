@@ -10,14 +10,67 @@
 //!   progression (gold, shop, characters, difficulty) lives on the page.
 //!
 //! The mod only uses the host API (port/common/se1mod.h): it spawns and damages entities, reads
-//! health, weapons and ammo, and draws effects. Gun ranks work by watching enemy health: damage
-//! that isn't ours is the player's gun, so the mod adds the rank bonus on top.
+//! health, weapons and ammo, and draws effects. Gun ranks use the engine's damage hook (API v5):
+//! the hook scales player gun damage by the rank multiplier, and the mod drains the event queue
+//! each frame for damage numbers, evolutions and kill detection.
 //! Design notes: notes/survivors.md, notes/survivors-research.md.
 
 mod data;
 
 use crate::host::{EnemyOpts, Host};
 use data::*;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Mutex;
+
+/// Damage hook state (API v5). The engine calls `damage_hook` from `se1mod_damage`,
+/// which can happen while `se1mod_frame` holds a `&mut` to the mod state (reentrancy:
+/// the mod's own `host.damage` calls go through the same engine path). So this hook
+/// must not touch the mod state: it only reads/writes these statics.
+static HOOK_ON: AtomicBool = AtomicBool::new(false);
+static GUN_MULT_BITS: AtomicU32 = AtomicU32::new(0); // f32::to_bits of the current gun multiplier
+static HOOK_CALLS: AtomicU32 = AtomicU32::new(0);
+static HOOK_FROM_PLAYER: AtomicU32 = AtomicU32::new(0);
+static HOOK_SCALED: AtomicU32 = AtomicU32::new(0);
+static QUEUE: Mutex<Vec<DamageEvent>> = Mutex::new(Vec::new());
+static CRIT_BITS: AtomicU32 = AtomicU32::new(0); // f32::to_bits of the current gun's crit chance
+static CRIT_RNG: AtomicU32 = AtomicU32::new(0x9E37_79B9);
+
+/// xorshift on an atomic: the hook may not touch the mod state (and its rng), see damage_hook
+fn hook_rand() -> f32 {
+    let mut x = CRIT_RNG.load(Ordering::Relaxed);
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    CRIT_RNG.store(x, Ordering::Relaxed);
+    (x >> 8) as f32 / (1u32 << 24) as f32
+}
+
+/// The engine's damage hook (API v5). Called from `se1mod_damage` in lib.rs.
+/// Must not touch the mod state (reentrancy — see above).
+pub fn damage_hook(target: i32, source: i32, dmt: i32, amount: f32) -> f32 {
+    if !HOOK_ON.load(Ordering::Relaxed) {
+        return amount;
+    }
+    HOOK_CALLS.fetch_add(1, Ordering::Relaxed);
+    let mut crit = false;
+    let scaled = if source == 1 && target != 0 {
+        let mut mult = f32::from_bits(GUN_MULT_BITS.load(Ordering::Relaxed));
+        // critical hits (Luck, Lucky Pyramid, the Revolver's rank): double damage
+        if hook_rand() < f32::from_bits(CRIT_BITS.load(Ordering::Relaxed)) {
+            mult *= 2.0;
+            crit = true;
+        }
+        HOOK_FROM_PLAYER.fetch_add(1, Ordering::Relaxed);
+        HOOK_SCALED.fetch_add(1, Ordering::Relaxed);
+        amount * mult
+    } else {
+        amount
+    };
+    if target != 0 {
+        QUEUE.lock().unwrap().push(DamageEvent { target, source, dmt, amount: scaled, crit });
+    }
+    scaled
+}
 
 const TAU: f64 = std::f64::consts::TAU;
 const MAX_GEMS: usize = 120;
@@ -56,6 +109,13 @@ struct Enemy {
     boss: bool,
     last_src: Src,
     far_since: f64,
+}
+struct DamageEvent {
+    target: i32,
+    source: i32,
+    dmt: i32,
+    amount: f32,
+    crit: bool,
 }
 struct Gem {
     h: i32,
@@ -188,6 +248,7 @@ pub struct Survivors {
     dead_posted: bool,
     debug_chest: u32,
     started_at: f64,
+    hook_log_t: f64,
     // debug / test
     stress: usize,
     stress_kind: usize,
@@ -217,7 +278,7 @@ impl Survivors {
             weapon: 0, ammo: [0; 6], ammo_acc: [0.0; 6], shots: [0; 17], firing_until: -1.0,
             revolver_hits: 0, typewriter_kills: 0, hurricane_t: 0.0,
             hits: Vec::new(), flash: false, stats: Vec::new(), powers: Vec::new(), speed_set: 1.0,
-            hud_t: 0.0, sound_t: 0.0, procs: Vec::new(), achieved: Vec::new(), dead_posted: false, debug_chest: 0, started_at: 0.0,
+            hud_t: 0.0, sound_t: 0.0, procs: Vec::new(), achieved: Vec::new(), dead_posted: false, debug_chest: 0, started_at: 0.0, hook_log_t: 0.0,
             stress: host.page_option("se1SurvivorsStress").max(0.0) as usize,
             stress_kind: match host.page_option("se1SurvivorsStressKind") as i32 {
                 1 => K_KLEER, 2 => K_GNAAR, 3 => K_ARACH, 4 => K_BULL, _ => K_FIRE,
@@ -359,11 +420,55 @@ impl Survivors {
             }
             State::Run => {
                 self.time += dt;
+                // update the gun multiplier for the damage hook
+                let gun = Up::from_weapon(self.weapon).unwrap_or(Up::Knife);
+                let r = self.rank(gun).max(1);
+                let per_rank = if gun == Up::Knife { 0.25 } else { 0.20 };
+                GUN_MULT_BITS.store((self.might() * (1.0 + per_rank * (r - 1) as f32)).to_bits(), Ordering::Relaxed);
+                let crit = self.luck() * 0.5 + if gun == Up::Revolver { 0.05 * r as f32 } else { 0.0 };
+                CRIT_BITS.store(crit.to_bits(), Ordering::Relaxed);
+                // drain the damage hook queue
+                let events = std::mem::take(&mut *QUEUE.lock().unwrap());
+                if !events.is_empty() {
+                    self.drain_events(host, events);
+                }
+                // debug log every 5 s
+                if self.time - self.hook_log_t >= 5.0 {
+                    self.hook_log_t = self.time;
+                    let calls = HOOK_CALLS.swap(0, Ordering::Relaxed);
+                    let from_player = HOOK_FROM_PLAYER.swap(0, Ordering::Relaxed);
+                    let scaled = HOOK_SCALED.swap(0, Ordering::Relaxed);
+                    host.log(&format!("damage hook: {} calls, {} from player, {} scaled", calls, from_player, scaled));
+                }
                 if self.stress > 0 {
                     self.stress_frame(host);
                 } else {
                     self.run(host, dt);
                 }
+            }
+        }
+    }
+
+    /// Process damage events from the engine's damage hook (API v5).
+    /// Called once per frame with the drained queue. For each event whose target is a
+    /// tracked enemy: credit the damage, push the damage number, and fire per-hit gun
+    /// effects. The rank bonus is already applied by the hook (scaling), so we don't
+    /// add an extra `host.damage` here.
+    fn drain_events(&mut self, host: &Host, events: Vec<DamageEvent>) {
+        for ev in events {
+            let Some(i) = self.enemies.iter().position(|e| e.h == ev.target) else { continue };
+            let e = &self.enemies[i];
+            if e.hp <= 0.0 {
+                continue;
+            }
+            if ev.source == 1 {
+                // player gun damage: credit + per-hit effects (the hook already scaled it)
+                let gun = Up::from_weapon(self.weapon).unwrap_or(Up::Knife);
+                self.enemies[i].last_src = Src::Gun(gun);
+                self.stat(Src::Gun(gun), ev.amount);
+                let p = self.enemies[i].pos;
+                self.push_hit(p, ev.amount, if ev.crit { 2.0 } else { 0.0 });
+                self.on_gun_hit_effects(host, i, ev.amount, gun);
             }
         }
     }
@@ -413,6 +518,12 @@ impl Survivors {
             host.shell_execute("cht_bGod = 1");
         }
         self.precache(host);
+        HOOK_ON.store(true, Ordering::Relaxed);
+        HOOK_CALLS.store(0, Ordering::Relaxed);
+        HOOK_FROM_PLAYER.store(0, Ordering::Relaxed);
+        HOOK_SCALED.store(0, Ordering::Relaxed);
+        QUEUE.lock().unwrap().clear();
+        self.hook_log_t = 0.0;
         self.state = State::Run;
         host.set_pause(false);
         host.ui_post(&format!(r#"{{"type":"start","character":"{}","difficulty":"{}"}}"#, CHARACTERS[character].name, DIFFICULTIES[difficulty].0));
@@ -598,21 +709,9 @@ impl Survivors {
         }
     }
 
-    /// The player's gun hit enemy i for `delta` (seen as a health drop we didn't cause).
-    fn on_gun_hit(&mut self, host: &Host, i: usize, delta: f32, gun: Up) {
-        let r = self.rank(gun).max(1);
-        let per_rank = if gun == Up::Knife { 0.25 } else { 0.20 };
-        let mut mult = self.might() * (1.0 + per_rank * (r - 1) as f32);
-        let mut crit = false;
-        let crit_chance = self.luck() * 0.5 + if gun == Up::Revolver { 0.05 * r as f32 } else { 0.0 };
-        if (self.rand() as f32) < crit_chance {
-            mult *= 2.0;
-            crit = true;
-        }
-        let extra = delta * (mult - 1.0);
-        if extra > 0.5 && self.enemies[i].hp > 0.0 {
-            self.hit(host, i, extra, Src::Gun(gun), crit);
-        }
+    /// Per-hit gun effects (evolution specials). The rank bonus is applied by the damage
+    /// hook (API v5), not here.
+    fn on_gun_hit_effects(&mut self, host: &Host, i: usize, delta: f32, gun: Up) {
         match gun {
             Up::Revolver if self.evolved(Evo::HighNoon) => {
                 self.revolver_hits += 1;
@@ -640,7 +739,7 @@ impl Survivors {
             }
             Up::Knife if self.evolved(Evo::Butcher) => {
                 host.effect(BET_SHOCKWAVE, [self.pos[0], self.pos[1] + 0.5, self.pos[2]], 1.0);
-                let dmg = (delta * mult * 1.5).max(40.0);
+                let dmg = (delta * 1.5).max(40.0);
                 self.blast(host, self.pos, 6.0, dmg, Src::Evo(Evo::Butcher), false);
             }
             _ => {}
@@ -721,7 +820,6 @@ impl Survivors {
     }
 
     fn update_enemies(&mut self, host: &Host) {
-        let gun = Up::from_weapon(self.weapon).unwrap_or(Up::Knife);
         let mut i = 0;
         while i < self.enemies.len() {
             let h = self.enemies[i].h;
@@ -729,18 +827,7 @@ impl Survivors {
             if let Some(p) = host.position(h) {
                 self.enemies[i].pos = p;
             }
-            let before = self.enemies[i].hp;
-            if hp < before - 0.01 {
-                let delta = before - hp;
-                self.enemies[i].hp = hp;
-                self.enemies[i].last_src = Src::Gun(gun);
-                self.stat(Src::Gun(gun), delta);
-                let p = self.enemies[i].pos;
-                self.push_hit(p, delta, 0.0);
-                if hp > 0.0 {
-                    self.on_gun_hit(host, i, delta, gun);
-                }
-            }
+            self.enemies[i].hp = hp;
             // stuck far away (spawned out of the map, or left behind): recycle
             let d = dist(self.enemies[i].pos, self.pos);
             if self.enemies[i].hp > 0.0 && !self.enemies[i].boss {
@@ -1578,4 +1665,58 @@ fn norm3(a: [f32; 3]) -> [f32; 3] {
 fn norm2(x: f32, z: f32) -> (f32, f32) {
     let l = (x * x + z * z).sqrt().max(1e-6);
     (x / l, z / l)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{damage_hook, HOOK_ON, GUN_MULT_BITS, HOOK_CALLS, HOOK_FROM_PLAYER, HOOK_SCALED, QUEUE};
+    use std::sync::atomic::Ordering;
+    #[test]
+    fn hook_behavior() {
+        // hook off: returns input unchanged
+        HOOK_ON.store(false, Ordering::Relaxed);
+        assert_eq!(damage_hook(1, 1, 0, 10.0), 10.0);
+        assert_eq!(damage_hook(0, 0, 0, 5.0), 5.0);
+          QUEUE.lock().unwrap().clear();
+ 
+        // hook on: scales player damage, passes through the rest
+        HOOK_ON.store(true, Ordering::Relaxed);
+        GUN_MULT_BITS.store(1.6f32.to_bits(), Ordering::Relaxed);
+        HOOK_CALLS.store(0, Ordering::Relaxed);
+        HOOK_FROM_PLAYER.store(0, Ordering::Relaxed);
+        HOOK_SCALED.store(0, Ordering::Relaxed);
+ 
+        // source 1, target != 0: scaled
+        let r = damage_hook(42, 1, 0, 10.0);
+        assert!((r - 16.0).abs() < 1e-6);
+ 
+        // source 0: unchanged
+        let r = damage_hook(42, 0, 0, 10.0);
+        assert_eq!(r, 10.0);
+ 
+        // source 2: unchanged
+        let r = damage_hook(42, 2, 0, 10.0);
+        assert_eq!(r, 10.0);
+ 
+        // target 0: unchanged, no queue entry
+        let r = damage_hook(0, 1, 0, 10.0);
+        assert_eq!(r, 10.0);
+ 
+        assert_eq!(HOOK_CALLS.load(Ordering::Relaxed), 4);
+        assert_eq!(HOOK_FROM_PLAYER.load(Ordering::Relaxed), 1);
+        assert_eq!(HOOK_SCALED.load(Ordering::Relaxed), 1);
+ 
+          let q = QUEUE.lock().unwrap();
+        assert_eq!(q.len(), 3);
+        assert_eq!(q[0].target, 42);
+        assert!((q[0].amount - 16.0).abs() < 1e-6);
+        assert_eq!(q[1].target, 42);
+        assert_eq!(q[1].amount, 10.0);
+        assert_eq!(q[2].target, 42);
+        assert_eq!(q[2].amount, 10.0);
+        drop(q); // release the lock before clearing below (std Mutex is not reentrant)
+ 
+        HOOK_ON.store(false, Ordering::Relaxed);
+          QUEUE.lock().unwrap().clear();
+    }
 }

@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-#define SE1MOD_API_VERSION 4
+#define SE1MOD_API_VERSION 5
 
 typedef struct SE1ModHost {
   uint32_t api_version;   /* SE1MOD_API_VERSION */
@@ -89,7 +89,15 @@ typedef struct SE1ModHost {
 /* called once after the engine and game library are initialized; returns 0 on success */
 int  se1mod_init(const SE1ModHost *host);
 /* called once per presented frame; tm_real = engine real-time clock in seconds */
-void se1mod_frame(double tm_real);
+ void se1mod_frame(double tm_real);
+/* called when an entity is about to receive damage; returns the amount to apply (the mod may
+   scale it; returning the input leaves it unchanged).
+   target: the mod's handle for the damaged entity, or 0 if the mod has none.
+   source: 0 = other (monsters, barrels, the world), 1 = the local player (bullets,
+     projectiles, melee: their inflictor is the player), 2 = the mod's own damage
+     (made inside host.damage).
+   damage_type: the engine's DamageType (DMT_*) value. */
+float se1mod_damage(int target, int source, int damage_type, float amount);
 /* called when a new session (level) has started */
 void se1mod_level_started(const char *world_file);
 /* called before the engine shuts down */

@@ -54,8 +54,12 @@ Background:
 ## Builds
 
 - **Guns** (Sam's own; ranks I–V; you can carry every gun):
-  - Each rank adds +20% damage. It works by watching enemy health: any health loss the mod didn't
-    cause is from your gun, so the mod adds the rank bonus on top.
+  - Each rank adds +20% damage (the knife +25%), and Luck and the Revolver's rank add critical
+    hits (double damage). This goes through the engine's damage hook (host API v5,
+    `se1mod_damage`): every hit on a monster the mod spawned asks the mod first, and the mod scales
+    the player's hits by the held gun's multiplier at the moment of the hit.
+  - Damage numbers, the damage-by-source stats and the gun effects (evolution procs) come from the
+    same hook events; enemy health is still read every frame for kills and positions.
   - Ammo regenerates by rank.
   - Rank-specific: twin rockets at III; a second revolver at III.
 - **Abilities** (4 slots; auto-cast with visible effects):
@@ -130,8 +134,8 @@ Background:
 ## Next
 
 - **Co-op Survivors:** the host runs the director, and every player picks their own cards.
-- **Damage hook:** an engine `on_damage` hook would be more exact than watching health. It would
-  also give Serious Damage to the guns, and true gun attribution for projectile kills.
+- **Damage hook, next steps:** credit projectiles to the gun that fired them (today: the gun held
+  when the hit lands), and give Serious Damage to the guns through the hook.
 - **Characters:** player models per character.
 - **Stages:** a stage select with open arenas from the full game.
 - **Music:** feed swarms and bosses into the music holder's intensity level.

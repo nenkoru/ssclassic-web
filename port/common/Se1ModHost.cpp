@@ -8,7 +8,8 @@
 #include <Engine/Base/ParsingSymbols.h>
 
 #include "se1mod.h"
-#include "Se1ModEntities.h"
+ #include "Se1ModEntities.h"
+#include <unordered_map>
 #include <Engine/Sound/SoundObject.h>
 
 static ShellTypeType symbol_type(const char *name)
@@ -52,7 +53,9 @@ static int host_set_string(const char *name, const char *v) {
 #endif
 
 #define MAX_HANDLES 2048
-static CEntityPointer _apenHandles[MAX_HANDLES];   /* references keep the entity's memory valid */
+ static CEntityPointer _apenHandles[MAX_HANDLES];   /* references keep the entity's memory valid */
+static std::unordered_map<ULONG, int> _mapHandleOf;   /* entity ID -> handle, for the damage hook */
+static int _iInModDamage = 0;   /* > 0 while the mod's own host.damage is in flight */
 
 static CEntity *local_player(void)
 {
@@ -124,19 +127,25 @@ static int host_position(int h, float *pos)
   pos[0] = v(1); pos[1] = v(2); pos[2] = v(3);
   return 1;
 }
-static void host_damage(int h, float amount)
+ static void host_damage(int h, float amount)
+ {
+   if (!host_alive(h)) return;
+   CEntity *pen = _apenHandles[h];
+   CEntity *penPlayer = local_player();
+   const FLOAT3D &v = pen->GetPlacement().pl_PositionVector;
+  _iInModDamage++;
+   pen->InflictDirectDamage(pen, penPlayer != NULL ? penPlayer : pen, DMT_BULLET, amount, v, FLOAT3D(0, 1, 0));
+  _iInModDamage--;
+ }
+static void host_release(int h)
 {
-  if (!host_alive(h)) return;
-  CEntity *pen = _apenHandles[h];
-  CEntity *penPlayer = local_player();
-  const FLOAT3D &v = pen->GetPlacement().pl_PositionVector;
-  pen->InflictDirectDamage(pen, penPlayer != NULL ? penPlayer : pen, DMT_BULLET, amount, v, FLOAT3D(0, 1, 0));
+  if (h > 0 && h < MAX_HANDLES && _apenHandles[h] != NULL) _mapHandleOf.erase(_apenHandles[h]->en_ulID);
+  if (h > 0 && h < MAX_HANDLES) _apenHandles[h] = NULL;
 }
-static void host_release(int h) { if (h > 0 && h < MAX_HANDLES) _apenHandles[h] = NULL; }
 /* ---- API 4: gameplay toolkit ---- */
 static int new_handle(CEntity *pen)
 {
-  for (int h = 1; h < MAX_HANDLES; h++) if (_apenHandles[h] == NULL) { _apenHandles[h] = pen; return h; }
+  for (int h = 1; h < MAX_HANDLES; h++) if (_apenHandles[h] == NULL) { _apenHandles[h] = pen; _mapHandleOf[pen->en_ulID] = h; return h; }
   return 0;
 }
 static int free_handles(void) { int n = 0; for (int h = 1; h < MAX_HANDLES; h++) n += _apenHandles[h] == NULL; return n; }
@@ -195,8 +204,9 @@ static void host_set_position(int h, const float *pos)
 static void host_destroy(int h)
 {
   if (!handle_ok(h)) return;
-  if (!(_apenHandles[h]->GetFlags() & ENF_DELETED)) _apenHandles[h]->Destroy();
-  _apenHandles[h] = NULL;
+   if (!(_apenHandles[h]->GetFlags() & ENF_DELETED)) _apenHandles[h]->Destroy();
+  _mapHandleOf.erase(_apenHandles[h]->en_ulID);
+   _apenHandles[h] = NULL;
 }
 static int host_weapon(void) { return SE1ModEnt_Weapon(local_player()); }
 static int host_weapons_owned(void) { return SE1ModEnt_WeaponsOwned(local_player()); }
@@ -316,3 +326,13 @@ void SE1Mod_Init(void)
 void SE1Mod_Frame(void) { if (_bModReady) se1mod_frame(_pTimer->GetHighPrecisionTimer().GetSeconds()); }
 void SE1Mod_LevelStarted(const char *strWorld) { if (_bModReady) se1mod_level_started(strWorld); }
 void SE1Mod_Shutdown(void) { if (_bModReady) se1mod_shutdown(); _bModReady = FALSE; }
+
+/* Damage hook (API v5): ask the mod to scale the damage before it is applied. */
+FLOAT SE1Mod_Damage(CEntity *penTarget, CEntity *penInflictor, INDEX iDmt, FLOAT fAmount)
+{
+  if (!_bModReady || penTarget == NULL) return fAmount;
+  int src = _iInModDamage > 0 ? 2 : (penInflictor != NULL && penInflictor == local_player() ? 1 : 0);
+  std::unordered_map<ULONG, int>::const_iterator it = _mapHandleOf.find(penTarget->en_ulID);
+  int h = it == _mapHandleOf.end() ? 0 : it->second;
+  return se1mod_damage(h, src, (int)iDmt, fAmount);
+}

@@ -142,6 +142,8 @@ if(SE1_RUSTMOD)
       COMMENT "cargo build se1-mod (wasm32-unknown-emscripten)")
   endif()
   target_compile_definitions(engine PRIVATE SE1_WITH_RUSTMOD=1)
+  # Entity.cpp (the damage hook, API v5) is built in engine_safemath, not engine
+  target_compile_definitions(engine_safemath PRIVATE SE1_WITH_RUSTMOD=1)
   target_include_directories(engine PRIVATE "${ROOT}/port/common")
 endif()
 
