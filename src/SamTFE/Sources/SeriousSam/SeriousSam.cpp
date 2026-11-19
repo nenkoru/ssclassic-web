@@ -350,12 +350,25 @@ void UpdateInputEnabledState(void)
 }
 
 
+#ifdef SE1_WITH_RUSTMOD
+// Rust mod layer (port/common/Se1ModHost.cpp): its pause request and game-side actions
+extern int _iSE1ModPause;
+extern void (*_pSE1ModGameCall)(int what);
+static void SE1ModGameCall(int what)
+{
+  if (what == 1 && _pGame->gm_csComputerState != CS_OFF) _pGame->ComputerForceOff();
+}
+#endif
+
 // automaticaly manage pause toggling
 static void UpdatePauseState(void)
 {
   BOOL bShouldPause = (_gmRunningGameMode==GM_SINGLE_PLAYER) && (bMenuActive || 
                        _pGame->gm_csConsoleState ==CS_ON || _pGame->gm_csConsoleState ==CS_TURNINGON || _pGame->gm_csConsoleState ==CS_TURNINGOFF ||
                        _pGame->gm_csComputerState==CS_ON || _pGame->gm_csComputerState==CS_TURNINGON || _pGame->gm_csComputerState==CS_TURNINGOFF);
+#ifdef SE1_WITH_RUSTMOD
+  if (_gmRunningGameMode==GM_SINGLE_PLAYER && _iSE1ModPause) bShouldPause = TRUE;
+#endif
   _pNetwork->SetLocalPause(bShouldPause);
 }
 
@@ -797,6 +810,7 @@ BOOL Init( HINSTANCE hInstance, int nCmdShow, CTString strCmdLine)
   InitializeGame();
 #ifdef SE1_WITH_RUSTMOD
   { void SE1Mod_Init(void); SE1Mod_Init(); } // Rust mod layer (port/common/se1mod.h)
+  _pSE1ModGameCall = SE1ModGameCall;
 #endif
   _pNetwork->md_strGameID = sam_strGameName;
 

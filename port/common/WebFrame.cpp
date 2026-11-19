@@ -169,6 +169,9 @@ extern "C" void SE1_YieldToBrowser(void)
 {
   double now = emscripten_get_now();
   if (_resumed > 0) { _perfWork[_perfN & 65535] = (float)(now - _resumed); _perfN = _perfN + 1; }
+#ifdef SE1_WITH_RUSTMOD
+  SE1Mod_Frame();   /* the Rust mod layer's per-frame hook (as in the single-threaded build) */
+#endif
   start_main_thread_loop();
   if (_uncapped < 0) _uncapped = MAIN_THREAD_EM_ASM_INT({ return Module.se1Uncapped ? 1 : 0; });
   if (_uncapped) {

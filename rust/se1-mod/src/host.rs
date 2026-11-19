@@ -4,7 +4,7 @@ use std::ffi::{c_char, c_int, CStr, CString};
 
 use crate::config::CvarValue;
 
-pub const API_VERSION: u32 = 1;
+pub const API_VERSION: u32 = 2;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -19,6 +19,20 @@ pub struct SE1ModHost {
     pub set_index: Option<extern "C" fn(*const c_char, i32) -> c_int>,
     pub set_float: Option<extern "C" fn(*const c_char, f32) -> c_int>,
     pub set_string: Option<extern "C" fn(*const c_char, *const c_char) -> c_int>,
+    // API 2: gameplay (port/common/se1mod.h)
+    pub game_time: Option<extern "C" fn() -> f64>,
+    pub player: Option<extern "C" fn(*mut f32, *mut f32) -> c_int>,
+    pub player_heal: Option<extern "C" fn(f32, f32)>,
+    pub spawn: Option<extern "C" fn(*const c_char, *const f32) -> c_int>,
+    pub alive: Option<extern "C" fn(c_int) -> c_int>,
+    pub position: Option<extern "C" fn(c_int, *mut f32) -> c_int>,
+    pub damage: Option<extern "C" fn(c_int, f32)>,
+    pub release: Option<extern "C" fn(c_int)>,
+    pub set_pause: Option<extern "C" fn(c_int)>,
+    pub page_option: Option<extern "C" fn(*const c_char) -> f64>,
+    pub ui_post: Option<extern "C" fn(*const c_char)>,
+    pub ui_poll: Option<extern "C" fn() -> c_int>,
+    pub close_computer: Option<extern "C" fn()>,
 }
 
 pub struct Host {
@@ -89,6 +103,73 @@ impl Host {
         let f = self.raw.get_float?;
         let mut v = 0.0;
         (f(cstr(name).as_ptr(), &mut v) != 0).then_some(v)
+    }
+
+    // ---- API 2: gameplay ----
+    pub fn game_time(&self) -> f64 {
+        self.raw.game_time.map_or(0.0, |f| f())
+    }
+    /// Local player position (x, y, z; y is up) and health, if alive.
+    pub fn player(&self) -> Option<([f32; 3], f32)> {
+        let f = self.raw.player?;
+        let (mut p, mut h) = ([0f32; 3], 0f32);
+        (f(p.as_mut_ptr(), &mut h) != 0).then_some((p, h))
+    }
+    pub fn player_heal(&self, amount: f32, max: f32) {
+        if let Some(f) = self.raw.player_heal {
+            f(amount, max)
+        }
+    }
+    /// Spawn an entity class at a position; returns a handle.
+    pub fn spawn(&self, class_file: &str, pos: [f32; 3]) -> Option<i32> {
+        let f = self.raw.spawn?;
+        let h = f(cstr(class_file).as_ptr(), pos.as_ptr());
+        (h > 0).then_some(h)
+    }
+    pub fn alive(&self, h: i32) -> bool {
+        self.raw.alive.map_or(false, |f| f(h) != 0)
+    }
+    pub fn position(&self, h: i32) -> Option<[f32; 3]> {
+        let f = self.raw.position?;
+        let mut p = [0f32; 3];
+        (f(h, p.as_mut_ptr()) != 0).then_some(p)
+    }
+    pub fn damage(&self, h: i32, amount: f32) {
+        if let Some(f) = self.raw.damage {
+            f(h, amount)
+        }
+    }
+    pub fn release(&self, h: i32) {
+        if let Some(f) = self.raw.release {
+            f(h)
+        }
+    }
+    pub fn set_pause(&self, on: bool) {
+        if let Some(f) = self.raw.set_pause {
+            f(on as c_int)
+        }
+    }
+    /// A numeric page option (`Module[name]` on the web page), 0 if unset.
+    pub fn page_option(&self, name: &str) -> f64 {
+        self.raw.page_option.map_or(0.0, |f| f(cstr(name).as_ptr()))
+    }
+    /// Post a JSON message to the page overlay (`Module.se1ModUi`).
+    pub fn ui_post(&self, json: &str) {
+        if let Some(f) = self.raw.ui_post {
+            f(cstr(json).as_ptr())
+        }
+    }
+    /// Close the in-game computer (NETRICSA) if it is open.
+    pub fn close_computer(&self) {
+        if let Some(f) = self.raw.close_computer {
+            f()
+        }
+    }
+
+    /// A value the page sent back, if any.
+    pub fn ui_poll(&self) -> Option<i32> {
+        let v = self.raw.ui_poll.map_or(-1, |f| f());
+        (v >= 0).then_some(v)
     }
 
     /// Set a console variable, coercing between INDEX and FLOAT the way the shell would.

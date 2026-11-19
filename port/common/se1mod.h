@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-#define SE1MOD_API_VERSION 1
+#define SE1MOD_API_VERSION 2
 
 typedef struct SE1ModHost {
   uint32_t api_version;   /* SE1MOD_API_VERSION */
@@ -33,6 +33,32 @@ typedef struct SE1ModHost {
   int (*set_index)(const char *name, int32_t value);
   int (*set_float)(const char *name, float value);
   int (*set_string)(const char *name, const char *value);
+
+  /* ---- API 2: gameplay (single-player local world) ---- */
+  /* simulation time in seconds (stops while paused) */
+  double (*game_time)(void);
+  /* local player: position (x, y, z; y is up) and health; returns 0 if there is no live player */
+  int (*player)(float *pos3, float *health);
+  /* add health to the local player, never above `max` */
+  void (*player_heal)(float amount, float max);
+  /* spawn an entity class (e.g. "Classes\\Boneman.ecl") at a position; returns a handle > 0, or 0 */
+  int (*spawn)(const char *class_file, const float *pos3);
+  /* handle state: 1 alive, 0 dead or gone; position of a live handle */
+  int (*alive)(int handle);
+  int (*position)(int handle, float *pos3);
+  /* damage a handle's entity as if the local player hit it */
+  void (*damage)(int handle, float amount);
+  /* forget a handle (frees the slot) */
+  void (*release)(int handle);
+  /* pause / unpause the local game */
+  void (*set_pause)(int on);
+  /* web page: read a numeric page option (Module[name], 0 if unset); post a JSON message to the page
+     overlay (Module.se1ModUi); poll a value the page sent back (-1 if none) */
+  double (*page_option)(const char *name);
+  void (*ui_post)(const char *json);
+  int (*ui_poll)(void);
+  /* close the in-game computer (NETRICSA) if it is open */
+  void (*close_computer)(void);
 } SE1ModHost;
 
 /* called once after the engine and game library are initialized; returns 0 on success */
