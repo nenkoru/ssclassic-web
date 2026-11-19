@@ -38,6 +38,15 @@ void SE1_ApplyWebStartup(void)   /* C++ linkage: declared in SeriousSam.cpp */
     _pShell->SetINDEX("sam_iScreenSizeJ", h);
     CPrintF("web: start resolution %dx%d (?res=)\n", w, h);
   }
+  /* ?room= (virtual LAN multiplayer, port/web/net.js): a fresh visit has no saved connection preset,
+     and the game would stop at the "choose your connection" screen before joining. Use the fastest
+     preset; the LAN switch is a fast local-like link. */
+  int inRoom = MAIN_THREAD_EM_ASM_INT({ return Module.se1Net ? 1 : 0; });
+  if (inRoom && _pShell->GetString("sam_strNetworkSettings") == "") {
+    _pShell->Execute("sam_strNetworkSettings = \"Scripts\\NetSettings\\5mb-Fiber.ini\";");
+    _pShell->Execute("include \"Scripts\\NetSettings\\5mb-Fiber.ini\";");
+    CPrintF("web: virtual LAN room, connection preset 5mb-Fiber\n");
+  }
 }
 
 #ifndef SE1_THREADS

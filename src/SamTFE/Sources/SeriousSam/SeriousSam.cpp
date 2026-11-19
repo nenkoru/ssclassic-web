@@ -86,6 +86,9 @@ extern FLOAT _fNoDownStartJ;
 extern FLOAT _fNoSizeJ;
 
 // application state variables
+#ifdef __EMSCRIPTEN__
+extern "C" int SE1_NetLan_IpLow(void);   // port/common/NetLan.c
+#endif
 __extern BOOL _bRunning = TRUE;
 __extern BOOL _bQuitScreen = TRUE;
 __extern BOOL bMenuActive = FALSE;
@@ -876,6 +879,23 @@ BOOL Init( HINSTANCE hInstance, int nCmdShow, CTString strCmdLine)
     _pShell->SetString("net_strConnectPassword", cmd_strPassword);
   }
 
+#ifdef __EMSCRIPTEN__
+  // web virtual LAN (port/common/NetLan.c): every fresh browser starts from the same default player
+  // profiles, same name and GUID, and the host refuses a second "Serious Sam" with that GUID.
+  // Make this browser's players unique: its virtual address goes into the GUID and default name.
+  {
+    const int iLow = SE1_NetLan_IpLow();
+    if (iLow > 0) {
+      for (INDEX iPlayer = 0; iPlayer < 8; iPlayer++) {
+        CPlayerCharacter &pc = _pGame->gm_apcPlayers[iPlayer];
+        pc.pc_aubGUID[0] = 0x5E; pc.pc_aubGUID[1] = 0x77; pc.pc_aubGUID[2] = (UBYTE)iLow; pc.pc_aubGUID[3] = (UBYTE)iPlayer;
+        if (pc.pc_strName == "" || pc.pc_strName == "Serious Sam" || pc.pc_strName == "^oSerious Sam^r") {
+          pc.pc_strName.PrintF("Sam %d", iLow);
+        }
+      }
+    }
+  }
+#endif
   // if connecting to server from command line
   if (cmd_strServer!="") {
     CTString strPort = "";

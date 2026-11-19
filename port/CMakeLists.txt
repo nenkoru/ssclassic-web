@@ -103,7 +103,7 @@ list(FILTER S_ENGINE EXCLUDE REGEX "Engine/Base/Unix/UnixDynamicLoader\\.cpp$")
 if(SE1_THREADS)
   list(APPEND S_ENGINE "${ROOT}/port/common/SdlGlThreads.cpp")
 endif()
-list(APPEND S_ENGINE "${ROOT}/port/common/WebDynamicLoader.cpp" "${ROOT}/port/common/gl1shim.c" "${ROOT}/port/common/ShellCall.cpp" "${ROOT}/port/common/WebAudio.cpp" "${ROOT}/port/common/WebFrame.cpp" "${ROOT}/port/common/CaseFs.c" "${ROOT}/port/common/FastSort.c")
+list(APPEND S_ENGINE "${ROOT}/port/common/WebDynamicLoader.cpp" "${ROOT}/port/common/gl1shim.c" "${ROOT}/port/common/ShellCall.cpp" "${ROOT}/port/common/WebAudio.cpp" "${ROOT}/port/common/WebFrame.cpp" "${ROOT}/port/common/CaseFs.c" "${ROOT}/port/common/FastSort.c" "${ROOT}/port/common/NetLan.c")
 
 add_library(engine_safemath STATIC ${S_SAFEMATH})
 target_compile_options(engine_safemath PRIVATE -fno-unsafe-math-optimizations)
@@ -155,11 +155,12 @@ target_link_options(serioussam PRIVATE
   $<$<BOOL:${SE1_DEV}>:-sASSERTIONS=1>
   $<$<OR:$<BOOL:${SE1_DEV}>,$<BOOL:${SE1_PROFILE}>>:--profiling-funcs>
   "$<$<BOOL:${SE1_THREADS}>:SHELL:--pre-js ${ROOT}/port/web/isolate.js>"
-  "SHELL:--pre-js ${ROOT}/port/web/pre.js" "SHELL:--pre-js ${ROOT}/port/web/audio.js" "SHELL:--pre-js ${ROOT}/port/web/gfx.js" "SHELL:--pre-js ${ROOT}/port/web/gfx-webgpu.js" "SHELL:--post-js ${ROOT}/port/web/bench.js"
+  "SHELL:--pre-js ${ROOT}/port/web/pre.js" "SHELL:--pre-js ${ROOT}/port/web/audio.js" "SHELL:--pre-js ${ROOT}/port/web/gfx.js" "SHELL:--pre-js ${ROOT}/port/web/gfx-webgpu.js" "SHELL:--pre-js ${ROOT}/port/web/net.js" "SHELL:--post-js ${ROOT}/port/web/bench.js"
   # (SHELL: keeps each flag with its argument; target_link_options would de-duplicate "--pre-js")
   -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=256MB -sSTACK_SIZE=4MB
   -Wl,--wrap=fopen -Wl,--wrap=open -Wl,--wrap=opendir   # case-insensitive opens (port/common/CaseFs.c)
   -Wl,--wrap=qsort   # introsort instead of musl's smoothsort (port/common/FastSort.c)
+  -Wl,--wrap=socket -Wl,--wrap=bind -Wl,--wrap=sendto -Wl,--wrap=recvfrom -Wl,--wrap=fcntl -Wl,--wrap=close -Wl,--wrap=gethostname -Wl,--wrap=gethostbyname   # virtual LAN (port/common/NetLan.c)
   -sFULL_ES3=1 -sMAX_WEBGL_VERSION=2 -sMIN_WEBGL_VERSION=2
   $<IF:$<BOOL:${SE1_THREADS}>,-sPROXY_TO_PTHREAD,-sJSPI=1>
   $<$<BOOL:${SE1_THREADS}>:-sPTHREAD_POOL_SIZE=4>
@@ -180,4 +181,4 @@ if(SE1_THREADS)
 endif()
 # --pre-js/--post-js files are link inputs: relink when they change
 set_property(TARGET serioussam APPEND PROPERTY LINK_DEPENDS
-  "${ROOT}/port/web/pre.js" "${ROOT}/port/web/audio.js" "${ROOT}/port/web/gfx.js" "${ROOT}/port/web/gfx-webgpu.js" "${ROOT}/port/web/bench.js")
+  "${ROOT}/port/web/pre.js" "${ROOT}/port/web/audio.js" "${ROOT}/port/web/gfx.js" "${ROOT}/port/web/gfx-webgpu.js" "${ROOT}/port/web/net.js" "${ROOT}/port/web/bench.js")
