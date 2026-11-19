@@ -102,17 +102,28 @@
   }
 
   // ------------------------------------------------------------------ fire (mouse button)
+  // a tap shorter than an engine frame can fall between two input reads: fire stays down >= 60 ms.
+  // A new press while that delayed release is pending just keeps the button down.
+  var firedAt = 0, upTimer = 0;
   function mouseDown() {
     var c = Module.canvas;
     if (!c) return;
+    if (upTimer) { clearTimeout(upTimer); upTimer = 0; return; }   // still down from the last tap
+    firedAt = performance.now();
     c.dispatchEvent(new MouseEvent('mousedown',
       { bubbles: true, button: 0, buttons: 1, clientX: c.clientWidth / 2, clientY: c.clientHeight / 2 }));
   }
-  function mouseUp() {
+  function mouseUpNow() {
     var c = Module.canvas;
     if (!c) return;
     c.dispatchEvent(new MouseEvent('mouseup',
       { bubbles: true, button: 0, buttons: 0, clientX: c.clientWidth / 2, clientY: c.clientHeight / 2 }));
+  }
+  function mouseUp() {
+    var wait = 60 - (performance.now() - firedAt);
+    if (upTimer) return;
+    if (wait > 0) upTimer = setTimeout(function () { upTimer = 0; mouseUpNow(); }, wait);
+    else mouseUpNow();
   }
 
   // ------------------------------------------------------------------ touch routing

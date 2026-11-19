@@ -130,6 +130,26 @@ try {
   await sleep(200);
   s = await st();
   check('button RT maps to fire', rtDown && saw(s, 'mu', 0), `md ${rtDown}, mu ${saw(s, 'mu', 0)}`);
+  // a slow pull: the browser's "pressed" flips at a low value first, the value crosses ours later
+  await resetEv();
+  await setPad(`window.__pad.buttons[7].pressed = true; window.__pad.buttons[7].value = 0.15;`);
+  await sleep(150);
+  await setPad(`window.__pad.buttons[7].value = 0.8;`);
+  await sleep(200);
+  s = await st();
+  const slowDown = saw(s, 'md', 0);
+  await setPad(`window.__pad.buttons[7].pressed = false; window.__pad.buttons[7].value = 0;`);
+  await sleep(200);
+  check('slow trigger pull fires', slowDown, `md ${slowDown}`);
+  // a very quick tap: pressed and released within one poll; the shot must still be held >= 50 ms
+  await resetEv();
+  await ev(`window.__mt = []; Module.canvas.addEventListener('mousedown', () => window.__mt.push(['d', performance.now()])); Module.canvas.addEventListener('mouseup', () => window.__mt.push(['u', performance.now()])); 1`);
+  await setPad(`window.__pad.buttons[7].pressed = true; window.__pad.buttons[7].value = 1; setTimeout(() => { window.__pad.buttons[7].pressed = false; window.__pad.buttons[7].value = 0; }, 20);`);
+  await sleep(400);
+  const mt = await ev(`JSON.stringify(window.__mt)`);
+  const ts = JSON.parse(mt || '[]'), d0 = ts.find((x) => x[0] === 'd'), u0 = ts.find((x) => x[0] === 'u');
+  const held = d0 && u0 ? Math.round(u0[1] - d0[1]) : -1;
+  check('quick trigger tap is held long enough', held >= 50, `held ${held} ms`);
   // RB -> wheel deltaY > 0
   await resetEv();
   await setPad(`window.__pad.buttons[5].pressed = true; window.__pad.buttons[5].value = 1;`);
@@ -198,12 +218,20 @@ try {
     let aMin = a0, aLast = a0;
     for (let i = 0; i < 15; i++) { await sleep(100); aLast = await aim(); if (aLast >= 0 && (aMin < 0 || aLast < aMin)) aMin = aLast; }
     const y1 = (await st()).hud?.yaw;
-    return { y0, y1, dyaw: y0 != null && y1 != null ? yawDelta(y0, y1) : 999, a0, a1: aLast, aMin };
+    // fire for 0.5 s (the stick nudge keeps the pad "in use"): the engine reports the bullet radius
+    await ev('Module._SE1_AimRayDebug && Module._SE1_AimRayDebug(); 1');
+    await setPad(`window.__pad.axes[2] = 0.2; window.__pad.buttons[7].pressed = true; window.__pad.buttons[7].value = 1;`);
+    await sleep(500);
+    const rayR = await ev('Module._SE1_AimRayDebug ? Module._SE1_AimRayDebug() : -2');
+    await setPad(`window.__pad.axes[2] = 0; window.__pad.buttons[7].pressed = false; window.__pad.buttons[7].value = 0;`);
+    return { y0, y1, dyaw: y0 != null && y1 != null ? yawDelta(y0, y1) : 999, a0, a1: aLast, aMin, rayR };
   };
   const off = await aimRun(0);
   check('aim assist off does not pull', off.dyaw < 2 && off.a0 === -1 && off.aMin === -1,
     `yaw ${off.y0} -> ${off.y1}, target angle ${off.a0} -> ${off.a1}`);
+  check('bullets not widened when assist is off', off.rayR === -1, `bullet radius ${off.rayR}`);
   const high = await aimRun(3);
+  check('bullets widened on high', high.rayR >= 0.55, `bullet radius ${high.rayR} m (co-op base 0.1 or single 0.3, +0.5 on high)`);
   check('aim assist high pulls toward a target', high.a0 > 0 && high.aMin >= 0 && (high.aMin < high.a0 * 0.5 || high.aMin < 1.0),
     `yaw ${high.y0} -> ${high.y1}, target angle ${high.a0} -> min ${high.aMin} (degrees)`);
 } catch (e) {

@@ -62,11 +62,23 @@
   }
 
   var MOUSE_BUTTONS = { 0: 1, 1: 4, 2: 2 };
+  // a press shorter than an engine frame can fall between two input reads and never fire:
+  // every mouse press stays down at least MIN_PRESS_MS
+  var MIN_PRESS_MS = 60, pressedAt = {}, releaseTimer = {};
   function setMouse(btn, on) {
     var k = 'm' + btn;
-    if (on && !held[k]) { held[k] = 1; mouse(btn, MOUSE_BUTTONS[btn], true); }
-    else if (!on && held[k]) { held[k] = 0; mouse(btn, 0, false); }
+    if (on) {
+      if (releaseTimer[k]) { clearTimeout(releaseTimer[k]); releaseTimer[k] = 0; }   // pressed again before the delayed release
+      if (!held[k]) { held[k] = 1; pressedAt[k] = performance.now(); mouse(btn, MOUSE_BUTTONS[btn], true); }
+    } else if (held[k] && !releaseTimer[k]) {
+      var wait = MIN_PRESS_MS - (performance.now() - pressedAt[k]);
+      var up = function () { releaseTimer[k] = 0; if (held[k]) { held[k] = 0; mouse(btn, 0, false); } };
+      if (wait > 0) releaseTimer[k] = setTimeout(up, wait); else up();
+    }
   }
+  // analog triggers: read the value every frame (the browser's "pressed" flag flips at its own
+  // low threshold, so an edge-only check missed pulls that crossed ours a frame later)
+  function trigger(b) { return b ? (typeof b.value === 'number' ? b.value : (b.pressed ? 1 : 0)) : 0; }
 
   function releaseAll() {
     for (var c in held) {
@@ -131,8 +143,7 @@
     3: function (down) { setMouse(1, down); },                                  // Y: flip weapon
     4: function (down) { if (down) wheel(-100); },                              // LB: prev weapon
     5: function (down) { if (down) wheel(100); },                               // RB: next weapon
-    6: function (down) { setKey('ShiftLeft', down); },                          // LT: walk
-    7: function (down, v) { setMouse(0, v > 0.4); },                            // RT: fire
+    // 6 LT (walk) and 7 RT (fire) are analog: handled every frame in tick(), not here
     8: function (down) { if (down) cycleAssist(); },                            // Back/Select/Share
     9: function (down) { if (down) tap('Escape'); },                            // Start
     10: function (down) { if (down) tap('CapsLock'); },                         // left stick click: walk toggle
@@ -203,6 +214,10 @@
         if (dx || dy) {
           try { if (Module._SE1_PadLook) Module._SE1_PadLook(dx, dy); } catch (e) {}
         }
+
+        // triggers, every frame: RT fires above 0.3, LT walks above 0.3
+        setMouse(0, trigger(buttons[7]) > 0.3);
+        setKey('ShiftLeft', trigger(buttons[6]) > 0.3);
 
         // buttons
         for (var b = 0; b < buttons.length && b < 16; b++) {
