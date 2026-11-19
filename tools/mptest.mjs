@@ -12,10 +12,9 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CHROME, gpuFlags, EXTRA_FLAGS, TIMEOUT_SCALE } from './chrome.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const CHROME = process.env.CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const ANGLE = process.env.SE1_ANGLE || (process.platform === 'darwin' ? 'metal' : 'swiftshader');
 const [url, level = 'Levels/KarnakDemo.wld', outdir = join(tmpdir(), 'se1-mp')] = process.argv.slice(2);
 if (!url) { console.error('usage: mptest.mjs <url> [level] [outdir]'); process.exit(2); }
 mkdirSync(outdir, { recursive: true });
@@ -31,11 +30,11 @@ const procs = [sw];
 async function browser(tag, pageUrl) {
   const port = 9750 + Math.floor(Math.random() * 200);
   const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), 'se1mp-'))}`,
-    '--mute-audio', `--use-angle=${ANGLE}`, '--enable-gpu', '--window-size=1100,1000', '--no-first-run',
+    '--mute-audio', ...gpuFlags(), ...EXTRA_FLAGS, '--window-size=1100,1000', '--no-first-run',
     '--disable-background-timer-throttling', '--disable-renderer-backgrounding', 'about:blank'], { stdio: 'ignore' });
   procs.push(chrome);
   let ws;
-  for (let t = 0; t < 50 && !ws; t++) {
+  for (let t = 0; t < 50 * TIMEOUT_SCALE && !ws; t++) {
     try { const l = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json(); const p = l.find((x) => x.type === 'page'); if (p) ws = new WebSocket(p.webSocketDebuggerUrl); }
     catch { await sleep(200); }
   }
@@ -60,11 +59,11 @@ try {
   const net = `ws://127.0.0.1:${swPort}`;
   const sep = url.includes('?') ? '&' : '?';
   const host = await browser('host', `${url}${sep}mute=1&room=${room}&host=1&level=${encodeURIComponent(level)}&net=${encodeURIComponent(net)}`);
-  await sleep(8000);   // host loads the level and starts the server first
+  await sleep(8000 * TIMEOUT_SCALE);   // host loads the level and starts the server first
   const client = await browser('client', `${url}${sep}mute=1&room=${room}&net=${encodeURIComponent(net)}`);
   const stat = (b) => b.ev('JSON.stringify({ip: Module.se1Net && Module.se1Net.ip, sent: Module.se1Net && Module.se1Net.sent, recv: Module.se1Net && Module.se1Net.recv, err: Module.se1Net && Module.se1Net.error, frames: Module.se1Perf ? Module.se1Perf.n : -1})');
   let h = {}, c = {};
-  for (let t = 0; t < 90; t++) {   // up to 90 s: both load the level, client connects
+  for (let t = 0; t < 90 * TIMEOUT_SCALE; t++) {   // up to 90 s: both load the level, client connects
     await sleep(1000);
     h = JSON.parse((await stat(host)) || '{}'); c = JSON.parse((await stat(client)) || '{}');
     if (h.recv > 50 && c.recv > 50 && c.frames > 300) break;

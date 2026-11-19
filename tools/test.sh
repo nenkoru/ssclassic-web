@@ -9,10 +9,12 @@
 # data (tools/fetch_demo_data.sh). Build dirs given as arguments are used as they are.
 # Then, for each build, behind its own tools/devserver.py:
 #   - flowtest:     tools/flowtest.mjs (intro runs, a click starts a demo, Escape opens the menu)
+#   - survivors:    tools/svtest.mjs (?mode=survivors: level-up offer, pause, upgrade, spawns)
 #   - determinism:  two visual-regression captures (bench.mjs --shots) must match within a tight
 #                   tolerance (SE1_SHOTDIFF_ARGS; a few muzzle-flash/flame pixels vary run to run)
 #   - timedemo:     one timedemo run completes, no frame over SE1_MAX_FRAME_MS (no fps assertion)
-# plus the unit tests (tests/run.sh). Prints a PASS/FAIL/SKIP summary; exit code 1 on any failure.
+# plus a two-browser co-op test on the threaded build (tools/mptest.mjs; needs cargo for the LAN
+# switch, otherwise skipped) and the unit tests (tests/run.sh). Prints a PASS/FAIL/SKIP summary; exit code 1 on any failure.
 #
 # Options:
 #   --build-only   only build (and bootstrap) the default build dirs, run no tests
@@ -170,6 +172,10 @@ for b in $NAMES; do
   if logged "flow-$b" node tools/flowtest.mjs "$url" "$OUT/flow-$b"; then result PASS "$b flow test" "intro, click into a demo, Escape to menu"
   else result FAIL "$b flow test" "see $OUT/flow-$b.log"; fi
 
+  step "$b: survivors"
+  if logged "sv-$b" node tools/svtest.mjs "$url" "$OUT/sv-$b"; then result PASS "$b survivors" "level-up offer, pause, upgrade, spawns"
+  else result FAIL "$b survivors" "see $OUT/sv-$b.log"; fi
+
   step "$b: capture determinism"
   ok=1
   logged "shots-$b-a" node tools/bench.mjs "$url" --shots "$b-a" || ok=0
@@ -204,6 +210,15 @@ EOF
     result FAIL "$b timedemo" "did not complete (see $OUT/timedemo-$b.log)"
   fi
 done
+
+# ---------------------------------------------------------------- multiplayer (two browsers)
+step "multiplayer"
+if [ ! -x rust/target/release/se1-server ] && command -v cargo >/dev/null 2>&1; then
+  logged build-se1-server bash -c 'cd rust && cargo build -p se1-server --release' || true
+fi
+if [ ! -x rust/target/release/se1-server ]; then result SKIP "multiplayer" "no switch binary (cargo build -p se1-server --release)"
+elif logged mp node tools/mptest.mjs "$(url_of mt)" Levels/KarnakDemo.wld; then result PASS "multiplayer" "host + client over the LAN switch"
+else result FAIL "multiplayer" "see $OUT/mp.log"; fi
 
 # ---------------------------------------------------------------- optional extras
 if [ $WEBGPU = 1 ]; then
