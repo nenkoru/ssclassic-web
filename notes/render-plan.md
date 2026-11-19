@@ -389,3 +389,27 @@ phase must also pass the visual regression test from phase 0 before it lands.
   - Main-thread replay: 1.2 ms mean on the phone.
 - Spinning keeps a core busy while waiting for vsync. That costs power, and it's only used when a
   frame takes over a third of the budget.
+
+### Throttled phone (Mi 8 SE)
+- DevTools CPU throttling on Android slows only the page's main thread, not the engine worker
+  (worker stays at ~4.5 ms at 2×/3×/4×; replay goes 1.2 → 3.6 ms). Use the root options instead:
+  - `--android-cap <kHz>` caps every CPU frequency domain for the run and restores the hardware
+    maximum on exit;
+  - `--android-cores <mask>` pins Chrome's renderer and GPU processes, and gives all cores back on
+    exit. (Without that restore, an earlier pin outlived the run and skewed two later runs.)
+- bench.ini now uses `sam_iVideoSetup = 3` (custom; no per-GPU preset). That gives the same settings
+  on every device, and avoids the first-mode texture reload after the demo starts. Its stall plus
+  demo-clock catch-up shrank capped runs' measured windows to 0.8–7 s; now ~12–14 s. The Mac
+  timedemo is unchanged (3038 fps).
+- Results, paced:
+  - full speed: 59.7 fps, worker p50 6.1 ms, 0 frames over budget;
+  - capped at 1.2 GHz (budget-phone class): 54–58 fps, p50 7.5–8.4 ms, 4–43 frames over 16.7 ms;
+  - first pass with the old preset and windows: 1.5 GHz 47 fps / 13 ms; 1.0 GHz 31 fps / 22 ms.
+- Run-to-run noise on the phone is large: the same setting gave 7.9 and 14.3 ms p50. The scheduler
+  moves the worker between core types, so phone decisions need several runs.
+- The engine resolution barely matters on the phone at 1.2 GHz (1024×768, 800×600, 640×480 all
+  ~7.5–8 ms p50): visibility there isn't scanline-bound.
+- Worker profile at 1.2 GHz (real work, spin excluded): visibility (ScanOneLine, AddActiveSector,
+  MakeSpan) ~25%, models (RenderModel, UnpackFrame, …) ~12%, put_vertices 4%, sound timer 2.5%,
+  runtime mipmap filtering 1.5%.
+- The spin loop called the clock (a JS call) on every iteration; it now checks every 1024.

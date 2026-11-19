@@ -11,6 +11,13 @@
 // `adb connect <ip>`): DevTools is forwarded with `adb forward`, and the page's port is mapped back
 // to this Mac with `adb reverse`, so the phone loads http://127.0.0.1:<port> (a secure context).
 // Set ADB_SERIAL to pick a device when several are attached.
+// --android-cores <hexmask> (rooted phones): pin Chrome's renderer and GPU processes to those CPU
+// cores, e.g. 3f = the six little cores of a Snapdragon 710: a rough budget-phone stand-in. (DevTools
+// CPU throttling on Android slows only the page's main thread, not the engine worker.) The pinning
+// ends when Chrome restarts.
+// --android-cap <kHz> (rooted phones): cap every CPU frequency domain (the whole phone) to the
+// highest available frequency <= kHz for the run; each domain is set back to its hardware maximum on
+// exit, also when the run fails.
 // --cpu-throttle <N> slows the page's CPU N times (DevTools CPU throttling, applies to workers
 // too): with --software-gl --vsync, a rough "potato device" (e.g. --cpu-throttle 4).
 import { spawn, execFileSync } from 'node:child_process';
@@ -31,7 +38,11 @@ const shotsIdx = args.indexOf('--shots');
 const shotsLabel = shotsIdx >= 0 ? args[shotsIdx + 1] : null;
 const thrIdx = args.indexOf('--cpu-throttle');
 const cpuThrottle = thrIdx >= 0 ? Number(args[thrIdx + 1]) : 0;
-const pos = args.filter((a, i) => !a.startsWith('--') && !(shotsIdx >= 0 && i === shotsIdx + 1) && !(thrIdx >= 0 && i === thrIdx + 1));
+const capIdx = args.indexOf('--android-cap');
+const androidCap = capIdx >= 0 ? Number(args[capIdx + 1]) : 0;
+const coresIdx = args.indexOf('--android-cores');
+const androidCores = coresIdx >= 0 ? args[coresIdx + 1] : null;
+const pos = args.filter((a, i) => !a.startsWith('--') && !(shotsIdx >= 0 && i === shotsIdx + 1) && !(thrIdx >= 0 && i === thrIdx + 1) && !(coresIdx >= 0 && i === coresIdx + 1) && !(capIdx >= 0 && i === capIdx + 1));
 const base = pos[0];
 const runs = Number(pos[1] || 3);
 if (!base) { console.error('usage: bench.mjs <url> [runs] [--software-gl]'); process.exit(2); }
@@ -57,6 +68,30 @@ if (android) {
   const keepAwake = () => { try { adb('shell', 'input keyevent KEYCODE_WAKEUP; input keyevent KEYCODE_UNKNOWN'); } catch {} };
   keepAwake();
   setInterval(keepAwake, 10000).unref();
+  if (androidCap) {
+    const P = '/sys/devices/system/cpu/cpufreq';
+    // per policy: highest available frequency <= cap (or its lowest), applied as scaling_max_freq
+    const cmd = `for d in ${P}/policy*; do f=$(for x in $(cat $d/scaling_available_frequencies); do [ $x -le ${androidCap} ] && echo $x; done | tail -1); ` +
+                `[ -z "$f" ] && f=$(cat $d/scaling_available_frequencies | cut -d" " -f1); echo $f > $d/scaling_max_freq; echo $(basename $d)=$(cat $d/scaling_max_freq); done`;
+    androidInfo.cap = adb('shell', `su -c '${cmd}'`).split(/\s+/).join(' ');
+    const restore = () => { try { adb('shell', `su -c 'for d in ${P}/policy*; do cat $d/cpuinfo_max_freq > $d/scaling_max_freq; done'`); } catch {} };
+    process.on('exit', restore);
+    process.on('SIGINT', () => process.exit(130)); process.on('SIGTERM', () => process.exit(143));
+  }
+  if (androidCores) {   // pin every Chrome renderer + GPU process (all threads) to the given cores
+    const pin = () => {
+      try {
+        adb('shell', `su -c 'for p in $(pidof com.android.chrome:privileged_process0) $(ps -A -o PID,NAME | grep sandboxed_process | cut -c1-6); do taskset -ap ${androidCores} $p >/dev/null 2>&1; done'`);
+      } catch {}
+    };
+    pin(); setInterval(pin, 2000).unref();
+    androidInfo.cores = androidCores;
+    // the pinning would outlive this run (until Chrome restarts): give all cores back on exit
+    process.on('exit', () => { try {
+      adb('shell', `su -c 'for p in $(pidof com.android.chrome:privileged_process0) $(ps -A -o PID,NAME | grep sandboxed_process | cut -c1-6); do taskset -ap ff $p >/dev/null 2>&1; done'`);
+    } catch {} });
+    process.on('SIGINT', () => process.exit(130)); process.on('SIGTERM', () => process.exit(143));
+  }
   // Chrome in front (its last tab; the benchmark brings its own tab forward too)
   try { adb('shell', 'am', 'start', '-n', 'com.android.chrome/com.google.android.apps.chrome.Main'); } catch {}
 }

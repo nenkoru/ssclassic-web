@@ -183,7 +183,8 @@ extern "C" void SE1_YieldToBrowser(void)
     int32_t seen = _vsyncTick;
     if (spinning) {   /* spin, but never long: a hidden tab only ticks every 100 ms */
       double t0 = emscripten_get_now();
-      while (emscripten_atomic_load_u32((void *)&_vsyncTick) == (uint32_t)seen && emscripten_get_now() - t0 < 20.0) {}
+      for (unsigned k = 1; emscripten_atomic_load_u32((void *)&_vsyncTick) == (uint32_t)seen; k++)
+        if (!(k & 1023) && emscripten_get_now() - t0 > 20.0) break;   /* clock reads are JS calls: rarely */
     }
     while (_vsyncTick == seen) emscripten_futex_wait((void *)&_vsyncTick, (uint32_t)seen, 100.0);
     double t = emscripten_get_now();
