@@ -164,7 +164,7 @@ target_link_options(serioussam PRIVATE
   "$<$<BOOL:${SE1_THREADS}>:SHELL:--pre-js ${ROOT}/port/web/isolate.js>"
   "SHELL:--pre-js ${ROOT}/port/web/pre.js" "SHELL:--pre-js ${ROOT}/port/web/audio.js" "SHELL:--pre-js ${ROOT}/port/web/gfx.js" "SHELL:--pre-js ${ROOT}/port/web/gfx-webgpu.js" "SHELL:--pre-js ${ROOT}/port/web/net.js" "SHELL:--pre-js ${ROOT}/port/web/lobby.js" "SHELL:--pre-js ${ROOT}/port/web/input.js" "SHELL:--pre-js ${ROOT}/port/web/touch.js" "SHELL:--pre-js ${ROOT}/port/web/gamepad.js" "SHELL:--pre-js ${ROOT}/port/web/survivors.js"
   "SHELL:--pre-js ${ROOT}/port/web/pre.js" "SHELL:--pre-js ${ROOT}/port/web/audio.js" "SHELL:--pre-js ${ROOT}/port/web/gfx.js" "SHELL:--pre-js ${ROOT}/port/web/gfx-webgpu.js" "SHELL:--pre-js ${ROOT}/port/web/net.js" "SHELL:--pre-js ${ROOT}/port/web/input.js" "SHELL:--pre-js ${ROOT}/port/web/survivors.js"
-  "SHELL:--pre-js ${ROOT}/port/web/persist.js"
+  "SHELL:--pre-js ${ROOT}/port/web/persist.js" "SHELL:--pre-js ${ROOT}/port/web/playtest.js"
   "SHELL:--shell-file ${ROOT}/port/web/shell.html" "SHELL:--post-js ${ROOT}/port/web/bench.js"
   # (SHELL: keeps each flag with its argument; target_link_options would de-duplicate "--pre-js")
   -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=256MB -sSTACK_SIZE=4MB
@@ -191,5 +191,5 @@ if(SE1_THREADS)
 endif()
 # --pre-js/--post-js files are link inputs: relink when they change
 set_property(TARGET serioussam APPEND PROPERTY LINK_DEPENDS
-  "${ROOT}/port/web/pre.js" "${ROOT}/port/web/audio.js" "${ROOT}/port/web/gfx.js" "${ROOT}/port/web/gfx-webgpu.js" "${ROOT}/port/web/net.js" "${ROOT}/port/web/lobby.js" "${ROOT}/port/web/input.js" "${ROOT}/port/web/touch.js" "${ROOT}/port/web/gamepad.js" "${ROOT}/port/web/survivors.js" "${ROOT}/port/web/persist.js" "${ROOT}/port/web/bench.js"
+  "${ROOT}/port/web/pre.js" "${ROOT}/port/web/audio.js" "${ROOT}/port/web/gfx.js" "${ROOT}/port/web/gfx-webgpu.js" "${ROOT}/port/web/net.js" "${ROOT}/port/web/lobby.js" "${ROOT}/port/web/input.js" "${ROOT}/port/web/touch.js" "${ROOT}/port/web/gamepad.js" "${ROOT}/port/web/survivors.js" "${ROOT}/port/web/persist.js" "${ROOT}/port/web/playtest.js" "${ROOT}/port/web/bench.js"
   "${ROOT}/port/web/shell.html")

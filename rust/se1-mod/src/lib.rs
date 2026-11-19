@@ -26,6 +26,10 @@ struct ModState {
     quality: Option<QualityState>,
     quality_last_tm: Option<f64>,
     quality_checked: bool,   // page option read once (it is a main-thread call in the threaded build)
+    // ?rec=1 (port/web/playtest.js): a once-per-second "tel" message for the playtest timeline
+    playtest: Option<bool>,
+    tel_t: f64,
+    world: String,
 }
 
 /// The auto quality controller plus the original cvar values it restores to.
@@ -138,6 +142,24 @@ fn quality_apply_level(host: &Host, orig: &HashMap<&'static str, CvarKind>, leve
     }
 }
 
+/// One playtest sample: game time, level, the local player's health, armor, weapon, ammo, position.
+fn post_telemetry(host: &Host, world: &str) {
+    let gt = host.game_time();
+    let (pos, hp) = match host.player() {
+        Some((p, h)) => (format!("[{:.1},{:.1},{:.1}]", p[0], p[1], p[2]), format!("{h:.0}")),
+        None => ("null".to_string(), "null".to_string()),
+    };
+    let armor = host.armor(0.0, 0.0); // add 0: reads it without changing it
+    let (ammo, _) = host.ammo();
+    let ammo: Vec<String> = ammo.iter().map(|a| a.to_string()).collect();
+    host.ui_post(&format!(
+        r#"{{"type":"tel","gt":{gt:.1},"world":"{}","hp":{hp},"armor":{armor:.0},"weapon":{},"ammo":[{}],"pos":{pos}}}"#,
+        world.replace('"', "'"),
+        host.weapon(),
+        ammo.join(",")
+    ));
+}
+
 /// Called once after engine + game init. Returns 0 on success.
 #[no_mangle]
 pub extern "C" fn se1mod_init(raw: *const SE1ModHost) -> c_int {
@@ -157,7 +179,7 @@ pub extern "C" fn se1mod_init(raw: *const SE1ModHost) -> c_int {
     apply_cvars(&host, &config.cvars);
     run_commands(&host, &config.startup.commands);
 
-    unsafe { STATE = Some(ModState { host, config, frames: 0, survivors: None, quality: None, quality_last_tm: None, quality_checked: false }) };
+    unsafe { STATE = Some(ModState { host, config, frames: 0, survivors: None, quality: None, quality_last_tm: None, quality_checked: false, playtest: None, tel_t: 0.0, world: String::new() }) };
     0
 }
 
@@ -176,6 +198,14 @@ pub extern "C" fn se1mod_frame(tm_real: f64) {
             st.quality = Some(QualityState { controller: quality::Controller::new(), orig: quality_originals(&st.host) });
             st.host.log("quality: auto (budget detection…)");
         }
+    }
+    // playtest telemetry (works in every mode; Survivors adds its own HUD messages on top)
+    if st.playtest.is_none() {
+        st.playtest = Some(st.host.page_option("se1PlaytestOn") > 0.0);
+    }
+    if st.playtest == Some(true) && tm_real - st.tel_t >= 1.0 {
+        st.tel_t = tm_real;
+        post_telemetry(&st.host, &st.world);
     }
     if let Some(q) = st.quality.as_mut() {
         if let Some(last) = st.quality_last_tm {
@@ -219,6 +249,10 @@ pub extern "C" fn se1mod_level_started(world_file: *const c_char) {
         unsafe { CStr::from_ptr(world_file) }.to_string_lossy().replace('\\', "/")
     };
     st.host.log(&format!("se1mod: level started: {world}"));
+    st.world = world.clone();
+    if st.playtest == Some(true) {
+        st.host.ui_post(&format!(r#"{{"type":"tel_level","world":"{}"}}"#, world.replace('"', "'")));
+    }
     run_commands(&st.host, &st.config.level.commands);
     // ?mode=survivors (port/web/survivors.js): run Serious Survivors in this level
     st.survivors = (st.host.page_option("se1Survivors") > 0.0).then(|| survivors::Survivors::new(&st.host));

@@ -156,7 +156,7 @@ trap cleanup EXIT
 trap 'cleanup; exit 130' INT TERM
 
 serve() {   # dir port [--no-isolate]
-  python3 tools/devserver.py --port "$2" ${3:-} --shots-dir "$OUT/shots" "$1" >"$OUT/devserver-$2.log" 2>&1 &
+  python3 tools/devserver.py --port "$2" ${3:-} --shots-dir "$OUT/shots" --playtests-dir "$OUT/playtests" "$1" >"$OUT/devserver-$2.log" 2>&1 &
   PIDS+=($!)
   for _ in $(seq 50); do
     curl -fsS -o /dev/null "http://127.0.0.1:$2/serioussam.html" 2>/dev/null && return 0
@@ -213,6 +213,10 @@ for b in $NAMES; do
   step "$b: damage hook"
   if logged "damage-$b" node tools/damagetest.mjs "$url"; then result PASS "$b damage hook" "player hits reach the mod and get the rank bonus"
   else result FAIL "$b damage hook" "see $OUT/damage-$b.log"; fi
+
+  step "$b: playtest recorder"
+  if logged "rec-$b" node tools/playtesttest.mjs "$url" "$OUT/playtests"; then result PASS "$b playtest recorder" "timeline, markers and survey reach the dev server"
+  else result FAIL "$b playtest recorder" "see $OUT/rec-$b.log"; fi
 
   if [ "$b" = mt ]; then   # threaded build only: the single-threaded build keeps these calls synchronous
     step "mt: shader programs"
