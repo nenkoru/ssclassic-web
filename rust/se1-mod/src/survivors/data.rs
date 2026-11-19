@@ -352,3 +352,301 @@ pub const HIT_PILL: i32 = 0;
 pub const HIT_SMALL: i32 = 1;
 pub const HIT_MEDIUM: i32 = 2;
 pub const HIT_SUPER: i32 = 4;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kinds_table() {
+        assert_eq!(KINDS.len(), 18, "expected 18 monster kinds");
+        assert_eq!(K_GOLEMB, KINDS.len() - 1, "K_GOLEMB must index the last kind");
+        for k in KINDS {
+            assert!(!k.name.is_empty(), "kind has empty name");
+            assert!(k.class.ends_with(".ecl"), "{} has non-.ecl class {}", k.name, k.class);
+            assert!(k.model.ends_with(".mdl"), "{} has non-.mdl model {}", k.name, k.model);
+            assert!(k.xp > 0.0, "{} has no xp", k.name);
+            assert!(k.score > 0, "{} has no score", k.name);
+        }
+        for i in 0..KINDS.len() {
+            for j in (i + 1)..KINDS.len() {
+                assert_ne!(KINDS[i].name, KINDS[j].name, "duplicate kind name {}", KINDS[i].name);
+            }
+        }
+    }
+
+    #[test]
+    fn fallbacks_use_demo_classes() {
+        const DEMO: [&str; 7] = [
+            "Classes\\Headman.ecl",
+            "Classes\\Boneman.ecl",
+            "Classes\\Eyeman.ecl",
+            "Classes\\Woman.ecl",
+            "Classes\\Werebull.ecl",
+            "Classes\\Walker.ecl",
+            "Classes\\Scorpman.ecl",
+        ];
+        for k in 0..KINDS.len() {
+            let f = fallback(k);
+            assert!(f < KINDS.len(), "fallback({k}) = {f} out of range");
+            assert!(
+                DEMO.contains(&KINDS[f].class),
+                "kind {} falls back to non-demo class {}",
+                KINDS[k].name,
+                KINDS[f].class
+            );
+        }
+        assert_eq!(fallback(K_HOPPER), K_FIRE, "Hopper must fall back to Fire");
+        assert_eq!(fallback(K_KLEER), K_KLEER, "Kleer must fall back to itself");
+    }
+
+    #[test]
+    fn phases_ordered_and_valid() {
+        assert!((PHASES[0].from_s - 0.0).abs() < f64::EPSILON, "first phase must start at 0");
+        for (i, p) in PHASES.iter().enumerate() {
+            if i > 0 {
+                assert!(p.from_s > PHASES[i - 1].from_s, "phase {} from_s not increasing", i);
+            }
+            assert!(p.from_s < RUN_S, "phase {} starts at/after the run end", i);
+            assert!(!p.mix.is_empty(), "phase {} has an empty mix", i);
+            for (kind, w) in p.mix {
+                assert!(*kind < KINDS.len(), "phase {} references kind {kind}", i);
+                assert!(*w > 0, "phase {} has zero weight for kind {kind}", i);
+            }
+            assert!(p.interval > 0.0, "phase {} has non-positive interval", i);
+            assert!(p.min_field > 0, "phase {} has zero min_field", i);
+        }
+    }
+
+    #[test]
+    fn events_ordered_and_end_with_final() {
+        for (i, (t, _)) in EVENTS.iter().enumerate() {
+            assert!(*t > 0.0, "event {i} has non-positive time");
+            assert!(*t <= RUN_S, "event {i} is after the run end");
+            if i > 0 {
+                assert!(*t >= EVENTS[i - 1].0, "event {i} is out of order");
+            }
+        }
+        assert!(EVENTS.last() == Some(&(RUN_S, Event::Final)), "run must end with the Final event");
+        let finals = EVENTS.iter().filter(|(_, e)| *e == Event::Final).count();
+        assert_eq!(finals, 1, "Final must appear exactly once");
+    }
+
+    #[test]
+    fn mini_bosses_valid_and_each_used_once() {
+        for (i, (kinds, hp, size, chest)) in MINI_BOSSES.iter().enumerate() {
+            assert!(!kinds.is_empty(), "mini-boss {i} has no kinds");
+            for k in *kinds {
+                assert!(*k < KINDS.len(), "mini-boss {i} references kind {k}");
+            }
+            assert!(*hp > 0.0, "mini-boss {i} has non-positive hp multiplier");
+            assert!(*size > 0.0, "mini-boss {i} has non-positive size");
+            assert!((1..=5).contains(chest), "mini-boss {i} chest items {chest} out of 1..=5");
+        }
+        for i in 0..MINI_BOSSES.len() {
+            let n = EVENTS
+                .iter()
+                .filter(|(_, e)| matches!(e, Event::MiniBoss(m) if *m == i as u8))
+                .count();
+            assert_eq!(n, 1, "mini-boss {i} must be scheduled exactly once");
+        }
+        for (t, e) in EVENTS {
+            if let Event::MiniBoss(m) = e {
+                assert!((*m as usize) < MINI_BOSSES.len(), "event at {t}s references unknown mini-boss {m}");
+            }
+        }
+    }
+
+    #[test]
+    fn all_upgrades_unique_and_grouped() {
+        assert_eq!(ALL.len(), 25, "expected 25 upgrades");
+        for i in 0..ALL.len() {
+            for j in (i + 1)..ALL.len() {
+                assert_ne!(ALL[i], ALL[j], "duplicate upgrade {:?} in ALL", ALL[i]);
+            }
+        }
+        for (i, u) in ALL.iter().enumerate() {
+            let want = match i {
+                0..9 => Cat::Gun,
+                9..15 => Cat::Ability,
+                _ => Cat::Passive,
+            };
+            assert!(u.cat() == want, "upgrade {} {:?} is not in its category block", i, u);
+            assert!(!u.id().is_empty(), "{:?} has empty id", u);
+            assert!(!u.name().is_empty(), "{:?} has empty name", u);
+            for r in 1..=MAX_RANK {
+                assert!(!u.describe(r).is_empty(), "{} has empty description at rank {r}", u.name());
+            }
+        }
+        let mut ids = Vec::new();
+        for u in ALL {
+            assert!(!ids.contains(&u.id()), "duplicate id {}", u.id());
+            ids.push(u.id());
+        }
+    }
+
+    #[test]
+    fn gun_weapon_mapping_roundtrips() {
+        for u in ALL {
+            let t = u.weapon_types();
+            if u.cat() == Cat::Gun {
+                assert!(!t.is_empty(), "gun {:?} has no weapon types", u);
+                for &wt in t {
+                    assert!(Up::from_weapon(wt) == Some(*u), "from_weapon({wt}) does not round-trip to {u:?}");
+                }
+                if *u != Up::Knife {
+                    assert!(u.weapon_item() > 0, "gun {:?} has no weapon item", u);
+                }
+            } else {
+                assert!(t.is_empty(), "non-gun {:?} has weapon types", u);
+                assert_eq!(u.weapon_item(), 0, "non-gun {:?} has a weapon item", u);
+            }
+        }
+        assert_eq!(Up::from_weapon(0), None, "weapon type 0 must map to nothing");
+        assert_eq!(Up::from_weapon(999), None, "weapon type 999 must map to nothing");
+    }
+
+    #[test]
+    fn ammo_only_for_guns_with_ammo() {
+        assert_eq!(Up::Knife.ammo(), None, "Knife must not have ammo");
+        assert_eq!(Up::Revolver.ammo(), None, "Revolver must not have ammo");
+        for u in ALL {
+            if u.cat() != Cat::Gun {
+                assert_eq!(u.ammo(), None, "non-gun {:?} has ammo", u);
+                continue;
+            }
+            match u.ammo() {
+                None => {
+                    assert!(*u == Up::Knife || *u == Up::Revolver, "gun {:?} unexpectedly has no ammo", u);
+                }
+                Some((slot, item)) => {
+                    assert!(slot < 6, "{:?} ammo slot {slot} out of range", u);
+                    assert!(item > 0, "{:?} has non-positive ammo item", u);
+                }
+            }
+        }
+        let with_ammo = ALL.iter().filter(|u| u.cat() == Cat::Gun && u.ammo().is_some()).count();
+        assert_eq!(with_ammo, 7, "expected exactly 7 guns with ammo");
+    }
+
+    #[test]
+    fn evolutions_cover_every_gun_once() {
+        assert_eq!(EVOS.len(), 9, "expected 9 evolutions");
+        let guns: Vec<Up> = ALL.iter().copied().filter(|u| u.cat() == Cat::Gun).collect();
+        for g in &guns {
+            let n = EVOS.iter().filter(|(_, gun, _)| gun == g).count();
+            assert_eq!(n, 1, "gun {g:?} must be the base of exactly one evolution");
+        }
+        let mut second = Vec::new();
+        let mut evos = Vec::new();
+        let mut names = Vec::new();
+        for (evo, gun, pair) in EVOS {
+            assert!(gun.cat() == Cat::Gun, "evolution {} is not based on a gun", evo.name());
+            assert!(pair.cat() != Cat::Gun, "evolution {} pairs with gun {:?}", evo.name(), pair);
+            assert!(!second.contains(pair), "pair {:?} used by two evolutions", pair);
+            second.push(*pair);
+            assert!(!evos.contains(evo), "duplicate Evo variant");
+            evos.push(*evo);
+            assert!(!evo.name().is_empty(), "evolution has empty name");
+            assert!(!evo.describe().is_empty(), "{} has empty description", evo.name());
+            assert!(!names.contains(&evo.name()), "duplicate evolution name {}", evo.name());
+            names.push(evo.name());
+        }
+        assert_eq!(second.len(), EVOS.len(), "second upgrades must be unique");
+    }
+
+    #[test]
+    fn characters_valid() {
+        assert_eq!(CHARACTERS.len(), 5, "expected 5 characters");
+        let mut names = Vec::new();
+        for c in CHARACTERS {
+            assert!(!c.name.is_empty(), "character has empty name");
+            assert!(!names.contains(&c.name), "duplicate character name {}", c.name);
+            names.push(c.name);
+            assert!(
+                c.start.contains(&(Up::Knife, 1)),
+                "{} start lacks Knife rank 1",
+                c.name
+            );
+            assert!(
+                c.start.contains(&(Up::Revolver, 1)),
+                "{} start lacks Revolver rank 1",
+                c.name
+            );
+            for (u, r) in c.start {
+                assert!(
+                    (1..=MAX_RANK).contains(r),
+                    "{} start rank {r} out of range for {:?}",
+                    c.name,
+                    u
+                );
+            }
+            for i in 0..c.start.len() {
+                for j in (i + 1)..c.start.len() {
+                    assert_ne!(
+                        c.start[i].0, c.start[j].0,
+                        "{} start lists {:?} twice",
+                        c.name,
+                        c.start[i].0
+                    );
+                }
+            }
+            let abilities = c.start
+                .iter()
+                .filter(|(u, _)| u.cat() == Cat::Ability)
+                .count();
+            let passives = c.start.iter().filter(|(u, _)| u.cat() == Cat::Passive).count();
+            assert!(
+                abilities <= ABILITY_SLOTS,
+                "{} has {abilities} abilities > {} slots",
+                c.name,
+                ABILITY_SLOTS
+            );
+            assert!(
+                passives <= PASSIVE_SLOTS,
+                "{} has {passives} passives > {} slots",
+                c.name,
+                PASSIVE_SLOTS
+            );
+            assert!(c.damage > 0.0, "{} has non-positive damage", c.name);
+            assert!(c.speed > 0.0, "{} has non-positive speed", c.name);
+        }
+        assert_eq!(CHARACTERS[0].name, "Serious Sam", "first character must be Serious Sam");
+    }
+
+    #[test]
+    fn difficulties_scale_up() {
+        assert_eq!(DIFFICULTIES.len(), 4, "expected 4 difficulties");
+        let want = ["Tourist", "Normal", "Serious", "Mental"];
+        for (i, (name, _, _, _)) in DIFFICULTIES.iter().enumerate() {
+            assert_eq!(*name, want[i], "difficulty {i} must be named {}", want[i]);
+        }
+        let (_, h, d, r) = DIFFICULTIES[1];
+        assert_eq!((h, d, r), (1.0, 1.0, 1.0), "Normal must be (1.0, 1.0, 1.0)");
+        for i in 1..DIFFICULTIES.len() {
+            let (_, h0, d0, r0) = DIFFICULTIES[i - 1];
+            let (n, h1, d1, r1) = DIFFICULTIES[i];
+            assert!(h1 > h0, "health does not scale from {} to {}", DIFFICULTIES[i - 1].0, n);
+            assert!(d1 > d0, "density does not increase from {} to {}", DIFFICULTIES[i - 1].0, n);
+            assert!(r1 > r0, "rewards do not increase from {} to {}", DIFFICULTIES[i - 1].0, n);
+        }
+    }
+
+    #[test]
+    fn xp_curve() {
+        assert_eq!(xp_for_level(1), 5.0, "xp(1)");
+        assert_eq!(xp_for_level(2), 15.0, "xp(2)");
+        assert_eq!(xp_for_level(19), 185.0, "xp(19)");
+        assert_eq!(xp_for_level(20), 195.0, "xp(20)");
+        assert_eq!(xp_for_level(40), 455.0, "xp(40)");
+        for l in 1..100 {
+            let a = xp_for_level(l);
+            let b = xp_for_level(l + 1);
+            assert!(b > a, "xp not increasing at level {l}");
+            let step = b - a;
+            assert!(
+                (10.0..=16.0).contains(&step),
+                "xp step at level {l} is {step}, expected 10..=16"
+            );
+        }
+    }
+}
