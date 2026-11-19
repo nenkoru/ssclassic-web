@@ -4,7 +4,7 @@ use std::ffi::{c_char, c_int, CStr, CString};
 
 use crate::config::CvarValue;
 
-pub const API_VERSION: u32 = 3;
+pub const API_VERSION: u32 = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -34,6 +34,41 @@ pub struct SE1ModHost {
     pub ui_poll: Option<extern "C" fn() -> c_int>,
     pub close_computer: Option<extern "C" fn()>,
     pub player_view: Option<extern "C" fn(dir3: *mut f32) -> c_int>,
+    // API 4: gameplay toolkit
+    pub spawn_enemy: Option<extern "C" fn(*const c_char, c_int, *const f32, f32, f32, u32, c_int) -> c_int>,
+    pub health: Option<extern "C" fn(c_int) -> f32>,
+    pub max_health: Option<extern "C" fn(c_int) -> f32>,
+    pub file_exists: Option<extern "C" fn(*const c_char) -> c_int>,
+    pub effect: Option<extern "C" fn(c_int, *const f32, f32)>,
+    pub lightning: Option<extern "C" fn(*const f32, *const f32, f32, f32)>,
+    pub sound: Option<extern "C" fn(*const c_char, f32)>,
+    pub spawn_item: Option<extern "C" fn(*const c_char, c_int, *const f32) -> c_int>,
+    pub exists: Option<extern "C" fn(c_int) -> c_int>,
+    pub set_position: Option<extern "C" fn(c_int, *const f32)>,
+    pub destroy: Option<extern "C" fn(c_int)>,
+    pub weapon: Option<extern "C" fn() -> c_int>,
+    pub weapons_owned: Option<extern "C" fn() -> c_int>,
+    pub ammo: Option<extern "C" fn(*mut i32)>,
+    pub give_ammo: Option<extern "C" fn(c_int, c_int)>,
+    pub give_weapon: Option<extern "C" fn(c_int)>,
+    pub projectile: Option<extern "C" fn(c_int, *const f32, *const f32, f32)>,
+    pub armor: Option<extern "C" fn(f32, f32) -> f32>,
+    pub player_eye: Option<extern "C" fn(*mut f32, *mut f32) -> c_int>,
+}
+
+/// Options for `Host::spawn_enemy`.
+#[derive(Clone, Copy)]
+pub struct EnemyOpts {
+    pub variant: i32,
+    pub hp_mul: f32,
+    pub stretch: f32,
+    pub glow: u32,
+    pub boss: bool,
+}
+impl Default for EnemyOpts {
+    fn default() -> Self {
+        EnemyOpts { variant: -1, hp_mul: 1.0, stretch: 0.0, glow: 0, boss: false }
+    }
 }
 
 pub struct Host {
@@ -193,5 +228,98 @@ impl Host {
                 self.raw.set_string.map_or(false, |f| f(n.as_ptr(), v.as_ptr()) != 0)
             }
         }
+    }
+
+    // ---- API 4: gameplay toolkit ----
+    /// Spawn a monster that hunts the player at once. Check `file_exists` for its model first.
+    pub fn spawn_enemy(&self, class: &str, pos: [f32; 3], o: EnemyOpts) -> Option<i32> {
+        let f = self.raw.spawn_enemy?;
+        let c = cstr(class);
+        let h = f(c.as_ptr(), o.variant, pos.as_ptr(), o.hp_mul, o.stretch, o.glow, o.boss as c_int);
+        (h > 0).then_some(h)
+    }
+    pub fn health(&self, h: i32) -> f32 {
+        self.raw.health.map_or(0.0, |f| f(h))
+    }
+    pub fn max_health(&self, h: i32) -> f32 {
+        self.raw.max_health.map_or(0.0, |f| f(h))
+    }
+    pub fn file_exists(&self, path: &str) -> bool {
+        let c = cstr(path);
+        self.raw.file_exists.is_some_and(|f| f(c.as_ptr()) != 0)
+    }
+    pub fn effect(&self, kind: i32, pos: [f32; 3], size: f32) {
+        if let Some(f) = self.raw.effect {
+            f(kind, pos.as_ptr(), size);
+        }
+    }
+    pub fn lightning(&self, from: [f32; 3], to: [f32; 3], size: f32, life: f32) {
+        if let Some(f) = self.raw.lightning {
+            f(from.as_ptr(), to.as_ptr(), size, life);
+        }
+    }
+    pub fn sound(&self, path: &str, volume: f32) {
+        if let Some(f) = self.raw.sound {
+            let c = cstr(path);
+            f(c.as_ptr(), volume);
+        }
+    }
+    pub fn spawn_item(&self, class: &str, kind: i32, pos: [f32; 3]) -> Option<i32> {
+        let f = self.raw.spawn_item?;
+        let c = cstr(class);
+        let h = f(c.as_ptr(), kind, pos.as_ptr());
+        (h > 0).then_some(h)
+    }
+    pub fn exists(&self, h: i32) -> bool {
+        self.raw.exists.is_some_and(|f| f(h) != 0)
+    }
+    pub fn set_position(&self, h: i32, pos: [f32; 3]) {
+        if let Some(f) = self.raw.set_position {
+            f(h, pos.as_ptr());
+        }
+    }
+    pub fn destroy(&self, h: i32) {
+        if let Some(f) = self.raw.destroy {
+            f(h);
+        }
+    }
+    pub fn weapon(&self) -> i32 {
+        self.raw.weapon.map_or(0, |f| f())
+    }
+    pub fn weapons_owned(&self) -> i32 {
+        self.raw.weapons_owned.map_or(0, |f| f())
+    }
+    /// [bullets, shells, rockets, grenades, cells, ironballs] and their maxima.
+    pub fn ammo(&self) -> ([i32; 6], [i32; 6]) {
+        let mut a = [0i32; 12];
+        if let Some(f) = self.raw.ammo {
+            f(a.as_mut_ptr());
+        }
+        ([a[0], a[1], a[2], a[3], a[4], a[5]], [a[6], a[7], a[8], a[9], a[10], a[11]])
+    }
+    pub fn give_ammo(&self, ait_type: i32, amount: i32) {
+        if let Some(f) = self.raw.give_ammo {
+            f(ait_type, amount);
+        }
+    }
+    pub fn give_weapon(&self, wit_type: i32) {
+        if let Some(f) = self.raw.give_weapon {
+            f(wit_type);
+        }
+    }
+    pub fn projectile(&self, kind: i32, pos: [f32; 3], dir: [f32; 3], speed: f32) {
+        if let Some(f) = self.raw.projectile {
+            f(kind, pos.as_ptr(), dir.as_ptr(), speed);
+        }
+    }
+    /// Add armor up to `max` (0 to just read it); returns the player's armor.
+    pub fn armor(&self, add: f32, max: f32) -> f32 {
+        self.raw.armor.map_or(0.0, |f| f(add, max))
+    }
+    /// Eye position and view direction of the local player.
+    pub fn player_eye(&self) -> Option<([f32; 3], [f32; 3])> {
+        let f = self.raw.player_eye?;
+        let (mut p, mut d) = ([0f32; 3], [0f32; 3]);
+        (f(p.as_mut_ptr(), d.as_mut_ptr()) != 0).then_some((p, d))
     }
 }

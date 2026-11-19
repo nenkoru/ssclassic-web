@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-#define SE1MOD_API_VERSION 3
+#define SE1MOD_API_VERSION 4
 
 typedef struct SE1ModHost {
   uint32_t api_version;   /* SE1MOD_API_VERSION */
@@ -61,6 +61,29 @@ typedef struct SE1ModHost {
   void (*close_computer)(void);
   /* v3: the local player's view direction (unit vector, where they aim); 0 if there is no player */
   int (*player_view)(float *dir3);
+  /* v4: gameplay toolkit (port/common/Se1ModEntities.cpp). Spawning a class or variant whose
+     model/texture/sound isn't in the data is fatal: check file_exists first. */
+  /* monster: variant -1 = class default; hp_mul/stretch 0 or 1 = unchanged; glow 0xRRGGBBAA added
+     to its lighting (0 = none); boss shows the HUD boss bar. It hunts the player at once. */
+  int (*spawn_enemy)(const char *cls, int variant, const float *pos3, float hp_mul, float stretch, uint32_t glow, int boss);
+  float (*health)(int h);                       /* 0 when dead or gone */
+  float (*max_health)(int h);
+  int (*file_exists)(const char *path);
+  void (*effect)(int type, const float *pos3, float size);   /* BasicEffect (BET_*), visual + sound */
+  void (*lightning)(const float *from3, const float *to3, float size, float life);
+  void (*sound)(const char *path, float volume); /* 2D, plays while paused too */
+  int (*spawn_item)(const char *cls, int type, const float *pos3);
+  int (*exists)(int h);                         /* any entity (items, effects): still in the world */
+  void (*set_position)(int h, const float *pos3);
+  void (*destroy)(int h);                       /* remove the entity and free the handle */
+  int (*weapon)(void);                          /* current WeaponType */
+  int (*weapons_owned)(void);                   /* bit (1 << (WeaponType-1)) per weapon */
+  void (*ammo)(int32_t *out12);                 /* bullets shells rockets grenades cells ironballs, then maxima */
+  void (*give_ammo)(int ait_type, int amount);  /* AmmoItemType, capped by the player's maximum */
+  void (*give_weapon)(int wit_type);            /* WeaponItemType */
+  void (*projectile)(int type, const float *pos3, const float *dir3, float speed);   /* launched by the player */
+  float (*armor)(float add, float max);         /* add armor up to max; returns the armor */
+  int (*player_eye)(float *pos3, float *dir3);  /* eye position and view direction */
 } SE1ModHost;
 
 /* called once after the engine and game library are initialized; returns 0 on success */

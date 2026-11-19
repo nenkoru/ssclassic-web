@@ -116,6 +116,7 @@ add_library(shaders STATIC ${S_SHADERS})
 option(SE1_RUSTMOD "Link the Rust mod layer" ON)
 if(SE1_RUSTMOD)
   target_sources(engine PRIVATE "${ROOT}/port/common/Se1ModHost.cpp")
+  target_sources(entities PRIVATE "${ROOT}/port/common/Se1ModEntities.cpp")
   find_program(CARGO cargo HINTS "$ENV{HOME}/.cargo/bin" REQUIRED)
   if(SE1_THREADS)
     # Rust's precompiled std for wasm32-unknown-emscripten has no atomics, so the threaded build
