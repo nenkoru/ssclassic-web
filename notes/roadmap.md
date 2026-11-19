@@ -65,12 +65,20 @@ What's next, in rough priority order. Details and measurements live in notes/ren
 - Existing community content mods, installable from the browser (notes/plan.md, "existing mods").
 - Remixed and bigger maps; level "bridges" instead of loading screens.
 - An L4D-style "director".
-- Multiplayer for up to 128 players: networking over WebRTC/WebTransport, server side in Rust
-  (rust/se1-server). Re-profile once it exists: 128 players will move the hot spots.
+- **Multiplayer:** 2–4 player co-op works over a virtual LAN (WebSocket switch in rust/se1-server;
+  notes/multiplayer.md).
+  - Next: a lobby UI, then interest management in the switch and WebRTC peer links for the
+    128-player goal.
+  - Re-profile then: 128 players will move the hot spots.
+- **Serious Survivors** (`?mode=survivors`, notes/survivors.md) is a prototype; it shows what the mod
+  host API v2 can drive.
 
 ## Testing
 
-- Run the capture and benchmark gates automatically on every change (CI with headless Chrome).
+- **CI:** `.github/workflows/ci.yml` is ready on branch `ci-workflow`. It runs tools/test.sh on
+  GitHub Actions with the demo data. Pushing it needs a GitHub token with the `workflow` scope.
+- **Baseline:** the `vanilla` tag is the plain port with the full test suite, before multiplayer
+  and mods.
 - More real devices: a budget Android phone, an older iPhone, a Chromebook.
 - Use several runs per phone result: the scheduler moving the worker between core types makes single
   runs differ by up to 2×.
