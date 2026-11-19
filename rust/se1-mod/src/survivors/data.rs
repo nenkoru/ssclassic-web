@@ -197,7 +197,7 @@ impl Up {
         let gun = |extra: &str| format!("+{:.0}% damage{}", 20.0 * (rf - 1.0), extra);
         match self {
             Knife => if r == 1 { "Cutting-edge archaeology".into() } else { format!("+{:.0}% damage; kills heal {}", 25.0 * (rf - 1.0), r / 2) },
-            Revolver => if r == 1 { "Sam's trusty sidearm".into() } else { gun(&format!(", {:.0}% crit chance{}", 5.0 * rf, if r >= 3 { ", dual wield" } else { "" })) },
+            Revolver => if r == 1 { "Sam's trusty sidearms, one in each hand".into() } else { gun(&format!(", {:.0}% crit chance", 5.0 * rf)) },
             Shotgun | DoubleShotgun => if r == 1 { "New gun, with shells".into() } else { gun(&format!(", shells regenerate {:.1}/s", 0.4 * (rf - 1.0))) },
             TommyGun | Minigun => if r == 1 { "New gun, with bullets".into() } else { gun(&format!(", bullets regenerate {:.0}/s", 3.0 * (rf - 1.0))) },
             RocketLauncher => if r == 1 { "New gun, with rockets".into() } else { gun(&format!(", rockets regenerate {:.2}/s{}", 0.15 * (rf - 1.0), if r >= 3 { ", twin rockets" } else { "" })) },

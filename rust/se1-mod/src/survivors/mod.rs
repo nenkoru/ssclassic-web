@@ -279,6 +279,7 @@ pub struct Survivors {
     started_at: f64,
     hook_log_t: f64,
     weapons_t: f64,   // last check that every ranked gun is really owned (ensure_weapons)
+    hold_colts: u8,   // switching to the dual Schofields: 1 wanted, 2 key pressed (hold_colts)
     // debug / test
     stress: usize,
     stress_kind: usize,
@@ -308,7 +309,7 @@ impl Survivors {
             weapon: 0, ammo: [0; 6], ammo_acc: [0.0; 6], shots: [0; 17], firing_until: -1.0,
             revolver_hits: 0, typewriter_kills: 0, hurricane_t: 0.0,
             hits: Vec::new(), flash: false, stats: Vec::new(), powers: Vec::new(), speed_set: 1.0,
-            hud_t: 0.0, sound_t: 0.0, procs: Vec::new(), achieved: Vec::new(), dead_posted: false, debug_chest: 0, started_at: 0.0, hook_log_t: 0.0, weapons_t: 0.0,
+            hud_t: 0.0, sound_t: 0.0, procs: Vec::new(), achieved: Vec::new(), dead_posted: false, debug_chest: 0, started_at: 0.0, hook_log_t: 0.0, weapons_t: 0.0, hold_colts: 0,
             stress: host.page_option("se1SurvivorsStress").max(0.0) as usize,
             stress_kind: match host.page_option("se1SurvivorsStressKind") as i32 {
                 1 => K_KLEER, 2 => K_GNAAR, 3 => K_ARACH, 4 => K_BULL, _ => K_FIRE,
@@ -486,6 +487,7 @@ impl Survivors {
                     host.log(&format!("damage hook: {} calls, {} from player, {} scaled{}", calls, from_player, scaled, tail));
                 }
                 self.ensure_weapons(host);
+                self.hold_colts(host);
                 if self.stress > 0 {
                     self.stress_frame(host);
                 } else {
@@ -533,10 +535,43 @@ impl Survivors {
             if u.cat() != Cat::Gun || r == 0 || u.weapon_item() == 0 {
                 continue;
             }
-            let has = u.weapon_types().iter().any(|&wt| owned & (1 << (wt - 1)) != 0);
+            // the Schofields count only as the pair (WeaponType 3): a second colt pickup makes the pair
+            let has = if u == Up::Revolver {
+                owned & (1 << (3 - 1)) != 0
+            } else {
+                u.weapon_types().iter().any(|&wt| owned & (1 << (wt - 1)) != 0)
+            };
             if !has {
                 host.give_weapon(u.weapon_item());
+                if u == Up::Revolver {
+                    self.hold_colts = 1;
+                }
             }
+        }
+    }
+
+    /// Switch to the dual Schofields once they are owned (run start, or after the engine reset the
+    /// weapons): picking them up switches only when the player's auto-select setting allows. The
+    /// select control must stay pressed for a frame for the player to read it, so press now and
+    /// release on the next frame. Only from the knife or the single colt: on the pair the same key
+    /// would switch back to one gun.
+    fn hold_colts(&mut self, host: &Host) {
+        match self.hold_colts {
+            1 => {
+                if host.weapons_owned() & (1 << (3 - 1)) != 0 {
+                    if matches!(host.weapon(), 1 | 2) {
+                        host.shell_execute("ctl_bSelectWeapon[1] = 1");
+                        self.hold_colts = 2;
+                    } else {
+                        self.hold_colts = 0;
+                    }
+                }
+            }
+            2 => {
+                host.shell_execute("ctl_bSelectWeapon[1] = 0");
+                self.hold_colts = 0;
+            }
+            _ => {}
         }
     }
 
@@ -580,12 +615,14 @@ impl Survivors {
             self.next_event = EVENTS.iter().position(|e| e.0 > skip_to).unwrap_or(EVENTS.len());
         }
         self.started_at = self.time;
+        self.weapons_t = self.time - 1.0; // check the guns on the first frame (the clock restarted)
         self.debug_chest = host.page_option("se1SurvivorsChest").max(0.0) as u32;
         if host.page_option("se1SurvivorsGod") > 0.0 {
             host.shell_execute("cht_bGod = 1");
         }
         // debug/test: ?svweapon=<WeaponType> selects that weapon at run start
         let w = host.page_option("se1SurvivorsWeapon") as i32;
+        self.hold_colts = if w > 0 { 0 } else { 1 };
         if w > 0 {
             let idx = match w {
                 2 | 3 => 1, 4 | 5 => 2, 6 | 7 => 3, 8 | 9 => 4, 14 => 6, 16 => 8, _ => 0,
@@ -1517,8 +1554,8 @@ impl Survivors {
         if u.cat() == Cat::Gun && r == 1 && u.weapon_item() > 0 {
             host.give_weapon(u.weapon_item());
         }
-        if u == Up::Revolver && r == 3 {
-            host.give_weapon(1); // the second Schofield: dual wield
+        if u == Up::Revolver && r == 1 {
+            host.give_weapon(1); // the second Schofield: every run starts dual wielding
         }
         if announce {
             self.proc(format!("{} {}", u.name(), roman(r)));

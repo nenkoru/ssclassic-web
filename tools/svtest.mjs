@@ -75,6 +75,8 @@ try {
   await sleep(4000 * TIMEOUT_SCALE);
   m = await last();
   check('Enter starts a run', !!(m && m.state === 'run' && m.time > 1), m ? `state ${m.state}, time ${m.time}` : 'no HUD');
+  // every run starts dual wielding the Schofields (WeaponType 3 = double colt)
+  check('starts with dual Schofields', !!(m && m.weapon === 3), m ? `weapon ${m.weapon}` : 'no HUD');
   // abilities (Consecration, Chain Lightning, Sirian Missiles, Arcane Explosion, Rain of Fire at rank 5)
   await send('Page.navigate', { url: url + (url.includes('?') ? '&' : '?') + 'mute=1&mode=survivors&svauto=1&svgod=1&svtime=200&svgive=15872' });
   m = null;
