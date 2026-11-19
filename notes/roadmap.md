@@ -26,12 +26,11 @@ What's next, in rough priority order. Details and measurements live in notes/ren
 
 ## Performance (deferred)
 
-1. **CPU-time quality controller for slow devices.** The CPU counterpart of `?scale=auto`: watch the
-   worker's time per frame and trim `mdl_fLODMul` / `mdl_fLODAdd`, `wld_iDetailRemovingBias`,
-   `gfx_fEnvParticlesDensity` and lens flares when a device falls behind; restore them when it
-   catches up.
-   - Targets the occasional slow frames on budget phones (1.2 GHz class).
-   - It changes how the game looks on slow devices, so it needs a design decision on what may drop.
+1. **CPU-time quality controller: done (opt-in).** `?quality=auto` (`rust/se1-mod/src/quality.rs`)
+   lowers particles, model LOD, lens flares, shadows and model detail in steps while frames keep
+   missing the refresh budget, and restores them after a run of good windows.
+   - Still open: whether it should be on by default on phones, and a CPU-time signal (worker work
+     per frame) instead of frame intervals.
 2. **Engine visibility code** (ASER: ScanOneLine, AddActiveSector, MakeSpan, ClipToOnePlane, about
    25–45% of worker time).
    - Upstream disabled its coherent-scan-line shortcut because of bugs.
@@ -42,8 +41,9 @@ What's next, in rough priority order. Details and measurements live in notes/ren
    lerping; wasm SIMD.
 4. **Shim vertex copies** (put_vertices, 4–7%). The per-attribute streams touch more memory than the
    old packed arena; try copying only the vertex range a draw uses.
-5. **Remaining synchronous calls** (createProgram, uniformLocation: ~55 ms in total per session on
-   the phone). Same approach as texture handles: allocate in the shim, resolve on the main thread.
+5. **Synchronous shader calls: done.** createProgram and uniformLocation are recorded in the frame
+   stream with worker-allocated handles (`port/common/gl1shim.c`); a threaded session now has 6
+   synchronous calls in all (start-up queries), counted in `Module.se1GfxSync`.
 6. **Weak-driver draw cost:** 208 draws per frame, 4% mergeable. Texture arrays or atlases would
    make more draws mergeable, but that's invasive (wrap modes).
 7. **Power:** the adaptive vsync spin keeps a core busy on slow devices. Measure battery and heat on
@@ -51,14 +51,17 @@ What's next, in rough priority order. Details and measurements live in notes/ren
 
 ## Platform
 
-- **Saves and settings in the threaded build:** WASMFS persists through OPFS, which isn't wired up
-  yet, so every visit starts fresh (a "first run" each time).
+- **Saves and settings: done.** The user dir is stored in OPFS (threaded) or IndexedDB
+  (single-threaded) and the page asks the engine to store its settings when the tab is hidden or
+  closed (`port/common/Persist.cpp`, `port/web/persist.js`).
 - **Data loading:** lazy fetch plus an OPFS cache instead of preloading 117 MB; compressed textures
   where supported (notes/plan.md, performance item 5).
-- **Hosting:** a public deployment. Static hosts work through `coi-sw.js`. The demo data's license
-  decides what may be served.
-- **Touch controls** for phones: there are none, so on a phone the game can only show the demo.
-- **Fallback:** serve the single-threaded build where cross-origin isolation is impossible.
+- **Hosting:** `tools/package.sh` builds a folder any static host can serve (threaded build via
+  `coi-sw.js` or `_headers`, single-threaded fallback, landing page). Still open: the actual public
+  deployment; the demo data's license decides what may be served.
+- **Input:** touch controls (`port/web/touch.js`), game controllers with aim assist
+  (`port/web/gamepad.js`, `port/common/AimAssist.cpp`); all in `notes/controls.md`. Still open: a
+  check on real phones and real pads.
 
 ## Mods and gameplay (the original goals)
 
@@ -67,11 +70,13 @@ What's next, in rough priority order. Details and measurements live in notes/ren
 - An L4D-style "director".
 - **Multiplayer:** 2–4 player co-op works over a virtual LAN (WebSocket switch in rust/se1-server;
   notes/multiplayer.md).
-  - Next: a lobby UI, then interest management in the switch and WebRTC peer links for the
-    128-player goal.
+  - Done: a lobby on the page (`port/web/lobby.js`) and WebRTC peer links (`?rtc=1`: direct data
+    channels, the switch as signalling and fallback).
+  - Next for the 128-player goal: interest management in the engine's own netcode (the switch only
+    forwards packets), STUN/TURN for players behind NATs, and a test over the internet.
   - Re-profile then: 128 players will move the hot spots.
-- **Serious Survivors** (`?mode=survivors`, notes/survivors.md) is a prototype; it shows what the mod
-  host API v2 can drive.
+- **Serious Survivors** (`?mode=survivors`, notes/survivors.md): a full 20-minute run on host API v5,
+  whose engine damage hook gives the guns exact rank bonuses and crits.
 
 ## Testing
 
