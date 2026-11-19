@@ -30,12 +30,13 @@ struct AimLevel {
   float fPullCone;       // degrees (0 = no pull)
   float fPull;           // fraction of the angle error removed per second
   bool  bPullAlways;     // false: only while the player is looking with the stick / touch
+  float fBulletExtra;    // metres added to the player's bullet radius (a near miss still hits)
 };
 static const AimLevel _alLevels[4] = {
-  {  0.0f, 1.0f,  0.0f, 0.0f,  false },   // 0 off
-  {  4.0f, 0.6f,  0.0f, 0.0f,  false },   // 1 low: friction only
-  {  6.0f, 0.5f,  6.0f, 0.25f, false },   // 2 medium: friction + gentle pull while aiming
-  { 10.0f, 0.4f, 12.0f, 0.90f, true  },   // 3 high: strong pull, near lock-on
+  {  0.0f, 1.0f,  0.0f, 0.0f,  false, 0.0f  },   // 0 off
+  {  4.0f, 0.6f,  0.0f, 0.0f,  false, 0.15f },   // 1 low: friction, slightly bigger hit zone
+  {  6.0f, 0.5f,  6.0f, 0.25f, false, 0.30f },   // 2 medium: friction + gentle pull while aiming
+  { 10.0f, 0.4f, 12.0f, 0.90f, true,  0.50f },   // 3 high: strong pull, near lock-on
 };
 static const FLOAT AIM_RANGE = 60.0f;          // metres
 static const double STICKY_S = 0.25;       // keep a target this long before re-picking
@@ -49,6 +50,8 @@ static std::atomic<int> _iLevel{0};
 static double _tmLastAssisted = -1e9;      // real time of the last pad/touch look input
 static double _tmLastApply = -1;
 static CEntityPointer _penTarget;
+static CEntityPointer _penLocal;           // the local player (set by SE1Aim_Apply), for the bullet radius
+static float _fLastRayR = -1;              // tests: the last bullet radius handed to the engine
 static double _tmTargetSet = -1e9;
 static float _fTargetAngle = 1e9f;         // angle to the current target, for the friction
 
@@ -165,6 +168,7 @@ extern "C" void SE1Aim_Apply(const CPlayerCharacter *ppc, float *pfHeading, floa
   int level = _iLevel.load(std::memory_order_relaxed);
   if (level == 0 || tm - _tmLastAssisted > ASSISTED_S) { _penTarget = NULL; return; }
   CPlayer *penPlayer = player_of(*ppc);
+  _penLocal = penPlayer;
   if (penPlayer == NULL || !(penPlayer->GetFlags() & ENF_ALIVE)) return;
 
   CPlacement3D plView;
@@ -198,4 +202,28 @@ extern "C" void SE1Aim_Apply(const CPlayerCharacter *ppc, float *pfHeading, floa
 extern "C" EMSCRIPTEN_KEEPALIVE float SE1_AimDebug(void)
 {
   return (_penTarget.ep_pen != NULL && _fTargetAngle < 1e8f) ? _fTargetAngle : -1.0f;
+}
+
+/* The player's bullets are thick rays: CCastRay::cr_fTestR is a radius that only applies to models
+   (Bullet.es: m_fBulletSize, 0.1 m in co-op). For the assisted local player the radius grows by
+   the level's fBulletExtra, so a shot that passes just beside a monster still hits it, as console
+   shooters do with "bullet magnetism". Called by CWorld::CastRay (WorldRayCasting.cpp) for every
+   ray with a radius; only rays cast by the local player change. On a co-op host this helps the
+   host's own player only (the host casts the clients' bullets with their player as origin). */
+extern "C" float SE1Aim_RayRadius(CEntity *penOrigin, float fTestR)
+{
+  int level = _iLevel.load(std::memory_order_relaxed);
+  CEntity *penLocal = _penLocal.ep_pen;
+  if (level == 0 || penOrigin == NULL || penLocal == NULL || now_s() - _tmLastAssisted > ASSISTED_S) return fTestR;
+  if (penOrigin != penLocal && penOrigin->GetPredictionTail() != penLocal) return fTestR;
+  _fLastRayR = fTestR + _alLevels[level].fBulletExtra;
+  return _fLastRayR;
+}
+
+/* tests: the bullet radius the last assisted player ray got (-1: none since the last call) */
+extern "C" EMSCRIPTEN_KEEPALIVE float SE1_AimRayDebug(void)
+{
+  float f = _fLastRayR;
+  _fLastRayR = -1;
+  return f;
 }

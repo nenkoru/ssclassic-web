@@ -43,7 +43,7 @@ Standard mapping (Xbox / PlayStation layout).
 | LB (4) | Previous weapon |
 | RB (5) | Next weapon |
 | LT (6) | Walk |
-| RT (7) | Fire |
+| RT (7) | Fire (analog: fires past 30% of the pull; every press lasts at least 60 ms) |
 | Back/Select (8) | Cycle aim assist |
 | Start (9) | Menu |
 | Left stick click (10) | Walk toggle |
@@ -61,12 +61,18 @@ In menus:
 
 Levels: off (0), low (1), medium (2), high (3). Default: medium (2) when a pad or touch is in use.
 
-| Level | Friction cone | Friction | Pull cone | Pull |
-|-------|--------------|----------|-----------|------|
-| Off | – | 1.0 | – | none |
-| Low | 4° | 0.6 | – | none |
-| Medium | 6° | 0.5 | 6° | 25%/s while moving |
-| High | 10° | 0.4 | 12° | 90%/s (near lock-on) |
+| Level | Friction cone | Friction | Pull cone | Pull | Bigger hit zone |
+|-------|--------------|----------|-----------|------|-----------------|
+| Off | – | 1.0 | – | none | – |
+| Low | 4° | 0.6 | – | none | +0.15 m |
+| Medium | 6° | 0.5 | 6° | 25%/s while aiming | +0.30 m |
+| High | 10° | 0.4 | 12° | 90%/s (near lock-on) | +0.50 m |
+
+- Bigger hit zone ("bullet magnetism"): the player's bullets are thick rays that hit monsters
+  within a radius of their path (0.1 m for most guns in co-op). Assist adds the amount above, so a
+  shot that passes just beside a monster still hits it. Hooked in `CWorld::CastRay`
+  (`WorldRayCasting.cpp`) for rays cast by the local player only; on a co-op host it helps the
+  host's player, not the clients (their bullets are cast on the host).
 
 - Friction: slows look deltas when aiming at a target within the friction cone.
 - Pull: turns the view toward the target within the pull cone, removing the given share of the

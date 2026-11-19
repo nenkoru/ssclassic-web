@@ -853,8 +853,17 @@ void CCastRay::ContinueCast(CWorld *pwoWorld)
 /*
  * Cast a ray and see what it hits.
  */
+#ifdef __EMSCRIPTEN__
+extern "C" float SE1Aim_RayRadius(CEntity *penOrigin, float fTestR);   // port/common/AimAssist.cpp
+#endif
 void CWorld::CastRay(CCastRay &crRay)
 {
+#ifdef __EMSCRIPTEN__
+  // web port: aim assist widens the assisted player's bullets (thick rays that hit models)
+  if (crRay.cr_fTestR > 0.0f && crRay.cr_ttHitModels != CCastRay::TT_NONE) {
+    crRay.cr_fTestR = SE1Aim_RayRadius(crRay.cr_penOrigin, crRay.cr_fTestR);
+  }
+#endif
   crRay.Cast(this);
 }
 /*
