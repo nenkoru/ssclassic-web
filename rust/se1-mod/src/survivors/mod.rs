@@ -1474,8 +1474,10 @@ impl Survivors {
         let powers: Vec<String> = self.powers.iter().map(|(p, u)| format!(r#"{{"name":"{}","left":{:.0}}}"#, p.name(), u - self.time)).collect();
         let procs: Vec<String> = self.procs.iter().map(|l| format!("\"{}\"", l.replace('"', "'"))).collect();
         let ranks: Vec<String> = self.ranks.iter().map(|(u, r)| format!(r#"{{"id":"{}","name":"{}","rank":{}}}"#, u.id(), u.name(), r)).collect();
+        // touch controls (port/web/touch.js) + tools/touchtest.mjs read these
+        let yaw = host.player_view().map(|d| (d[2] as f64).atan2(d[0] as f64).to_degrees()).unwrap_or(0.0);
         host.ui_post(&format!(
-            r#"{{"type":"hud","time":{:.1},"run":{:.0},"level":{},"xp":{:.1},"next":{:.0},"kills":{},"score":{},"combo":{},"gold":{:.0},"alive":{},"gems":{},"guns":[{}],"abilities":[{}],"passives":[{}],"ranks":[{}],"boss":{},"arrows":[{}],"powers":[{}],"procs":[{}],"endless":{},"state":"{}"}}"#,
+            r#"{{"type":"hud","time":{:.1},"run":{:.0},"level":{},"xp":{:.1},"next":{:.0},"kills":{},"score":{},"combo":{},"gold":{:.0},"alive":{},"gems":{},"guns":[{}],"abilities":[{}],"passives":[{}],"ranks":[{}],"boss":{},"arrows":[{}],"powers":[{}],"procs":[{}],"endless":{},"state":"{}","pos":[{:.2},{:.2},{:.2}],"yaw":{:.1}}}"#,
             self.time,
             RUN_S,
             self.level,
@@ -1502,7 +1504,11 @@ impl Survivors {
                 State::Offer => "offer",
                 State::Chest => "chest",
                 State::End => "end",
-            }
+            },
+            self.pos[0] as f64,
+            self.pos[1] as f64,
+            self.pos[2] as f64,
+            yaw,
         ));
     }
 

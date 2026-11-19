@@ -25,7 +25,7 @@
   function locked() { return !!cv() && document.pointerLockElement === cv(); }
   function grab() {
     var c = cv();
-    if (!c || locked() || Module.se1PointerHold || !c.requestPointerLock) return;
+    if (!c || locked() || Module.se1PointerHold || (Module.se1Touch && Module.se1Touch.enabled) || !c.requestPointerLock) return;
     try { var p = c.requestPointerLock(); if (p && p.catch) p.catch(function () {}); } catch (e) {}
   }
   Module.se1GrabPointer = function () { if (want()) grab(); };
@@ -91,6 +91,6 @@
     prev = w;
     document.body && document.body.classList.toggle('locked', l);
     var hint = document.getElementById('hint');
-    if (hint) hint.style.display = (w && !l && !Module.se1PointerHold) ? 'block' : 'none';
+    if (hint) hint.style.display = (w && !l && !Module.se1PointerHold && !(Module.se1Touch && Module.se1Touch.enabled)) ? 'block' : 'none';
   }, 100);
 })();

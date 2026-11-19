@@ -36,6 +36,11 @@ extern FLOAT inp_f2ndMousePrecisionTimeout;
 extern FLOAT inp_f2ndMousePrecisionFactor;
 extern INDEX inp_bFilter2ndMouse;
 extern INDEX inp_bInvert2ndMouse;
+#ifdef __EMSCRIPTEN__
+// Web port: look deltas from touch controls (port/web/touch.js), in mouse counts; the page adds,
+// the engine thread takes them when it reads the mouse.
+static int _iTouchLookX = 0, _iTouchLookY = 0;
+#endif
 
 static BOOL inp_bSDLPermitCtrlG = TRUE;
 static BOOL inp_bSDLGrabInput = TRUE;
@@ -761,8 +766,13 @@ void CInput::GetInput(BOOL bPreScan)
   SDL_GetRelativeMouseState(&iMx, &iMy);
   mouse_relative_x = iMx;
   mouse_relative_y = iMy;
-  #else
-  if ((mouse_relative_x != 0) || (mouse_relative_y != 0)) 
+  #endif
+  #ifdef __EMSCRIPTEN__
+  mouse_relative_x += __atomic_exchange_n(&_iTouchLookX, 0, __ATOMIC_ACQ_REL);
+  mouse_relative_y += __atomic_exchange_n(&_iTouchLookY, 0, __ATOMIC_ACQ_REL);
+  #endif
+  #ifndef USE_MOUSEWARP
+  if ((mouse_relative_x != 0) || (mouse_relative_y != 0))
   #endif
   {
     FLOAT fDX = FLOAT( mouse_relative_x );
@@ -1021,5 +1031,13 @@ BOOL CInput::ScanJoystick(INDEX iJoy, BOOL bPreScan)
 extern "C" EMSCRIPTEN_KEEPALIVE int SE1_WantPointer(void)
 {
   return (_pInput != NULL && _pInput->IsInputEnabled() && inp_bSDLGrabInput) ? 1 : 0;
+}
+
+// Web port: touch controls (port/web/touch.js) add look deltas here; the engine thread takes them
+// in the mouse-reading code above.
+extern "C" EMSCRIPTEN_KEEPALIVE void SE1_TouchLook(int dx, int dy)
+{
+  __atomic_fetch_add(&_iTouchLookX, dx, __ATOMIC_ACQ_REL);
+  __atomic_fetch_add(&_iTouchLookY, dy, __ATOMIC_ACQ_REL);
 }
 #endif
