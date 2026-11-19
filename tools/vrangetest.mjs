@@ -10,13 +10,13 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CHROME, gpuFlags, EXTRA_FLAGS, TIMEOUT_SCALE } from './chrome.mjs';
+import { CHROME, gpuFlags, EXTRA_FLAGS, TIMEOUT_SCALE, tempProfile, closeChrome } from './chrome.mjs';
 
 const [url] = process.argv.slice(2);
 if (!url) { console.error('usage: vrangetest.mjs <url>'); process.exit(2); }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const port = 9400 + Math.floor(Math.random() * 40);
-const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), 'se1vr-'))}`,
+const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${tempProfile('se1vr-')}`,
   '--window-size=1024,768', '--no-first-run', '--mute-audio',
   '--autoplay-policy=no-user-gesture-required',
   '--disable-background-timer-throttling', '--disable-renderer-backgrounding',
@@ -68,7 +68,7 @@ try {
   console.log('FAIL  harness  ' + e.message);
   failed++;
 } finally {
-  chrome.kill();
+  await closeChrome(chrome);
 }
 console.log(failed ? `${failed} check(s) failed` : 'all checks passed');
 process.exit(failed ? 1 : 0);

@@ -12,7 +12,7 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CHROME, gpuFlags, EXTRA_FLAGS, TIMEOUT_SCALE } from './chrome.mjs';
+import { CHROME, gpuFlags, EXTRA_FLAGS, TIMEOUT_SCALE, tempProfile, closeChrome } from './chrome.mjs';
 
 const args = process.argv.slice(2);
 const opt = (name, def) => { const i = args.indexOf('--' + name); return i >= 0 ? args[i + 1] : def; };
@@ -23,7 +23,7 @@ let seed = +opt('seed', 1) || 1;
 const rand = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const port = 9350 + Math.floor(Math.random() * 50);
-const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), 'se1bot-'))}`,
+const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${tempProfile('se1bot-')}`,
   '--mute-audio', ...gpuFlags(), ...EXTRA_FLAGS, '--window-size=1100,1000', '--no-first-run', 'about:blank'], { stdio: 'ignore' });
 // headless Chrome has no real pointer lock: stub it (as tools/inputtest.mjs does)
 const STUB = `(() => { let el = null;
@@ -104,6 +104,6 @@ try {
 } catch (e) {
   console.log('bot failed: ' + e.message); code = 1;
 } finally {
-  chrome.kill();
+  await closeChrome(chrome);
 }
 process.exit(code);
