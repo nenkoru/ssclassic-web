@@ -1,0 +1,101 @@
+<!doctype html>
+<!-- DualSense motion check (WebHID): does this browser get gyro/accelerometer data from the
+     controller? Serve it from localhost (WebHID needs a secure context), open it in Chrome or Edge,
+     click Connect. python3 -m http.server 8480 -d tools  ->  http://127.0.0.1:8480/dualsense.html -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DualSense Check</title>
+<style>
+  :root { --bg: #111; --fg: #eee; --dim: #888; --bar: #4aa3ff; --warn: #ff6b6b; }
+  body { background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; margin: 0; padding: 24px 16px; }
+  main { max-width: 640px; margin: 0 auto; }
+  button { font: inherit; padding: 8px 16px; border-radius: 6px; border: 1px solid #555; background: #222; color: var(--fg); cursor: pointer; }
+  .row { display: grid; grid-template-columns: 7em 6em 1fr; gap: 8px; align-items: center; margin: 4px 0; font-variant-numeric: tabular-nums; }
+  .track { height: 10px; background: #222; border-radius: 5px; position: relative; overflow: hidden; }
+  .fill { position: absolute; top: 0; bottom: 0; left: 50%; background: var(--bar); }
+  #status { color: var(--dim); }
+  .warn { color: var(--warn); }
+  code { color: #ffd75e; }
+  pre { color: var(--dim); font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+</style>
+</head>
+<body>
+<main>
+  <h1>DualSense motion check</h1>
+  <p><button id="go">Connect controller</button> <span id="status">not connected</span></p>
+  <h3>Gyro (degrees per second)</h3>
+  <div id="gyro"></div>
+  <h3>Accelerometer (g)</h3>
+  <div id="acc"></div>
+  <p id="info"></p>
+  <pre id="raw"></pre>
+</main>
+<script>
+(function () {
+  var status = document.getElementById('status'), info = document.getElementById('info'), raw = document.getElementById('raw');
+  function rows(id, names) {
+    var host = document.getElementById(id);
+    return names.map(function (n) {
+      var r = document.createElement('div'); r.className = 'row';
+      r.innerHTML = '<span>' + n + '</span><span class="v">0</span><div class="track"><div class="fill"></div></div>';
+      host.appendChild(r);
+      return { v: r.querySelector('.v'), f: r.querySelector('.fill') };
+    });
+  }
+  var G = rows('gyro', ['pitch', 'yaw', 'roll']), A = rows('acc', ['x', 'y', 'z']);
+  function show(r, val, range, digits) {
+    r.v.textContent = val.toFixed(digits);
+    var p = Math.max(-1, Math.min(1, val / range)) * 50;
+    r.f.style.left = (p < 0 ? 50 + p : 50) + '%'; r.f.style.width = Math.abs(p) + '%';
+  }
+  if (!('hid' in navigator)) {
+    status.innerHTML = '<span class="warn">WebHID is not available here: use desktop Chrome or Edge, from localhost or https.</span>';
+    document.getElementById('go').disabled = true;
+    return;
+  }
+  var FILTERS = [{ vendorId: 0x054c, productId: 0x0ce6 }, { vendorId: 0x054c, productId: 0x0df2 }];
+  var n = 0, t0 = performance.now(), ids = {};
+  function onReport(e) {
+    var d = e.data, off;
+    ids[e.reportId] = (ids[e.reportId] || 0) + 1;
+    if (e.reportId === 0x01 && d.byteLength >= 27) off = 15;        // USB
+    else if (e.reportId === 0x31 && d.byteLength >= 28) off = 16;   // Bluetooth, full report
+    n++;
+    if (n % 8) return;   // ~30 updates a second is plenty for the eye
+    var bytes = new Uint8Array(d.buffer, d.byteOffset, Math.min(d.byteLength, 40));
+    raw.textContent = 'report 0x' + e.reportId.toString(16) + ' (' + d.byteLength + ' bytes): ' + Array.from(bytes, function (b) { return b.toString(16).padStart(2, '0'); }).join(' ');
+    var rate = n / ((performance.now() - t0) / 1000);
+    info.textContent = 'reports: ' + n + ' (' + rate.toFixed(0) + '/s), ids seen: ' +
+      Object.keys(ids).map(function (k) { return '0x' + (+k).toString(16) + '×' + ids[k]; }).join(', ');
+    if (off === undefined) {
+      info.innerHTML += '<br><span class="warn">No motion data in this report type. Over Bluetooth the controller sends a short report ' +
+        'until feature report 0x05 is read; reconnect, or try a USB cable.</span>';
+      return;
+    }
+    for (var i = 0; i < 3; i++) show(G[i], d.getInt16(off + 2 * i, true) / 16.384, 500, 1);
+    for (var j = 0; j < 3; j++) show(A[j], d.getInt16(off + 6 + 2 * j, true) / 8192, 2, 2);
+  }
+  async function open(dev) {
+    if (!dev.opened) await dev.open();
+    try { await dev.receiveFeatureReport(0x05); } catch (e) { /* USB doesn't need it */ }
+    dev.addEventListener('inputreport', onReport);
+    status.textContent = 'connected: ' + dev.productName + ' (move the controller)';
+    n = 0; t0 = performance.now(); ids = {};
+  }
+  document.getElementById('go').onclick = async function () {
+    try {
+      var devs = await navigator.hid.requestDevice({ filters: FILTERS });
+      if (devs.length) await open(devs[0]); else status.textContent = 'no controller picked';
+    } catch (e) { status.innerHTML = '<span class="warn">' + e.message + '</span>'; }
+  };
+  navigator.hid.getDevices().then(function (devs) {
+    var d = devs.find(function (x) { return x.vendorId === 0x054c; });
+    if (d) open(d).catch(function (e) { status.textContent = e.message; });
+  });
+  navigator.hid.addEventListener('disconnect', function () { status.textContent = 'disconnected'; });
+})();
+</script>
+</body>
+</html>
