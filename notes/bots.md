@@ -88,6 +88,35 @@ engine (C++)                         Rust mod (rust/se1-mod/src/bots/)
 7. **The war map:** a persistent front on the server (`rust/se1-server`). Matches report results and
    the lobby becomes a map of fronts across TFE and TSE levels.
 
+## War mode design ideas (from the user, 2026-11-20)
+
+- **The Game Master.** Like Helldivers' game master, the user sometimes joins Mental's side to
+  break humanity's last stand.
+  - The GM's page gets a free camera and a threat budget.
+  - With the budget the GM spends on waves, places bosses and picks where the horde hits.
+  - Later the GM can take direct control of a monster, a boss included.
+  - The Survivors director (`rust/se1-mod/src/survivors`) already spawns and steers hordes. The GM is
+    a human driving that director through the mod's UI channel, on the host.
+- **Players depend on each other.** Roles:
+  - a medic heals;
+  - crewed weapons need two players, e.g. a heavy minigun one fires while another feeds it, or a
+    rocket team with a loader;
+  - builders put down sentries and walls, as in Orcs Must Die.
+
+  The Survivors upgrade system is a start for role stats and abilities.
+- **Building.**
+  - Sentries can be mod-driven: an entity that aims and fires projectiles with the existing host
+    `projectile` call.
+  - Walls are the hard part. They need spawnable solid geometry with collision: a model entity
+    with a collision box, or movable brushes. That is engine work, to scout first.
+  - Bots then need the nav graph to update when walls appear: mark the blocked nodes, no full
+    rebuild.
+- **Player count.** Up to 128, "possibly unlimited". One Serious Engine game can't be unlimited:
+  every client simulates the whole world and the server sends every player's actions to everyone,
+  so cost grows with players × players. Beyond about 128, the war has to be many parallel matches
+  (fronts, sectors) feeding one shared war state (phase 7). Massive at the war level, bounded per
+  match.
+
 ## Open questions
 
 - Whether TFE levels have enough `NavigationMarker`s to be useful (count them at runtime).
