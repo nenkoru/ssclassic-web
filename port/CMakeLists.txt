@@ -155,7 +155,7 @@ target_link_options(serioussam PRIVATE
   $<$<BOOL:${SE1_DEV}>:-sASSERTIONS=1>
   $<$<OR:$<BOOL:${SE1_DEV}>,$<BOOL:${SE1_PROFILE}>>:--profiling-funcs>
   "$<$<BOOL:${SE1_THREADS}>:SHELL:--pre-js ${ROOT}/port/web/isolate.js>"
-  "SHELL:--pre-js ${ROOT}/port/web/pre.js" "SHELL:--pre-js ${ROOT}/port/web/audio.js" "SHELL:--pre-js ${ROOT}/port/web/gfx.js" "SHELL:--pre-js ${ROOT}/port/web/gfx-webgpu.js" "SHELL:--pre-js ${ROOT}/port/web/net.js" "SHELL:--post-js ${ROOT}/port/web/bench.js"
+  "SHELL:--pre-js ${ROOT}/port/web/pre.js" "SHELL:--pre-js ${ROOT}/port/web/audio.js" "SHELL:--pre-js ${ROOT}/port/web/gfx.js" "SHELL:--pre-js ${ROOT}/port/web/gfx-webgpu.js" "SHELL:--pre-js ${ROOT}/port/web/net.js" "SHELL:--pre-js ${ROOT}/port/web/survivors.js" "SHELL:--post-js ${ROOT}/port/web/bench.js"
   # (SHELL: keeps each flag with its argument; target_link_options would de-duplicate "--pre-js")
   -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=256MB -sSTACK_SIZE=4MB
   -Wl,--wrap=fopen -Wl,--wrap=open -Wl,--wrap=opendir   # case-insensitive opens (port/common/CaseFs.c)
@@ -181,4 +181,4 @@ if(SE1_THREADS)
 endif()
 # --pre-js/--post-js files are link inputs: relink when they change
 set_property(TARGET serioussam APPEND PROPERTY LINK_DEPENDS
-  "${ROOT}/port/web/pre.js" "${ROOT}/port/web/audio.js" "${ROOT}/port/web/gfx.js" "${ROOT}/port/web/gfx-webgpu.js" "${ROOT}/port/web/net.js" "${ROOT}/port/web/bench.js")
+  "${ROOT}/port/web/pre.js" "${ROOT}/port/web/audio.js" "${ROOT}/port/web/gfx.js" "${ROOT}/port/web/gfx-webgpu.js" "${ROOT}/port/web/net.js" "${ROOT}/port/web/survivors.js" "${ROOT}/port/web/bench.js")

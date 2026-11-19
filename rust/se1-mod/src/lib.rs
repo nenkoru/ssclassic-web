@@ -8,6 +8,7 @@
 
 mod config;
 mod host;
+mod survivors;
 
 use std::ffi::{c_char, c_int, CStr};
 
@@ -18,6 +19,7 @@ struct ModState {
     host: Host,
     config: ModConfig,
     frames: u64,
+    survivors: Option<survivors::Survivors>,
 }
 
 // The engine is single-threaded on the web; all entry points are called from its main loop.
@@ -61,7 +63,7 @@ pub extern "C" fn se1mod_init(raw: *const SE1ModHost) -> c_int {
     apply_cvars(&host, &config.cvars);
     run_commands(&host, &config.startup.commands);
 
-    unsafe { STATE = Some(ModState { host, config, frames: 0 }) };
+    unsafe { STATE = Some(ModState { host, config, frames: 0, survivors: None }) };
     0
 }
 
@@ -70,6 +72,9 @@ pub extern "C" fn se1mod_init(raw: *const SE1ModHost) -> c_int {
 pub extern "C" fn se1mod_frame(_tm_real: f64) {
     if let Some(st) = state() {
         st.frames += 1;
+        if let Some(sv) = st.survivors.as_mut() {
+            sv.frame(&st.host);
+        }
     }
 }
 
@@ -84,6 +89,8 @@ pub extern "C" fn se1mod_level_started(world_file: *const c_char) {
     };
     st.host.log(&format!("se1mod: level started: {world}"));
     run_commands(&st.host, &st.config.level.commands);
+    // ?mode=survivors (port/web/survivors.js): run Serious Survivors in this level
+    st.survivors = (st.host.page_option("se1Survivors") > 0.0).then(|| survivors::Survivors::new(&st.host));
     if let Some(cmds) = st.config.level.per_world.get(&world) {
         run_commands(&st.host, cmds);
     }
