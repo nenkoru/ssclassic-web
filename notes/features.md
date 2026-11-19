@@ -24,11 +24,15 @@ after landing one, add or update its row. Review every change against this file,
    row here, a reason and a test. `git diff vanilla -- src/` must stay explainable row by row.
 4. **Switchable.** A feature that changes behaviour has a URL option, or is a mode (`?mode=`).
    Anything risky is off by default until it is verified. Debug options are named `sv*`, `bot*`, etc.
-5. **Tested.** A feature has a test in `tools/test.sh`, unit tests for pure logic, or both. A
+5. **Modes are plug-ins.** Survivors is one minigame; war will be the main mode; more minigames
+   may come. A mode is a module under `rust/se1-mod/src/<mode>/` plus `port/web/<mode>.js`, chosen
+   by `?mode=`. Anything two modes need (HUD warnings, bots, the director) moves to a shared module
+   instead of being copied.
+6. **Tested.** A feature has a test in `tools/test.sh`, unit tests for pure logic, or both. A
    feature without a test isn't done.
-6. **Pure logic behind traits.** Logic that can be tested without the engine (navigation, AI,
+7. **Pure logic behind traits.** Logic that can be tested without the engine (navigation, AI,
    balance data, report maths) stays free of `host` calls. A thin adapter connects it.
-7. **Remove what's unused.** A feature that's superseded or never used is deleted, not left
+8. **Remove what's unused.** A feature that's superseded or never used is deleted, not left
    behind a flag.
 
 ## Features
@@ -51,10 +55,10 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
 | Multiplayer: virtual LAN switch | ✅ | rust/se1-server, port/common/NetLan.c, port/web/net.js | `?room=`, `&host=1` | mptest | — |
 | Multiplayer: WebRTC data channels | 🧪 | port/web/net.js, se1-server signal relay | `&rtc=1` | mptest --rtc (local only; internet needs STUN/TURN) | LAN |
 | Lobby | ✅ | port/web/lobby.js | Multiplayer button | lobbytest | LAN |
-| Rust mod layer (host API v6) | ✅ | port/common/{Se1ModHost,Se1ModEntities}.cpp, se1mod.h, rust/se1-mod/src/{lib,host,config}.rs | build `SE1_RUSTMOD` | cargo test | — |
+| Rust mod layer (host API v7) | ✅ | port/common/{Se1ModHost,Se1ModEntities}.cpp, se1mod.h, rust/se1-mod/src/{lib,host,config}.rs | build `SE1_RUSTMOD` | cargo test | — |
 | Damage hook + projectile attribution | ✅ | Entity.cpp hooks (3 call sites), Se1ModHost.cpp | used by Survivors | damagetest, projtest¹ | mod |
-| Serious Survivors mode | ✅ | rust/se1-mod/src/survivors/, port/web/survivors.js | `?mode=survivors` | svtest, cargo test | mod, damage hook |
-| Survivors threat warnings + hit direction | 🚧 | survivors (mod + page), host `player_hurt` (API v7) | `?svthreats=0` | threattest | Survivors |
+| Serious Survivors mode (a minigame; war is the main mode) | ✅ | rust/se1-mod/src/survivors/, port/web/survivors.js | `?mode=survivors` | svtest, cargo test | mod, damage hook |
+| Threat warnings + hit direction | ✅ | survivors (mod + page) for now; move to a shared HUD module when war mode needs it. Host `player_hurt` (API v7) | `?svthreats=0` | threattest | Survivors |
 | Playtest recording + report | ✅ | port/web/playtest.js, lib.rs `post_telemetry`, tools/devserver.py, tools/playtest-report.py | `?rec=1` | playtesttest, test_playtest_report.py | mod |
 | Benchmarks, visual regression | ✅ | port/web/bench.js, tools/{bench.mjs,shotdiff.py} | `?timedemo`, `?shots=` | test.sh | — |
 | Bots: navigation graph | 🚧 | rust/se1-mod/src/bots/nav.rs | — | tests/bots_nav_accept.rs | — |
