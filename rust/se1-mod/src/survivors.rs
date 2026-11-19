@@ -130,6 +130,8 @@ pub struct Survivors {
     rng: u64,
     dead: bool,
     log: Vec<String>, // recent ability procs, for the overlay
+    stress: usize,    // debug: hold this many monsters, nothing else (?svstress=N)
+    stress_class: &'static str,
 }
 
 impl Survivors {
@@ -145,7 +147,16 @@ impl Survivors {
             start: t, last_t: t, next_spawn: t + 2.0, next_boss: t + BOSS_EVERY_S, enemies: Vec::new(),
             level: 1, xp: 0.0, next_xp: 5.0, kills: 0, ranks: Vec::new(), cooldowns: Vec::new(), offer: None,
             last_hud: 0.0, rng: 0x9E37_79B9_7F4A_7C15 ^ (t.to_bits()), dead: false, log: Vec::new(),
+            stress: host.page_option("se1SurvivorsStress").max(0.0) as usize,
+            stress_class: match host.page_option("se1SurvivorsStressKind") as i32 {
+                1 => "Classes\\Boneman.ecl", 2 => "Classes\\Eyeman.ecl", 3 => "Classes\\Scorpman.ecl", 4 => "Classes\\Werebull.ecl",
+                _ => "Classes\\Headman.ecl",
+            },
         };
+        if s.stress > 0 {
+            host.shell_execute("cht_bGod = 1");
+            host.log(&format!("se1mod: survivors stress test, {} monsters", s.stress));
+        }
         s.xp += start_xp.max(0.0);
         host.ui_post(r#"{"type":"start"}"#);
         s
@@ -248,6 +259,40 @@ impl Survivors {
         let regen = 0.6 * self.rank(Up::Regeneration) as f32;
         if regen > 0.0 {
             host.player_heal(regen * dt as f32, 100.0);
+        }
+
+        // stress test: keep N monsters alive around the player, no abilities or level-ups
+        if self.stress > 0 {
+            let mut n = 0;
+            // in front of the player (in view), 10-45 m away within +-35 degrees
+            let d = host.player_view().unwrap_or([0.0, 0.0, -1.0]);
+            let yaw = (d[2] as f64).atan2(d[0] as f64);
+            // the level can move the player after the start: replace monsters left far behind
+            let mut i = 0;
+            while i < self.enemies.len() {
+                let far = host.position(self.enemies[i].h).map_or(true, |q| dist(q, pos) > 120.0);
+                if far {
+                    let e = self.enemies.swap_remove(i);
+                    host.damage(e.h, 1.0e6);
+                    host.release(e.h);
+                } else {
+                    i += 1;
+                }
+            }
+            while now - self.start > 3.0 && self.enemies.len() < self.stress && n < 16 {
+                let a = yaw + (self.rand() - 0.5) * 1.2;
+                let r = 10.0 + self.rand() * 35.0;
+                let q = [pos[0] + (a.cos() * r) as f32, pos[1] + 1.0, pos[2] + (a.sin() * r) as f32];
+                if let Some(h) = host.spawn(self.stress_class, q) {
+                    self.enemies.push(Enemy { h, xp: 0 });
+                }
+                n += 1;
+            }
+            if now - self.last_hud > 0.2 {
+                self.last_hud = now;
+                self.post_hud(host, now, None);
+            }
+            return;
         }
 
         // spawning: denser and tougher over time

@@ -8,6 +8,8 @@
   if (q.get('mode') !== 'survivors') return;
   Module.se1Survivors = 1;
   if (q.get('svxp')) Module.se1SurvivorsXp = +q.get('svxp');   // debug/test: start with XP
+  if (q.get('svstress')) Module.se1SurvivorsStress = +q.get('svstress');           // debug: hold N monsters
+  if (q.get('svkind')) Module.se1SurvivorsStressKind = +q.get('svkind');           // 0 Headman 1 Boneman 2 Eyeman 3 Scorpman 4 Werebull
   Module.se1SurvivorsLast = null;                                 // last HUD message (tests read it)
   if (!(Module['arguments'] || []).some(function (a) { return a === '+level'; }))
     Module['arguments'] = (Module['arguments'] || []).concat(['+level', q.get('level') || 'Levels/KarnakDemo.wld']);

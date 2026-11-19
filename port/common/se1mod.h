@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-#define SE1MOD_API_VERSION 2
+#define SE1MOD_API_VERSION 3
 
 typedef struct SE1ModHost {
   uint32_t api_version;   /* SE1MOD_API_VERSION */
@@ -59,6 +59,8 @@ typedef struct SE1ModHost {
   int (*ui_poll)(void);
   /* close the in-game computer (NETRICSA) if it is open */
   void (*close_computer)(void);
+  /* v3: the local player's view direction (unit vector, where they aim); 0 if there is no player */
+  int (*player_view)(float *dir3);
 } SE1ModHost;
 
 /* called once after the engine and game library are initialized; returns 0 on success */

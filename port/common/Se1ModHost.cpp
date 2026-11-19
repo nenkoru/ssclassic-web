@@ -73,6 +73,17 @@ static int host_player(float *pos, float *health)
   *health = ((CLiveEntity *)pen)->GetHealth();
   return *health > 0;
 }
+static int host_player_view(float *dir)
+{
+  CEntity *pen = local_player();
+  if (pen == NULL) return 0;
+  CPlacement3D pl = ((CPlayerEntity *)pen)->en_plViewpoint;   // relative to the body
+  pl.RelativeToAbsolute(pen->GetPlacement());
+  FLOAT3D v;
+  AnglesToDirectionVector(pl.pl_OrientationAngle, v);
+  dir[0] = v(1); dir[1] = v(2); dir[2] = v(3);
+  return 1;
+}
 static void host_player_heal(float amount, float max)
 {
   CEntity *pen = local_player();
@@ -182,6 +193,7 @@ void SE1Mod_Init(void)
   host.ui_post = host_ui_post;
   host.ui_poll = host_ui_poll;
   host.close_computer = host_close_computer;
+  host.player_view = host_player_view;
   _bModReady = se1mod_init(&host) == 0;
   if (!_bModReady) host_log("se1mod: init failed (API version mismatch?)");
 }

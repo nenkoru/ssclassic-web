@@ -4,7 +4,7 @@ use std::ffi::{c_char, c_int, CStr, CString};
 
 use crate::config::CvarValue;
 
-pub const API_VERSION: u32 = 2;
+pub const API_VERSION: u32 = 3;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -33,6 +33,7 @@ pub struct SE1ModHost {
     pub ui_post: Option<extern "C" fn(*const c_char)>,
     pub ui_poll: Option<extern "C" fn() -> c_int>,
     pub close_computer: Option<extern "C" fn()>,
+    pub player_view: Option<extern "C" fn(dir3: *mut f32) -> c_int>,
 }
 
 pub struct Host {
@@ -160,6 +161,12 @@ impl Host {
         }
     }
     /// Close the in-game computer (NETRICSA) if it is open.
+    /// The local player's view direction (unit vector), if there is a player.
+    pub fn player_view(&self) -> Option<[f32; 3]> {
+        let f = self.raw.player_view?;
+        let mut d = [0f32; 3];
+        (f(d.as_mut_ptr()) != 0).then_some(d)
+    }
     pub fn close_computer(&self) {
         if let Some(f) = self.raw.close_computer {
             f()
