@@ -78,7 +78,7 @@ try {
   await send('Page.addScriptToEvaluateOnNewDocument', { source: STUB });
   await send('Page.addScriptToEvaluateOnNewDocument', { source: "addEventListener('keydown', (e) => { if (e.code === 'Space') window.__space = e.defaultPrevented ? 'prevented' : 'default'; });" });
   // Survivors drops straight into play on a level
-  await send('Page.navigate', { url: url + (url.includes('?') ? '&' : '?') + 'mute=1&mode=survivors' });
+  await send('Page.navigate', { url: url + (url.includes('?') ? '&' : '?') + 'mute=1&mode=survivors&svauto=1' });
 
   let s = await until((x) => x.want === 1, 90000 * TIMEOUT_SCALE);
   check('game wants the mouse in play', s.want === 1, `want ${s.want}, frames ${s.frames}, hint ${s.hint}`);
