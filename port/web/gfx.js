@@ -11,6 +11,47 @@
 Module['se1gfx'] = (function () {
   var gl = null, vao, vbuf, ibuf, qbuf, qcap = 0;
   var sb = [0, 0, 0, 0, 0, 0];   // this batch's vertex stream bases in vbuf (OP_VSTREAMS)
+  // depth probes (OP_DEPTHPROBE): occlusion queries standing in for depth-buffer reads
+  var probeProg = null, probeLoc = null, probePending = {}, probeFree = [], probeRes = 0;
+  function probePoll() {   // finished queries -> the shim's result slots (shared memory)
+    for (var slot in probePending) {
+      var q = probePending[slot];
+      if (!gl.getQueryParameter(q, gl.QUERY_RESULT_AVAILABLE)) continue;
+      HEAP32[(probeRes >> 2) + (+slot)] = gl.getQueryParameter(q, gl.QUERY_RESULT) ? 1 : 0;
+      delete probePending[slot]; probeFree.push(q);
+    }
+  }
+  function depthProbes(I, F, c, cnt) {
+    if (!probeProg) {
+      probeProg = gl.createProgram();
+      var v = shader(gl.VERTEX_SHADER, '#version 300 es\nuniform vec3 uP;\nvoid main() { gl_Position = vec4(uP, 1.0); gl_PointSize = 1.0; }');
+      var f = shader(gl.FRAGMENT_SHADER, '#version 300 es\nprecision mediump float;\nout vec4 o;\nvoid main() { o = vec4(0.0); }');
+      gl.attachShader(probeProg, v); gl.attachShader(probeProg, f); gl.linkProgram(probeProg);
+      probeLoc = gl.getUniformLocation(probeProg, 'uP');
+    }
+    // save the state the probes change
+    var prog = gl.getParameter(gl.CURRENT_PROGRAM), vp = gl.getParameter(gl.VIEWPORT), dr = gl.getParameter(gl.DEPTH_RANGE);
+    var df = gl.getParameter(gl.DEPTH_FUNC), dm = gl.getParameter(gl.DEPTH_WRITEMASK), cm = gl.getParameter(gl.COLOR_WRITEMASK);
+    var dt = gl.isEnabled(gl.DEPTH_TEST), sc = gl.isEnabled(gl.SCISSOR_TEST);
+    gl.useProgram(probeProg); gl.viewport(0, 0, backW, backH); gl.depthRange(0, 1);
+    gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LESS); gl.depthMask(false); gl.colorMask(false, false, false, false);
+    gl.disable(gl.SCISSOR_TEST);
+    for (var k = 0; k < cnt; k++) {
+      var o = c + 4 * k, slot = I[o];
+      if (probePending[slot]) continue;          // the last query for this point is still in flight
+      var q = probeFree.pop() || gl.createQuery();
+      // visible if nothing nearer is in the depth buffer (DepthCheck.cpp: fOoK < buffer depth)
+      gl.uniform3f(probeLoc, (I[o + 1] + 0.5) / logW * 2 - 1, (I[o + 2] + 0.5) / logH * 2 - 1, F[o + 3] * 2 - 1);
+      gl.beginQuery(gl.ANY_SAMPLES_PASSED_CONSERVATIVE, q);
+      gl.drawArrays(gl.POINTS, 0, 1);
+      gl.endQuery(gl.ANY_SAMPLES_PASSED_CONSERVATIVE);
+      probePending[slot] = q;
+    }
+    gl.useProgram(prog); gl.viewport(vp[0], vp[1], vp[2], vp[3]); gl.depthRange(dr[0], dr[1]);
+    gl.depthFunc(df); gl.depthMask(dm); gl.colorMask(cm[0], cm[1], cm[2], cm[3]);
+    if (!dt) gl.disable(gl.DEPTH_TEST);
+    if (sc) gl.enable(gl.SCISSOR_TEST);
+  }
   // render scale (dynamic resolution): the engine keeps its logical size (SDL's canvas size, HUD
   // layout, input coordinates); we draw into a smaller backing store and scale viewport/scissor.
   // The canvas keeps its CSS size, so the browser stretches the result to fill it.
@@ -133,6 +174,7 @@ Module['se1gfx'] = (function () {
     replay: function (cp, n, vp, vn, ip, inn, dp, dn) {
       init();
       var I = HEAP32, F = HEAPF32, c = cp >> 2, end = c + n;
+      if (probeRes) probePoll();
       if (vn) gl.bufferData(gl.ARRAY_BUFFER, HEAPU8.subarray(vp, vp + vn), gl.STREAM_DRAW);
       if (inn) gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, HEAPU8.subarray(ip, ip + inn), gl.STREAM_DRAW);
       while (c < end) {
@@ -183,6 +225,8 @@ Module['se1gfx'] = (function () {
                         I[c + 10] >= 0 ? dp + I[c + 10] : 0, I[c + 11]);
           c += 12; break;
         case 35: gl.pixelStorei(I[c + 1], I[c + 2]); c += 3; break;                    // PIXELSTORE
+        case 37:                                                                        // DEPTHPROBE n res (slot x y depth) x n
+          probeRes = I[c + 2]; depthProbes(I, F, c + 3, I[c + 1]); c += 3 + 4 * I[c + 1]; break;
         case 36: {                                                                      // VSTREAMS (ptr len) x6
           var tot = 0, k;
           for (k = 0; k < 6; k++) { sb[k] = tot; tot += (I[c + 2 + 2 * k] + 15) & ~15; }

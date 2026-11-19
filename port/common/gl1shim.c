@@ -15,6 +15,7 @@
  */
 #include <GLES3/gl3.h>
 #include <emscripten.h>
+#include <emscripten/atomic.h>
 #include <SDL.h>
 #include <math.h>
 #include <stdint.h>
@@ -163,7 +164,7 @@ enum {
   OP_USEPROG = 22, OP_UNIFORM1I = 23, OP_UNIFORM1F = 24, OP_UNIFORM4F = 25, OP_UNIFORMMAT4 = 26,
   OP_ATTRIB_ON = 27, OP_ATTRIB_OFF = 28, OP_ATTRIB_CONST = 29, OP_ATTRIB_PTR = 30,
   OP_DRAW_ELEMENTS = 31, OP_DRAW_QUADS = 32, OP_DRAW_ARRAYS = 33,
-  OP_TEXIMAGE = 34, OP_PIXELSTORE = 35, OP_VSTREAMS = 36
+  OP_TEXIMAGE = 34, OP_PIXELSTORE = 35, OP_VSTREAMS = 36, OP_DEPTHPROBE = 37
 };
 typedef union { int32_t i; float f; } Word;
 static Word *_cmd; static size_t _ncmd, _capcmd;
@@ -1023,4 +1024,43 @@ void *SE1_GL1Shim_GetProcAddress(const char *name) {
     return (void *)shim_nop;
   }
   return p;
+}
+
+
+/* ---- depth probes (lens flare / corona visibility) ----
+   WebGL can't read the depth buffer, so the engine's depth-point checks (Engine/Graphics/DepthCheck.cpp)
+   come here instead: each point is recorded into the command stream at the moment the engine would
+   have read the depth buffer, and the replayer tests it with an occlusion query (a 1-pixel point at
+   the point's depth). Query results arrive a frame or two later in a shared array, one slot per
+   point id; the engine already uses each point's visibility a frame late. */
+#define MAXPROBES 128
+static int32_t _probeResult[MAXPROBES];   /* written by the replayer: -1 unknown, 0 hidden, 1 visible */
+static int32_t _probeId[MAXPROBES];
+static int _probeUsed, _probeNext;
+static struct { int slot, x, y; float depth; } _probeQ[MAXPROBES];
+static int _probeQN;
+static int probe_slot(int id) {
+  for (int i = 0; i < _probeUsed; i++) if (_probeId[i] == id) return i;
+  int i = _probeUsed < MAXPROBES ? _probeUsed++ : (_probeNext++ % MAXPROBES);   /* reuse round-robin */
+  _probeId[i] = id; _probeResult[i] = -1;
+  return i;
+}
+/* queue a probe for point `id` at GL window coordinates (x, y) and depth; returns the latest result */
+int SE1_GL1Shim_DepthProbe(int id, int x, int y, float depth);
+int SE1_GL1Shim_DepthProbe(int id, int x, int y, float depth) {
+  shim_init();
+  int slot = probe_slot(id);
+  if (_probeQN < MAXPROBES) { _probeQ[_probeQN].slot = slot; _probeQ[_probeQN].x = x; _probeQ[_probeQN].y = y; _probeQ[_probeQN].depth = depth; _probeQN++; }
+  return emscripten_atomic_load_u32((void *)&_probeResult[slot]) == 0xFFFFFFFFu ? -1 : (int)_probeResult[slot];
+}
+/* record the queued probes as one command */
+void SE1_GL1Shim_DepthProbesEnd(void);
+void SE1_GL1Shim_DepthProbesEnd(void) {
+  if (!_probeQN) return;
+  Word *w = cmd(OP_DEPTHPROBE, 2 + 4 * _probeQN);
+  w[0].i = _probeQN; w[1].i = (int32_t)(uintptr_t)_probeResult;
+  for (int i = 0; i < _probeQN; i++) {
+    w[2 + 4 * i].i = _probeQ[i].slot; w[3 + 4 * i].i = _probeQ[i].x; w[4 + 4 * i].i = _probeQ[i].y; w[5 + 4 * i].f = _probeQ[i].depth;
+  }
+  _probeQN = 0;
 }

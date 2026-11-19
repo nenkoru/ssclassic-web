@@ -611,6 +611,11 @@
             texDirty = true;
             c += 12; break;
           case 35: c += 3; break;                                              // PIXELSTORE: n/a
+          case 37: {                                                           // DEPTHPROBE: not implemented here yet,
+            var pn = I[c + 1], pr = I[c + 2] >> 2;                             // so every point is visible (as before)
+            for (var pk = 0; pk < pn; pk++) HEAP32[pr + I[c + 3 + 4 * pk]] = 1;
+            c += 3 + 4 * pn; break;
+          }
           case 36: {                                                           // VSTREAMS (ptr len) x6
             var tot = 0, k;
             for (k = 0; k < 6; k++) { sb[k] = tot; tot += (I[c + 2 + 2 * k] + 15) & ~15; }

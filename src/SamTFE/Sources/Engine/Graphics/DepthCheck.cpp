@@ -56,6 +56,11 @@ CStaticStackArray<DepthInfo> _adiDelayed;  // active delayed points
 CStaticStackArray<CTVERTEX> _avtxDelayed;  
 CStaticStackArray<COLOR>    _acolDelayed;  
 
+#ifdef __EMSCRIPTEN__
+extern "C" int SE1_GL1Shim_DepthProbe(int id, int x, int y, float depth);   // port/common/gl1shim.c
+extern "C" void SE1_GL1Shim_DepthProbesEnd(void);
+#endif
+
 // read depth buffer and update visibility flag of depth points
 static void UpdateDepthPointsVisibility( const CDrawPort *pdp, const INDEX iMirrorLevel,
                                          DepthInfo *pdi, const INDEX ctCount)
@@ -66,6 +71,22 @@ static void UpdateDepthPointsVisibility( const CDrawPort *pdp, const INDEX iMirr
   const CRaster *pra = pdp->dp_Raster;
 
   // OpenGL
+#ifdef __EMSCRIPTEN__
+  // web port: WebGL can't read the depth buffer. gl1shim tests each point with an occlusion query at
+  // this point in the frame; the answer arrives a frame or two later (port/common/gl1shim.c).
+  if( eAPI==GAT_OGL)
+  {
+    for( INDEX idi=0; idi<ctCount; idi++) {
+      DepthInfo &di = pdi[idi];
+      if( iMirrorLevel!=di.di_iMirrorLevel || _iCheckIteration!=di.di_iSwapLastRequest) continue;
+      const PIX pixJ = pra->ra_Height-1 - di.di_pixJ; // OpenGL has Y-inversed buffer!
+      const int iVisible = SE1_GL1Shim_DepthProbe( di.di_iID, di.di_pixI, pixJ, di.di_fOoK);
+      if( iVisible>=0) di.di_bVisible = iVisible;   // unknown yet: keep the last answer
+    }
+    SE1_GL1Shim_DepthProbesEnd();
+    return;
+  }
+#endif
   if( eAPI==GAT_OGL)
   { 
     _sfStats.StartTimer(CStatForm::STI_GFXAPI);
@@ -355,6 +376,7 @@ extern void CheckDelayedDepthPoints( const CDrawPort *pdp, INDEX iMirrorLevel/*=
 
   // check and update visibility of what has left
   ASSERT( ctPoints == _adiDelayed.Count());
+
   if( ctPoints>0) UpdateDepthPointsVisibility( pdp, iMirrorLevel, &_adiDelayed[0], ctPoints);
 
   // mark checking

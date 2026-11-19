@@ -637,6 +637,18 @@ void CRenderer::DrawToScreen(void)
   // render lens flares
   if( !re_bRenderingShadows) {
     ChangeStatsMode(CStatForm::STI_FLARESRENDERING);
+#ifdef __EMSCRIPTEN__
+    // web port: WebGL clears the depth buffer after every presented frame, so the check in Render()
+    // (made against the previous frame's depth before drawing) would see an empty buffer and every
+    // flare would shine through walls. Check here instead: this frame's world is in the depth buffer
+    // and the flares (which may write depth themselves) aren't drawn yet. The points are the ones the
+    // flares requested last frame, as in the original delayed scheme; gl1shim answers with occlusion
+    // queries a frame or so later.
+    if( re_iIndex==0) {
+      extern void CheckDelayedDepthPoints( const CDrawPort *pdp, INDEX iMirrorLevel=0);
+      CheckDelayedDepthPoints(re_pdpDrawPort);
+    }
+#endif
     RenderLensFlares(); // (this also sets orthographic projection!)
     ChangeStatsMode(CStatForm::STI_WORLDRENDERING);
   }
@@ -737,9 +749,11 @@ void CRenderer::Render(void)
 #else
     if( _pGfx->gl_eCurrentAPI==GAT_OGL || d3d_bAlternateDepthReads) {
 #endif // SE1_VULKAN
+#ifndef __EMSCRIPTEN__   // web port: done at the end of DrawToScreen instead
       ChangeStatsMode(CStatForm::STI_FLARESRENDERING);
       extern void CheckDelayedDepthPoints( const CDrawPort *pdp, INDEX iMirrorLevel=0);
       CheckDelayedDepthPoints(re_pdpDrawPort);
+#endif
     }
     // in 1st pass - mirrors are not drawn
     _bMirrorDrawn = FALSE;
