@@ -1,68 +1,139 @@
 # Serious Survivors
 
-A Vampire Survivors-style minigame running on the engine. It takes ideas from the original game and
-from wow.aethus.pl, which mixes WoW abilities into the survivors loop. You fight with Sam's normal
-weapons; the upgrades you pick add auras and procs on top.
+A Vampire Survivors-style mode built on the engine. You aim and fire Sam's own guns. Upgrades rank
+those guns up, add auto-cast abilities and passives, and evolve the guns.
+
+Background:
+- the design research is in `notes/survivors-research.md` (survivors-likes, Serious Sam,
+  wow.aethus.pl);
+- the engine reference (what a mod can spawn and change) is in `notes/survivors-engine.md`.
 
 ## Play
 
 `http://127.0.0.1:8094/serioussam.html?mode=survivors`
 
-- `&level=Levels/<map>.wld` picks the map. The default is `Levels/KarnakDemo.wld`.
-- `&svxp=N` starts with N XP, for testing.
-- On a level-up, press 1–3 or click a card. Then click the game to grab the mouse again.
+- **Bigger maps and extra monsters** (Marsh Hoppers, Reptiloids, Lava Golems) need the full game
+  build:
+  `http://127.0.0.1:8096/serioussam.html?mode=survivors&level=Levels/01_Hatshepsut.wld`.
+- **Lobby:**
+  - pick a character and a difficulty;
+  - buy permanent upgrades with gold;
+  - press Enter to start.
+- **During a run:**
+  - **Level-up:** 1–4 picks a card, R rerolls, S skips. The mouse stays captured.
+  - **Chests:** Space or Enter continues.
+  - **Results:** Enter plays again. After a victory, E continues in endless mode.
+- **Saved progress:** gold, upgrades, unlocks and the best score are kept in the browser's
+  `localStorage`, under the key `se1sv`.
 
-## Rules
+## The run (20:00)
 
-- **Spawns:** monsters spawn in a ring 18–30 m around the player.
-  - The cap starts at 10 and grows by 6 a minute, up to 60.
-  - The spawn interval starts at 1.4 s, drops 0.15 s a minute, and never goes below 0.25 s.
-- **Monsters and XP per kill:**
+- **Director** (`PHASES` and `EVENTS` in `rust/se1-mod/src/survivors/data.rs`):
+  - Each phase has a spawn mix, a minimum number of monsters on the field and a spawn interval.
+  - Monsters spawn 18–32 m away, mostly outside the view.
+  - Health grows 6% a minute. After 3:00, 4% of spawns are elites: 6× health, bigger, red glow;
+    they drop health and ammo.
+- **Events:**
 
-  | Monster   | XP | Appears from         |
-  |-----------|----|----------------------|
-  | Headman   | 1  | the start            |
-  | Boneman   | 2  | 20 s                 |
-  | Eyeman    | 2  | 60 s                 |
-  | Scorpman  | 6  | 120 s                |
-  | Werebull  | 12 | boss, every 90 s     |
+  | Time | Event |
+  |---|---|
+  | 2:00, 17:30 | Swarm (Marsh Hoppers; Beheaded in the demo) |
+  | 4:00, 8:00, 10:00, 12:00, 16:00 | Mini-bosses that drop chests (1, 3, 1, 3, 5 items) |
+  | 5:00, 11:00, 15:00 | Sirian relics with Serious power-ups (Damage ×4, Invulnerability, Speed, Invisibility) |
+  | 6:00, 13:00, 14:00 | Kamikaze stampedes: a scream and a direction marker 2.5 s ahead |
+  | 9:00, 18:30 | Werebull runs |
+  | 11:30, 15:30 | Kleer rain |
+  | 20:00 | The champion: a big Lava Golem, or a giant Arachnoid General in the demo |
 
-- **Levels:** XP needed for the next level = previous × 1.25 + 4.
-  - Each level-up pauses the game and offers 3 of the 12 upgrades, new or ranked up.
-- **Upgrades** (rank r):
+  Killing the champion is a victory, with a time bonus. Then you can carry on in endless mode.
+- **XP:**
+  - Gems: armor shards, or pills for big ones. They are pulled in by a 3.5 m magnet.
+  - Gems merge once 120 are on the ground.
+  - The XP curve is linear: 5, 15, 25… per level.
 
-  | Upgrade          | Effect                                                    |
-  |------------------|-----------------------------------------------------------|
-  | Consecration     | Aura: 8+6r damage/s within 5+1.5r m                       |
-  | Chain Lightning  | Bolt for 30+15r that jumps 2+r times                      |
-  | Multi-Shot       | Every 1.6 s, hits the 2+r nearest foes for 18+8r          |
-  | Arcane Explosion | Nova for 40+20r within 8+r m                              |
-  | Serious Bomb     | Clears every foe within 30 m (every 50−6r s, min 20 s)    |
-  | Fleet Foot       | Move 12r% faster                                          |
-  | Vampiric Touch   | Heal 0.5r per kill                                        |
-  | Regeneration     | Regenerate 0.6r health/s                                  |
-  | Bloodlust        | Abilities recharge 10r% faster                            |
-  | Greed            | 20r% more XP                                              |
-  | Armory           | Every weapon, fully loaded                                |
-  | Second Wind      | Health and ammo refilled now                              |
+## Builds
 
-- **Death:** shows your level, kills and time. Reload the page to retry.
+- **Guns** (Sam's own; ranks I–V; you can carry every gun):
+  - Each rank adds +20% damage. It works by watching enemy health: any health loss the mod didn't
+    cause is from your gun, so the mod adds the rank bonus on top.
+  - Ammo regenerates by rank.
+  - Rank-specific: twin rockets at III; a second revolver at III.
+- **Abilities** (4 slots; auto-cast with visible effects):
+  - Consecration (ring);
+  - Chain Lightning (bolts, elites first);
+  - Sirian Missiles;
+  - Arcane Explosion;
+  - Rain of Fire (explosions on the thickest crowd);
+  - Serious Bomb (screen flash).
+- **Passives** (5 slots): Fleet Foot, Vampiric Touch, Regeneration, Bloodlust, Greed, Kevlar Vest,
+  Big Boom, Netricsa Scanner, Lucky Pyramid, Overheal.
+- **Evolutions:** a gun at rank V, plus its paired upgrade, plus a chest opened after 10:00.
+
+| Gun | Pair | Evolution |
+|---|---|---|
+| Knife | Vampiric Touch | Butcher of Thebes |
+| Revolver | Fleet Foot | High Noon |
+| Pump Shotgun | Kevlar Vest | Pump-Action Pharaoh |
+| Double Coach Gun | Bloodlust | Coach Gun of the Apocalypse |
+| Tommy Gun | Greed | Chicago Typewriter |
+| Minigun | Regeneration | Lead Hurricane |
+| Rocket Launcher | Big Boom | Rocket Party |
+| XL2 Laser | Chain Lightning | Sirian Storm Cannon |
+| SBC Cannon (full game) | Serious Bomb | Cannon of Mass Destruction |
+
+## Meta progression (page side)
+
+- **Characters,** unlocked by achievements:
+
+  | Character | Unlocked by |
+  |---|---|
+  | Serious Sam | available from the start |
+  | Red Rick | surviving 10:00 |
+  | Mighty Marvin | 1000 kills in one run |
+  | Lucky Larry | evolving a gun |
+  | Sirian Sam | a victory |
+
+- **Difficulties:** Tourist, Normal, Serious, Mental. Each one is unlocked by winning the one before.
+  Harder difficulties scale enemy health, monster density and gold.
+- **Shop:** Might, Armor, Max Health, Recovery, Cooldown, Area, Magnet, Growth, Greed, Luck, Revival,
+  Reroll, Skip.
 
 ## Code
 
-- `rust/se1-mod/src/survivors.rs` holds the game logic: spawning, XP, upgrades and procs.
-  - It runs every frame through the mod layer.
-  - It uses the host API v2 in `port/common/se1mod.h`: player, spawn, damage, pause, page overlay.
-- `port/web/survivors.js` handles the page side:
-  - it reads the URL options;
-  - it draws the HUD and the level-up cards;
-  - it sends your choice back with `Module._SE1Mod_UiSend`.
-- `tools/svtest.mjs` is the browser test, and `tools/test.sh` runs it on both builds.
+- `rust/se1-mod/src/survivors/mod.rs`: the run, the director, damage tracking, abilities, cards,
+  chests and page messages.
+- `rust/se1-mod/src/survivors/data.rs`: the tables (monsters, phases, events, upgrades, evolutions,
+  characters, difficulties).
+- **Engine access** (host API v4):
+  - `port/common/se1mod.h` and `port/common/Se1ModHost.cpp`;
+  - `port/common/Se1ModEntities.cpp` for typed access to entity classes.
+- **Page:** `port/web/survivors.js`, for the lobby, HUD, damage numbers, cards, chest roulette and
+  results.
+  - Messages from the mod: `lobby`, `start`, `hud`, `fx`, `offer`, `chest`, `banner`, `warn`,
+    `achv`, `end`.
+  - Answers go back through `Module._SE1Mod_UiSend`.
+- **Test:** `tools/svtest.mjs` checks the level-up flow, the lobby, abilities and an evolution. It
+  runs on both builds in `tools/test.sh`.
+- **Debug URL options:**
 
-## Ideas next
+  | Option | Effect |
+  |---|---|
+  | `svauto=1` | no lobby |
+  | `svxp=N` | start with N XP |
+  | `svgive=<bit mask>` (with `svrank=N`) | grant upgrades, in `data::ALL` order |
+  | `svtime=<seconds>` | start the clock there |
+  | `svchest=N` | open a chest with N items |
+  | `svgod=1` | god mode |
+  | `svcap=N` | monster cap |
+  | `svstress=N` with `svkind=K` | monster stress test (`tools/stress.mjs`) |
 
-- **More upgrades:** orbiting blades, frost nova (slow), ricochet, pickup magnet. XP gems on the
-  ground instead of XP on kill.
-- **The arena:** a dedicated open map. Karnak's corridors limit the swarm.
-- **Co-op Survivors** over the virtual LAN; this needs the mod running on the host only.
-- **Balance:** at about 8–10 minutes the monster cap stops rising, so late runs plateau.
+## Next
+
+- **Co-op Survivors:** the host runs the director, and every player picks their own cards.
+- **Damage hook:** an engine `on_damage` hook would be more exact than watching health. It would
+  also give Serious Damage to the guns, and true gun attribution for projectile kills.
+- **Characters:** player models per character.
+- **Stages:** a stage select with open arenas from the full game.
+- **Music:** feed swarms and bosses into the music holder's intensity level.
+- **Balance:** a full 20-minute playtest on Normal; the numbers so far come from the research,
+  not from play.
