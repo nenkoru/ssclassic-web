@@ -87,7 +87,13 @@ extern FLOAT _fNoSizeJ;
 
 // application state variables
 #ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#include <emscripten/atomic.h>
 extern "C" int SE1_NetLan_IpLow(void);   // port/common/NetLan.c
+#ifdef SE1_THREADS
+extern "C" void SE1_InitPersistentStorage(void);   // port/common/Persist.cpp
+#endif
+extern volatile int32_t se1_saveRequested;   // defined in port/common/WebFrame.cpp; set by SE1_RequestSave
 #endif
 __extern BOOL _bRunning = TRUE;
 __extern BOOL _bQuitScreen = TRUE;
@@ -1241,6 +1247,30 @@ static void SetDPIAwareness(void) {
 };
 #endif // PLATFORM_WIN32
 
+#ifdef __EMSCRIPTEN__
+// web: the engine stores settings only at shutdown, which never happens in a browser. Store them
+// on demand (port/web/persist.js asks through SE1_RequestSave; the per-frame hook is in
+// port/common/WebFrame.cpp). Same steps as CGame::EndInternal's save part, nothing that quits
+// or changes game state. In the single-threaded build the store lands in IDBFS (port/web/
+// persist.js mounts it), so it must be flushed to IndexedDB right away; the threaded build's
+// WASMFS OPFS backend persists on its own.
+void SE1_StoreSettings(void)
+{
+  if (_pShell) _pShell->StorePersistentSymbols(CTString("Scripts\\PersistentSymbols.ini"));
+  if (_pGame) {
+    _pGame->SavePlayersAndControls();
+    try { _pGame->Save_t(); } catch (const char * /*strError*/) {}
+  }
+#ifndef SE1_THREADS
+  EM_ASM({ if (Module.se1PersistFlush) Module.se1PersistFlush(); });
+#endif
+}
+extern "C" EMSCRIPTEN_KEEPALIVE void SE1_RequestSave(void)
+{
+  emscripten_atomic_store_u32((void *)&se1_saveRequested, 1);
+}
+#endif
+
 int SubMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
   (void)hPrevInstance;
@@ -1824,6 +1854,11 @@ static inline void warn_profiling(void)
 
 int main(int argc, char **argv)
 {
+  #ifdef __EMSCRIPTEN__
+  #ifdef SE1_THREADS
+  SE1_InitPersistentStorage();   // WASMFS OPFS backend at /libsdl, before the engine reads its user dir
+  #endif
+  #endif
   #ifdef BETAEXPIRE
     // !!! FIXME: This is Unix-centric (at least, non-win32) if put in main().
     check_beta();

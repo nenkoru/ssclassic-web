@@ -15,6 +15,7 @@
  */
 #include <emscripten.h>
 #include <emscripten/threading.h>
+#include <emscripten/atomic.h>
 #include <Engine/Engine.h>
 #include <Engine/Network/Network.h>
 #include <Engine/Base/Shell.h>
@@ -25,6 +26,20 @@ extern "C" EMSCRIPTEN_KEEPALIVE float SE1_DemoTime(void)
   if (_pNetwork == NULL || !_pNetwork->ga_bDemoPlay) return -1.0f;
   return _pNetwork->ga_fDemoTimer;
 }
+/* web persistence (port/web/persist.js): the page sets the flag through SE1_RequestSave
+   (Module.se1SaveNow) on hide/pagehide/periodically; the engine stores its settings on the
+   next frame, on this thread. The store itself is in SeriousSam.cpp. */
+#ifdef __EMSCRIPTEN__
+volatile int32_t se1_saveRequested;   // set by the page (SE1_RequestSave), consumed once per frame here
+extern void SE1_StoreSettings(void);  // SeriousSam.cpp
+static void se1_maybe_store_settings(void)
+{
+  if (emscripten_atomic_load_u32((void *)&se1_saveRequested)) {
+    emscripten_atomic_store_u32((void *)&se1_saveRequested, 0);
+    SE1_StoreSettings();
+  }
+}
+#endif
 
 /* page options that must be in place before the first video mode (SeriousSam.cpp calls this
    right before the command-line script): ?res=WxH. Read through the main thread, which owns the
@@ -134,9 +149,11 @@ extern "C" void SE1_YieldToBrowser(void)
 #ifdef SE1_WITH_RUSTMOD
   SE1Mod_Frame();
 #endif
+#ifdef __EMSCRIPTEN__
+  se1_maybe_store_settings();
+#endif
   se1_wait_frame();
 }
-
 #else  /* SE1_THREADS: the engine runs in a worker (render plan phase 3) */
 #include <emscripten/threading.h>
 #include <emscripten/atomic.h>
@@ -171,6 +188,9 @@ extern "C" void SE1_YieldToBrowser(void)
   if (_resumed > 0) { _perfWork[_perfN & 65535] = (float)(now - _resumed); _perfN = _perfN + 1; }
 #ifdef SE1_WITH_RUSTMOD
   SE1Mod_Frame();   /* the Rust mod layer's per-frame hook (as in the single-threaded build) */
+#endif
+#ifdef __EMSCRIPTEN__
+  se1_maybe_store_settings();
 #endif
   start_main_thread_loop();
   if (_uncapped < 0) _uncapped = MAIN_THREAD_EM_ASM_INT({ return Module.se1Uncapped ? 1 : 0; });
