@@ -7,7 +7,7 @@
 //! Config: `<data_dir>/SE1Mod/config.toml` (see `SE1Mod/config.example.toml`).
 
 mod config;
-mod host;
+pub mod host;
 pub mod bots;
 mod quality;
 mod survivors;
