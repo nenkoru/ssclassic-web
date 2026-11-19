@@ -4,8 +4,8 @@
 // (synchronous proxies show up as _do_futex_wait).
 //   node tools/profile-worker.mjs "http://127.0.0.1:8094/serioussam.html?bench=1&uncapped=1" out.txt [seconds=5] [--android]
 // --android: profile Chrome on a phone over adb (see tools/bench.mjs --android; ADB_SERIAL picks the device)
-import { spawn, execFileSync } from 'node:child_process'; import { mkdtempSync, writeFileSync } from 'node:fs'; import { tmpdir } from 'node:os'; import { join } from 'node:path';
-import { CHROME, gpuFlags, EXTRA_FLAGS } from './chrome.mjs';   // CHROME, SE1_ANGLE, SE1_CHROME_FLAGS
+import { spawn, execFileSync } from 'node:child_process'; import { writeFileSync } from 'node:fs';
+import { CHROME, gpuFlags, EXTRA_FLAGS, tempProfile, closeChrome } from './chrome.mjs';   // CHROME, SE1_ANGLE, SE1_CHROME_FLAGS
 const argv = process.argv.slice(2), android = argv.includes('--android');
 const [url, out, secs] = argv.filter(a => a !== '--android');
 let port = 9600 + Math.floor(Math.random() * 30), c = { kill() {} };
@@ -16,7 +16,7 @@ if (android) {
   adb('reverse', `tcp:${new URL(url).port}`, `tcp:${new URL(url).port}`);
   const awake = () => { try { adb('shell', 'input keyevent KEYCODE_WAKEUP; input keyevent KEYCODE_UNKNOWN'); } catch {} };
   awake(); setInterval(awake, 10000).unref();
-} else c = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), 'wp-'))}`, '--mute-audio', ...gpuFlags(), ...EXTRA_FLAGS, 'about:blank'], { stdio: 'ignore' });
+} else c = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${tempProfile('wp-')}`, '--mute-audio', ...gpuFlags(), ...EXTRA_FLAGS, 'about:blank'], { stdio: 'ignore' });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 let ws; for (let t = 0; t < 50 && !ws; t++) { try { const v = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json(); ws = new WebSocket(v.webSocketDebuggerUrl); } catch { await sleep(200); } }
 await new Promise(r => ws.onopen = r); let id = 0; const pend = new Map(); const workers = [];
@@ -52,4 +52,4 @@ for (const w of workers) { const r = await send('Profiler.stop', {}, w); const p
   if (!best || tot > best.tot) best = { tot, self, st }; }
 const top = Object.entries(best.self).sort((a, b) => b[1] - a[1]).slice(0, 45).map(([n, k]) => (100 * k / best.tot).toFixed(1).padStart(5) + '%  ' + n);
 const stk = Object.entries(best.st).sort((a, b) => b[1] - a[1]).slice(0, 15).map(([n, k]) => (100 * k / best.tot).toFixed(1).padStart(5) + '%  ' + n);
-writeFileSync(out, top.join('\n') + '\n\n== futex-wait stacks\n' + stk.join('\n')); console.log('busy samples', best.tot); c.kill(); process.exit(0);
+writeFileSync(out, top.join('\n') + '\n\n== futex-wait stacks\n' + stk.join('\n')); console.log('busy samples', best.tot); await closeChrome(c); process.exit(0);

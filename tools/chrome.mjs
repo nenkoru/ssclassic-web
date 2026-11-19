@@ -7,8 +7,10 @@
 //                      GL, no GPU needed), vulkan, gl, ...
 //   SE1_CHROME_FLAGS   extra Chrome flags, space separated (e.g. "--no-sandbox" in containers/CI)
 //   SE1_TIMEOUT_SCALE  multiply the tools' timeouts and measuring windows (slow machines, SwiftShader)
-import { existsSync } from 'node:fs';
-
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 const LINUX_CHROMES = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/opt/google/chrome/chrome',
   '/usr/bin/chromium', '/usr/bin/chromium-browser'];
 
@@ -28,3 +30,48 @@ export function gpuFlags(angle = ANGLE) {
 }
 
 export const EXTRA_FLAGS = (process.env.SE1_CHROME_FLAGS || '').split(/\s+/).filter(Boolean);
+
+// Chrome profiles for the test tools: tempProfile() makes one and remembers it, closeChrome()
+// stops a Chrome and deletes the profiles its Chromes have finished using, and a synchronous
+// safety net deletes whatever is left on exit (Chrome writes ~350 MB of profile per test run,
+// and os.tmpdir() fills up).
+const profiles = [];   // remembered profile dirs, in creation order
+
+export function tempProfile(prefix) {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  profiles.push(dir);
+  return dir;
+}
+
+const rmProfile = (dir) => {
+  try { rmSync(dir, { recursive: true, force: true }); }
+  catch (e) {   // Chrome may still be flushing: one retry after 200 ms
+    if (e.code === 'ENOTEMPTY' || e.code === 'EBUSY') setTimeout(() => { try { rmSync(dir, { recursive: true, force: true }); } catch {} }, 200).unref?.();
+  }
+};
+
+export async function closeChrome(proc) {
+  // each Chrome gets the oldest unclaimed profile: the tools launch one Chrome per profile,
+  // closing them in launch order, and the profile path is what a signal handler uses to find
+  // and kill a stray Chrome
+  const profile = profiles.shift();
+  if (proc && proc.exitCode === null && !proc.killed) proc.kill();
+  if (!proc) return;
+  const exited = proc.exitCode !== null ? Promise.resolve() : new Promise((r) => proc.once('exit', r));
+  await Promise.race([exited, new Promise((r) => setTimeout(r, 3000))]);
+  if (proc.exitCode === null) proc.kill('SIGKILL');
+  if (profile) rmProfile(profile);
+}
+
+process.on('exit', () => { for (const dir of profiles) rmProfile(dir); });
+for (const [sig, code] of [['SIGINT', 130], ['SIGTERM', 143]]) {
+  process.on(sig, () => {
+    // kill any Chrome still using a remembered profile (matches --user-data-dir=<dir> in its
+    // command line), then delete the profiles
+    for (const dir of [...profiles]) {
+      try { execFileSync('pkill', ['-f', `user-data-dir=${dir}`]); } catch {}
+      rmProfile(dir);
+    }
+    process.exit(code);
+  });
+}

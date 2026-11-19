@@ -12,17 +12,14 @@
 // frame. mt: /libsdl is an OPFS-backed directory (WASMFS); st: /libsdl is an
 // IDBFS mount (IndexedDB database named "/libsdl", store FILE_DATA).
 import { spawn } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { CHROME, gpuFlags, EXTRA_FLAGS, TIMEOUT_SCALE } from './chrome.mjs';
+import { CHROME, gpuFlags, EXTRA_FLAGS, TIMEOUT_SCALE, tempProfile, closeChrome } from './chrome.mjs';
 
 const [url] = process.argv.slice(2);
 if (!url) { console.error('usage: persisttest.mjs <url>'); process.exit(2); }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const port = 9800 + Math.floor(Math.random() * 50);
 // one profile for the whole test: OPFS/IndexedDB live there and survive the reload
-const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), 'se1pt-'))}`,
+const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${tempProfile('se1pt-')}`,
   '--mute-audio', ...gpuFlags(), ...EXTRA_FLAGS, '--window-size=1100,1000', '--no-first-run', 'about:blank'], { stdio: 'ignore' });
 let failed = 0;
 const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}  ${detail}`); if (!ok) failed++; };
@@ -169,6 +166,6 @@ try {
 } catch (e) {
   console.log('FAIL  harness  ' + e.message); failed++;
 } finally {
-  chrome.kill();
+  await closeChrome(chrome);
   process.exit(failed ? 1 : 0);
 }

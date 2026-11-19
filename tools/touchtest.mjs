@@ -3,17 +3,17 @@
 // shown only while in play. Headless Chrome with touch emulation; the page runs with ?touch=1.
 //   node tools/touchtest.mjs http://127.0.0.1:8300/serioussam.html
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CHROME, gpuFlags, EXTRA_FLAGS, TIMEOUT_SCALE } from './chrome.mjs';
+import { CHROME, gpuFlags, EXTRA_FLAGS, TIMEOUT_SCALE, tempProfile, closeChrome } from './chrome.mjs';
 
 const [url, outdir = join(tmpdir(), 'se1-touch')] = process.argv.slice(2);
 if (!url) { console.error('usage: touchtest.mjs <url> [outdir]'); process.exit(2); }
 mkdirSync(outdir, { recursive: true });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const port = 9850 + Math.floor(Math.random() * 49);
-const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), 'se1touch-'))}`,
+const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${tempProfile('se1touch-')}`,
   '--mute-audio', ...gpuFlags(), ...EXTRA_FLAGS, '--window-size=1100,1000', '--no-first-run', 'about:blank'], { stdio: 'ignore' });
 let failed = 0;
 const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}  ${detail}`); if (!ok) failed++; };
@@ -133,7 +133,7 @@ try {
 } catch (e) {
   console.log('FAIL  harness  ' + e.message); failed++;
 } finally {
-  chrome.kill();
+  await closeChrome(chrome);
 }
 console.log(failed ? `${failed} check(s) failed` : 'all checks passed');
 process.exit(failed ? 1 : 0);

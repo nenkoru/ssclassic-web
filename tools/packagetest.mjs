@@ -14,7 +14,7 @@ import { spawn } from 'node:child_process';
 import { cpSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CHROME, gpuFlags, EXTRA_FLAGS, TIMEOUT_SCALE } from './chrome.mjs';
+import { CHROME, gpuFlags, EXTRA_FLAGS, TIMEOUT_SCALE, tempProfile, closeChrome } from './chrome.mjs';
 
 const outdir = process.argv[2];
 if (!outdir) { console.error('usage: packagetest.mjs <outdir>'); process.exit(2); }
@@ -30,7 +30,7 @@ let port = 9950 + Math.floor(Math.random() * 50);
 let chrome = null;
 const launchChrome = () => {
   chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${port}`,
-    `--user-data-dir=${join(tmpdir(), 'se1pkg-' + Date.now() + '-' + Math.floor(Math.random() * 1e6))}`,
+    `--user-data-dir=${tempProfile('se1pkg-')}`,
     '--mute-audio', ...gpuFlags(), ...EXTRA_FLAGS, '--window-size=1100,1000', '--no-first-run', 'about:blank'], { stdio: 'ignore' });
 };
 const servers = [];   // static servers, killed at the end
@@ -40,7 +40,7 @@ const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${na
 // fresh profile per check: service worker registrations persist in a profile, and an
 // installed coi-sw.js from a previous check would isolate the page for the next one
 const freshProfile = async () => {
-  if (chrome) { chrome.kill(); await sleep(500); }
+  if (chrome) await closeChrome(chrome);
   port = 9950 + Math.floor(Math.random() * 50);
   launchChrome();
 };
@@ -142,8 +142,9 @@ try {
 } catch (e) {
   console.log('FAIL  harness  ' + e.message + '\n' + (e.stack || '')); failed++;
 } finally {
-  if (chrome) chrome.kill();
+  if (chrome) await closeChrome(chrome);
   for (const s of servers) s.kill();
+  rmSync(noStDir, { recursive: true, force: true });
 }
 console.log(failed ? `${failed} check(s) failed` : 'all checks passed');
 process.exit(failed ? 1 : 0);

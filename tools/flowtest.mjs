@@ -13,16 +13,16 @@
 // SE1_ANGLE, SE1_CHROME_FLAGS, SE1_TIMEOUT_SCALE: see tools/chrome.mjs); SE1_TIMEOUT_SCALE also
 // widens the frame-counting windows, for software rendering on slow machines.
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CHROME, gpuFlags, EXTRA_FLAGS, TIMEOUT_SCALE } from './chrome.mjs';
+import { CHROME, gpuFlags, EXTRA_FLAGS, TIMEOUT_SCALE, tempProfile, closeChrome } from './chrome.mjs';
 
 const [url, outdir = join(tmpdir(), 'se1-flow')] = process.argv.slice(2);
 if (!url) { console.error('usage: flowtest.mjs <url> [outdir]'); process.exit(2); }
 mkdirSync(outdir, { recursive: true });
 const port = 9700 + Math.floor(Math.random() * 50);
-const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), 'se1flow-'))}`,
+const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${tempProfile('se1flow-')}`,
   '--mute-audio', '--autoplay-policy=no-user-gesture-required', ...gpuFlags(), ...EXTRA_FLAGS,
   '--window-size=1100,1000', '--no-first-run', 'about:blank'], { stdio: 'ignore' });
 const WIN = 2000 * TIMEOUT_SCALE;   // frame-counting window (ms)
@@ -84,7 +84,7 @@ try {
 } catch (e) {
   console.log('FAIL  harness  ' + e.message); failed++;
 } finally {
-  chrome.kill();
+  await closeChrome(chrome);
 }
 if (failed && consoleLog.length) console.log('page console (last lines):\n  ' + consoleLog.slice(-40).join('\n  '));
 console.log(failed ? `${failed} check(s) failed` : 'all checks passed');

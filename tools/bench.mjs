@@ -24,10 +24,7 @@
 // SE1_ANGLE, SE1_CHROME_FLAGS, SE1_TIMEOUT_SCALE: see tools/chrome.mjs). On failure the page's last
 // console lines are printed to stderr.
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { CHROME, gpuFlags, EXTRA_FLAGS, TIMEOUT_SCALE } from './chrome.mjs';
+import { CHROME, gpuFlags, EXTRA_FLAGS, TIMEOUT_SCALE, tempProfile, closeChrome } from './chrome.mjs';
 
 const args = process.argv.slice(2);
 const softwareGL = args.includes('--software-gl');
@@ -119,7 +116,7 @@ async function runOnce(i) {
     try { return await drive(tab.ws); } finally { await tab.close(); }
   }
   const port = 9300 + i;
-  const profile = mkdtempSync(join(tmpdir(), 'se1bench-'));
+  const profile = tempProfile('se1bench-');
   const flags = [
     '--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`,
     '--window-size=1024,768', '--no-first-run', '--mute-audio',
@@ -141,7 +138,7 @@ async function runOnce(i) {
     if (!ws) throw new Error('chrome did not start');
     return await drive(ws);
   } finally {
-    chrome.kill();
+    await closeChrome(chrome);
   }
 }
 

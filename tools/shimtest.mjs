@@ -9,16 +9,13 @@
 // Chrome binary, ANGLE backend, extra flags and timeout scaling come from the environment
 // (CHROME, SE1_ANGLE, SE1_CHROME_FLAGS, SE1_TIMEOUT_SCALE: see tools/chrome.mjs).
 import { spawn } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { CHROME, gpuFlags, EXTRA_FLAGS, TIMEOUT_SCALE } from './chrome.mjs';
+import { CHROME, gpuFlags, EXTRA_FLAGS, TIMEOUT_SCALE, tempProfile, closeChrome } from './chrome.mjs';
 
 const url = process.argv[2];
 if (!url) { console.error('usage: shimtest.mjs <url>'); process.exit(2); }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const port = 9850 + Math.floor(Math.random() * 49);
-const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), 'se1shim-'))}`,
+const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${tempProfile('se1shim-')}`,
   '--mute-audio', '--autoplay-policy=no-user-gesture-required', ...gpuFlags(), ...EXTRA_FLAGS,
   '--window-size=1100,1000', '--no-first-run', 'about:blank'], { stdio: 'ignore' });
 let failed = 0;
@@ -69,7 +66,7 @@ try {
 } catch (e) {
   console.log('FAIL  harness  ' + e.message); failed++;
 } finally {
-  chrome.kill();
+  await closeChrome(chrome);
 }
 console.log(failed ? `${failed} check(s) failed` : 'all checks passed');
 process.exit(failed ? 1 : 0);

@@ -8,11 +8,11 @@
 //
 // Needs the switch binary: (cd rust && cargo build -p se1-server --release).
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CHROME, gpuFlags, EXTRA_FLAGS, TIMEOUT_SCALE } from './chrome.mjs';
+import { CHROME, gpuFlags, EXTRA_FLAGS, TIMEOUT_SCALE, tempProfile, closeChrome } from './chrome.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -29,14 +29,15 @@ const sw = spawn(swBin, ['--port', String(swPort)], { stdio: 'ignore' });
 let failed = 0;
 const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}  ${detail}`); if (!ok) failed++; };
 const procs = [sw];
+const chromes = [];
 
 async function browser(tag, pageUrl) {
   const port = 9750 + Math.floor(Math.random() * 200);
   const rtcFlags = rtc ? ['--disable-features=WebRtcHideLocalIpsWithMdns'] : [];
-  const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), 'se1mp-'))}`,
+  const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${tempProfile('se1mp-')}`,
     '--mute-audio', ...gpuFlags(), ...EXTRA_FLAGS, ...rtcFlags, '--window-size=1100,1000', '--no-first-run',
     '--disable-background-timer-throttling', '--disable-renderer-backgrounding', 'about:blank'], { stdio: 'ignore' });
-  procs.push(chrome);
+  chromes.push(chrome);
   let ws;
   for (let t = 0; t < 50 * TIMEOUT_SCALE && !ws; t++) {
     try { const l = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json(); const p = l.find((x) => x.type === 'page'); if (p) ws = new WebSocket(p.webSocketDebuggerUrl); }
@@ -124,6 +125,7 @@ try {
 } catch (e) {
   console.log('FAIL  harness  ' + e.message); failed++;
 } finally {
+  await Promise.all(chromes.map((p) => closeChrome(p)));
   procs.forEach((p) => p.kill());
 }
 console.log(failed ? `${failed} check(s) failed` : 'all checks passed');
