@@ -6,6 +6,15 @@
   if (typeof window === 'undefined') return;        // pthread workers load this script too
   if (window.crossOriginIsolated) { try { sessionStorage.removeItem(KEY); } catch (e) {} return; }
   var fail = function (why) {
+    console.warn('se1: threaded build cannot isolate the page (' + why + '), falling back to the single-threaded build');
+    // static hosts carry the single-threaded build next to this one (../st/): if it is
+    // there, hand the visitor to it instead of showing the error bar
+    fetch(new URL('../st/serioussam.html', location.href), { method: 'HEAD' }).then(function (res) {
+      if (res.ok) { location.replace(new URL('../st/serioussam.html', location.href).href + location.search + location.hash); return; }
+      bar(why);
+    }, function () { bar(why); });
+  };
+  var bar = function (why) {
     var msg = 'Serious Sam (threaded build) needs a cross-origin isolated page: ' + why +
               '. Serve it with COOP/COEP headers (tools/devserver.py does) or over HTTPS.';
     console.error(msg);
@@ -18,7 +27,11 @@
   };
   var tried = false;
   try { tried = sessionStorage.getItem(KEY) === '1'; } catch (e) {}
-  if (!window.isSecureContext || !('serviceWorker' in navigator)) {
+  var noCoi = false;
+  try { noCoi = new URLSearchParams(location.search).get('coi') === '0'; } catch (e) {}
+  if (noCoi) {                                   // test hook: behave as if service workers were absent
+    fail('coi=0');
+  } else if (!window.isSecureContext || !('serviceWorker' in navigator)) {
     fail('service workers are unavailable here');
   } else if (tried) {
     try { sessionStorage.removeItem(KEY); } catch (e) {}

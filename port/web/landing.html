@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Serious Sam</title>
+<style>html, body { margin: 0; height: 100%; background: #000; color: #ddd;
+                 font: 14px/1.4 system-ui, sans-serif; }
+       #msg { position: fixed; inset: 0; display: flex; align-items: center;
+              justify-content: center; }</style>
+</head>
+<body>
+<div id="msg">Loading Serious Sam…</div>
+<noscript>
+  <p style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;">
+    Serious Sam needs JavaScript. Enable it and reload.
+  </p>
+</noscript>
+<script>
+  // Static-host landing page: the threaded build (mt/) needs a cross-origin isolated
+  // page, which a plain static server can only provide via the coi-sw.js service
+  // worker; without one, the single-threaded build (st/) runs anywhere. The query
+  // string is kept (?mute=1, ?mode=survivors, …); coi=0 forces the fallback.
+  (function () {
+    var q = new URLSearchParams(location.search);
+    var noCoi = q.get('coi') === '0';
+    var threaded = !noCoi && (window.crossOriginIsolated ||
+      (window.isSecureContext && 'serviceWorker' in navigator));
+    location.replace((threaded ? 'mt/' : 'st/') + 'serioussam.html' +
+      location.search + location.hash);
+  })();
+</script>
+</body>
+</html>
