@@ -12,7 +12,8 @@ cd "$SRC"
 # flex/bison parsers (engine console scripts + SKA model scripts)
 for pair in "Engine/Base/Parser Engine/Base/Scanner" "Engine/Ska/smcPars Engine/Ska/smcScan"; do
   set -- $pair
-  [ "$1.cpp" -nt "$1.y" ] || { bison -o"$1.cpp" "$1.y" -d 2>/dev/null; cp "$1.hpp" "$1.h"; }
+  # (header straight to .h: the tracked .hpp copies stay untouched, so the tree stays clean)
+  [ "$1.cpp" -nt "$1.y" ] && [ -f "$1.h" ] || bison -o"$1.cpp" --defines="$1.h" "$1.y" 2>/dev/null
   [ "$2.cpp" -nt "$2.l" ] || flex -o"$2.cpp" "$2.l"
 done
 

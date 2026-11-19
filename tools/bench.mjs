@@ -20,12 +20,15 @@
 // exit, also when the run fails.
 // --cpu-throttle <N> slows the page's CPU N times (DevTools CPU throttling, applies to workers
 // too): with --software-gl --vsync, a rough "potato device" (e.g. --cpu-throttle 4).
+// Chrome binary, ANGLE backend, extra flags and timeout scaling come from the environment (CHROME,
+// SE1_ANGLE, SE1_CHROME_FLAGS, SE1_TIMEOUT_SCALE: see tools/chrome.mjs). On failure the page's last
+// console lines are printed to stderr.
 import { spawn, execFileSync } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { CHROME, gpuFlags, EXTRA_FLAGS, TIMEOUT_SCALE } from './chrome.mjs';
 
-const CHROME = process.env.CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const args = process.argv.slice(2);
 const softwareGL = args.includes('--software-gl');
 const android = args.includes('--android');
@@ -122,17 +125,17 @@ async function runOnce(i) {
     '--window-size=1024,768', '--no-first-run', '--mute-audio',
     '--autoplay-policy=no-user-gesture-required',
     '--disable-background-timer-throttling', '--disable-renderer-backgrounding',
-    softwareGL ? '--use-angle=swiftshader' : '--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist',
+    ...(softwareGL ? gpuFlags('swiftshader') : gpuFlags()), ...EXTRA_FLAGS,
     'about:blank',
   ];
   const chrome = spawn(CHROME, flags, { stdio: 'ignore' });
   try {
     let ws;
-    for (let t = 0; t < 50 && !ws; t++) {
+    for (let t = 0; t < 50 * TIMEOUT_SCALE && !ws; t++) {
       try {
         const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
         const page = list.find((p) => p.type === 'page');
-        if (page) ws = new WebSocket(page.webSocketDebuggerUrl);
+        if (page) ws = new WebSocket(page.webSocketDebuggerUrl); else await sleep(200);
       } catch { await sleep(200); }
     }
     if (!ws) throw new Error('chrome did not start');
@@ -146,32 +149,49 @@ async function drive(ws) {
   try {
     await new Promise((r, j) => { ws.onopen = r; ws.onerror = j; });
     let id = 0; const pending = new Map();
-    ws.onmessage = (m) => { const d = JSON.parse(m.data); if (d.id && pending.has(d.id)) { pending.get(d.id)(d); pending.delete(d.id); } };
+    const log = [];   // page console + uncaught exceptions, printed when the run fails
+    ws.onmessage = (m) => {
+      const d = JSON.parse(m.data);
+      if (d.method === 'Runtime.consoleAPICalled') log.push(d.params.args.map((a) => a.value ?? a.description ?? '').join(' '));
+      else if (d.method === 'Runtime.exceptionThrown') log.push('EXCEPTION ' + (d.params.exceptionDetails.exception?.description || d.params.exceptionDetails.text || ''));
+      if (log.length > 200) log.shift();
+      if (d.id && pending.has(d.id)) { pending.get(d.id)(d); pending.delete(d.id); }
+    };
     const send = (method, params = {}) => new Promise((r) => { const n = ++id; pending.set(n, r); ws.send(JSON.stringify({ id: n, method, params })); });
     const evaluate = async (expr) => (await send('Runtime.evaluate', { expression: expr, returnByValue: true })).result?.result?.value;
 
     if (android) await send('Page.bringToFront');   // a background tab is hidden and paused
-    const url = base + (base.includes('?') ? '&' : '?') +
-      (shotsLabel ? `shots=${encodeURIComponent(shotsLabel)}&mute=1&uncapped=1` : `bench=1&uncapped=${capped ? 0 : 1}`) + `&run=${Date.now()}`;
-    if (cpuThrottle > 1) await send('Emulation.setCPUThrottlingRate', { rate: cpuThrottle });
-    await send('Page.navigate', { url });
-    const t0 = Date.now();
-    if (shotsLabel) {
-      while (Date.now() - t0 < (android ? 600000 : 120000)) {
-        await sleep(500);
-        if (await evaluate('window.__shotsDone === true')) return { shots: shotsLabel };
-      }
-      throw new Error('timed out waiting for shots');
+    await send('Runtime.enable');
+    try { return await measure(send, evaluate); }
+    catch (e) {
+      console.error('page console (last lines):\n  ' + log.slice(-40).join('\n  '));
+      throw e;
     }
-    while (Date.now() - t0 < (android ? 600000 : 120000) * Math.max(1, cpuThrottle)) {
-      await sleep(1000);
-      const s = await evaluate("window.__bench && window.__bench.state === 'done' && JSON.stringify(window.__bench.stats)");
-      if (s) return JSON.parse(s);
-    }
-    throw new Error('timed out waiting for benchmark (state: ' + (await evaluate('window.__bench && window.__bench.state')) + ')');
   } finally {
     ws.close();
   }
+}
+
+async function measure(send, evaluate) {
+  const url = base + (base.includes('?') ? '&' : '?') +
+    (shotsLabel ? `shots=${encodeURIComponent(shotsLabel)}&mute=1&uncapped=1` : `bench=1&uncapped=${capped ? 0 : 1}`) + `&run=${Date.now()}`;
+  if (cpuThrottle > 1) await send('Emulation.setCPUThrottlingRate', { rate: cpuThrottle });
+  await send('Page.navigate', { url });
+  const t0 = Date.now();
+  if (shotsLabel) {
+    while (Date.now() - t0 < (android ? 600000 : 120000) * TIMEOUT_SCALE) {
+      await sleep(500);
+      if (await evaluate('window.__shotsDone === true'))
+        return { shots: shotsLabel, backend: await evaluate("window.Module && Module.se1gfx && Module.se1gfx.backend") };
+    }
+    throw new Error('timed out waiting for shots');
+  }
+  while (Date.now() - t0 < (android ? 600000 : 120000) * Math.max(1, cpuThrottle) * TIMEOUT_SCALE) {
+    await sleep(1000);
+    const s = await evaluate("window.__bench && window.__bench.state === 'done' && JSON.stringify(window.__bench.stats)");
+    if (s) return JSON.parse(s);
+  }
+  throw new Error('timed out waiting for benchmark (state: ' + (await evaluate('window.__bench && window.__bench.state')) + ')');
 }
 
 if (shotsLabel) {

@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+# One-command test suite for the web port.
+#
+#   tools/test.sh [options] [THREADED_BUILD_DIR [SINGLE_THREADED_BUILD_DIR]]
+#
+# Without build dirs it builds (incrementally) build-test-mt (threaded) and build-test-st
+# (single-threaded) with the release flags, bootstrapping what is missing first: the native entity
+# compiler (tools/build_ecc.sh), the generated entity sources (tools/gen_entities.sh) and the demo
+# data (tools/fetch_demo_data.sh). Build dirs given as arguments are used as they are.
+# Then, for each build, behind its own tools/devserver.py:
+#   - flowtest:     tools/flowtest.mjs (intro runs, a click starts a demo, Escape opens the menu)
+#   - determinism:  two visual-regression captures (bench.mjs --shots) must match within a tight
+#                   tolerance (SE1_SHOTDIFF_ARGS; a few muzzle-flash/flame pixels vary run to run)
+#   - timedemo:     one timedemo run completes, no frame over SE1_MAX_FRAME_MS (no fps assertion)
+# plus the unit tests (tests/run.sh). Prints a PASS/FAIL/SKIP summary; exit code 1 on any failure.
+#
+# Options:
+#   --build-only   only build (and bootstrap) the default build dirs, run no tests
+#   --no-build     don't build: the build dirs must already contain serioussam.html
+#   --skip-unit    don't run the unit tests
+#   --webgpu       also capture with ?gfx=webgpu and compare with WebGL2 (8/8 within shotdiff's
+#                  default tolerances); skipped when the browser has no WebGPU
+#   --android      also run a timedemo on an Android phone (bench.mjs --android); only when
+#                  ADB_SERIAL is set, otherwise skipped
+#
+# Environment:
+#   SE1_TEST_OUT       results folder (default data/test-results: logs, captures, flow screenshots)
+#   SE1_TEST_PORT      first dev-server port (default 8190; the second build uses +1)
+#   SE1_DATA_DIR       game data for new builds (default data/tfe-demo, fetched when missing)
+#   SE1_MAX_FRAME_MS   timedemo: worst allowed frame time in ms (default 3000)
+#   SE1_SHOTDIFF_ARGS  determinism tolerance for tools/shotdiff.py (default
+#                      "--max-mean 0.1 --max-changed 0.05"; "--exact" for bit-identical frames)
+#   CHROME, SE1_ANGLE, SE1_CHROME_FLAGS, SE1_TIMEOUT_SCALE: browser settings, see tools/chrome.mjs
+set -u
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT"
+
+BUILD=1 BUILD_ONLY=0 UNIT=1 WEBGPU=0 ANDROID=0
+DIRS=()
+for a in "$@"; do
+  case "$a" in
+    --build-only) BUILD_ONLY=1 ;;
+    --no-build) BUILD=0 ;;
+    --skip-unit) UNIT=0 ;;
+    --webgpu) WEBGPU=1 ;;
+    --android) ANDROID=1 ;;
+    -h|--help) sed -n '2,/^set -u/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "unknown option: $a" >&2; exit 2 ;;
+    *) DIRS+=("$a") ;;
+  esac
+done
+MT_DIR=${DIRS[0]:-build-test-mt}
+ST_DIR=${DIRS[1]:-build-test-st}
+OWN_BUILDS=$(( ${#DIRS[@]} == 0 ))
+OUT=${SE1_TEST_OUT:-$ROOT/data/test-results}
+PORT=${SE1_TEST_PORT:-8190}
+DATA=${SE1_DATA_DIR:-$ROOT/data/tfe-demo}
+MAX_FRAME_MS=${SE1_MAX_FRAME_MS:-3000}
+SHOTDIFF_ARGS=${SE1_SHOTDIFF_ARGS:---max-mean 0.1 --max-changed 0.05}
+
+RESULTS=()
+FAILED=0
+result() {   # STATUS name detail
+  RESULTS+=("$(printf '%-4s  %-28s %s' "$1" "$2" "${3:-}")")
+  [ "$1" = FAIL ] && FAILED=$((FAILED + 1))
+  printf '==> %s  %s %s\n' "$1" "$2" "${3:-}"
+}
+summary() {
+  echo
+  echo "================ test summary ================"
+  for r in ${RESULTS[@]+"${RESULTS[@]}"}; do echo "$r"; done
+  echo "=============================================="
+  if [ $FAILED -eq 0 ]; then echo "ALL PASSED"; else echo "$FAILED FAILED (logs and captures in $OUT)"; fi
+}
+step() { echo; echo "---- $* ----"; }
+
+# run "$@" with its output shown and saved to $OUT/<log>.log; returns the command's status
+logged() {
+  local log=$1; shift
+  "$@" 2>&1 | tee "$OUT/$log.log"
+  return "${PIPESTATUS[0]}"
+}
+
+emsdk_env() {
+  command -v emcc >/dev/null 2>&1 && return 0
+  for f in "${EMSDK:-}/emsdk_env.sh" "$HOME/emsdk/emsdk_env.sh"; do
+    # shellcheck disable=SC1090
+    [ -f "$f" ] && . "$f" >/dev/null 2>&1 && command -v emcc >/dev/null 2>&1 && return 0
+  done
+  echo "emcc not found: install emsdk 7.0.0 and source emsdk_env.sh" >&2
+  return 1
+}
+
+rm -rf "$OUT" && mkdir -p "$OUT"
+
+# ---------------------------------------------------------------- build
+build_one() {   # dir threads(ON|OFF)
+  local dir=$1 threads=$2
+  if [ ! -f "$dir/build.ninja" ]; then
+    emcmake cmake -S port -B "$dir" -G Ninja -DCMAKE_BUILD_TYPE=Release -DSE1_DEV=OFF -DSE1_DEMO=ON \
+      -DSE1_PROFILE=ON -DSE1_RUSTMOD=ON -DSE1_THREADS="$threads" -DDATA_DIR="$DATA" || return 1
+  fi
+  ninja -C "$dir"
+}
+if [ $BUILD = 1 ] && [ $OWN_BUILDS = 1 ]; then
+  step "build"
+  emsdk_env || { result FAIL build "emsdk missing"; summary; exit 1; }
+  ok=1
+  logged bootstrap sh -c "tools/build_ecc.sh SamTFE && tools/gen_entities.sh SamTFE" || ok=0
+  if [ $ok = 1 ] && [ ! -d "$DATA" ]; then
+    if [ "$DATA" = "$ROOT/data/tfe-demo" ]; then logged fetch-data tools/fetch_demo_data.sh || ok=0
+    else echo "SE1_DATA_DIR=$DATA does not exist" >&2; ok=0; fi
+  fi
+  [ $ok = 1 ] && { logged build-mt build_one "$MT_DIR" ON || ok=0; }
+  [ $ok = 1 ] && { logged build-st build_one "$ST_DIR" OFF || ok=0; }
+  if [ $ok = 1 ]; then result PASS build "$MT_DIR, $ST_DIR"
+  else result FAIL build "see $OUT/*.log"; summary; exit 1; fi
+fi
+[ $BUILD_ONLY = 1 ] && { summary; exit $((FAILED != 0)); }
+
+for d in "$MT_DIR" "$ST_DIR"; do
+  [ -f "$d/serioussam.html" ] || { result FAIL "build $d" "no serioussam.html (build it, or drop --no-build)"; summary; exit 1; }
+done
+
+# ---------------------------------------------------------------- unit tests
+if [ $UNIT = 1 ]; then
+  step "unit tests"
+  if emsdk_env && logged unit tests/run.sh "$ROOT/build-tests"; then result PASS "unit tests" "FastSort, CaseFs"
+  else result FAIL "unit tests" "see $OUT/unit.log"; fi
+fi
+
+# ---------------------------------------------------------------- dev servers
+PIDS=()
+cleanup() { for p in ${PIDS[@]+"${PIDS[@]}"}; do kill "$p" 2>/dev/null; done; wait 2>/dev/null; }
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT TERM
+
+serve() {   # dir port [--no-isolate]
+  python3 tools/devserver.py --port "$2" ${3:-} --shots-dir "$OUT/shots" "$1" >"$OUT/devserver-$2.log" 2>&1 &
+  PIDS+=($!)
+  for _ in $(seq 50); do
+    curl -fsS -o /dev/null "http://127.0.0.1:$2/serioussam.html" 2>/dev/null && return 0
+    sleep 0.2
+  done
+  echo "dev server on port $2 did not start:" >&2; cat "$OUT/devserver-$2.log" >&2
+  return 1
+}
+
+# threaded build behind COOP/COEP (as it needs); the single-threaded one without, as on a plain host
+NAMES="mt st"
+url_of() { [ "$1" = mt ] && echo "http://127.0.0.1:$PORT/serioussam.html" || echo "http://127.0.0.1:$((PORT + 1))/serioussam.html"; }
+if ! { serve "$MT_DIR" "$PORT" && serve "$ST_DIR" $((PORT + 1)) --no-isolate; }; then
+  result FAIL "dev servers" "ports $PORT/$((PORT + 1)) busy? (SE1_TEST_PORT)"; summary; exit 1
+fi
+
+# ---------------------------------------------------------------- per-build browser tests
+frames_ok() {   # shotdiff log -> prints "N/M", status 0 when N == M > 0
+  local line n m
+  line=$(grep -Eo '[0-9]+/[0-9]+ frames ok' "$1" | tail -1 | cut -d' ' -f1)
+  [ -n "$line" ] || { echo "no result"; return 1; }
+  echo "$line"
+  n=${line%/*} m=${line#*/}
+  [ "$n" = "$m" ] && [ "$m" -gt 0 ]
+}
+
+for b in $NAMES; do
+  url=$(url_of $b)
+
+  step "$b: flow test"
+  if logged "flow-$b" node tools/flowtest.mjs "$url" "$OUT/flow-$b"; then result PASS "$b flow test" "intro, click into a demo, Escape to menu"
+  else result FAIL "$b flow test" "see $OUT/flow-$b.log"; fi
+
+  step "$b: capture determinism"
+  ok=1
+  logged "shots-$b-a" node tools/bench.mjs "$url" --shots "$b-a" || ok=0
+  [ $ok = 1 ] && { logged "shots-$b-b" node tools/bench.mjs "$url" --shots "$b-b" || ok=0; }
+  if [ $ok = 1 ]; then
+    # shellcheck disable=SC2086
+    python3 tools/shotdiff.py "$b-a" "$b-b" $SHOTDIFF_ARGS --shots-dir "$OUT/shots" >"$OUT/shotdiff-$b.log" 2>&1
+    cat "$OUT/shotdiff-$b.log"
+    if r=$(frames_ok "$OUT/shotdiff-$b.log"); then result PASS "$b capture determinism" "$r frames match ($(grep -Eo '[0-9]+ bit-identical' "$OUT/shotdiff-$b.log"))"
+    else result FAIL "$b capture determinism" "$r (see $OUT/shotdiff-$b.log)"; fi
+  else
+    result FAIL "$b capture determinism" "capture failed (see $OUT/shots-$b-*.log)"
+  fi
+
+  step "$b: timedemo"
+  if logged "timedemo-$b" node tools/bench.mjs "$url" 1; then
+    if r=$(python3 - "$OUT/timedemo-$b.log" "$MAX_FRAME_MS" <<'EOF'
+import json, re, sys
+text = open(sys.argv[1]).read()
+m = re.search(r"^run 1: (\{.*\})$", text, re.M)
+if not m:
+    print("no result line"); sys.exit(1)
+s = json.loads(m.group(1)); limit = float(sys.argv[2])
+info = f"{s['seconds']} s, {s['fps']} fps, p95 {s['p95']} ms, max {s['max']} ms"
+ok = s["seconds"] > 0 and s["fps"] > 0 and s["max"] <= limit
+print(info + ("" if ok else f" (limit: max <= {limit:g} ms, fps > 0)"))
+sys.exit(0 if ok else 1)
+EOF
+    ); then result PASS "$b timedemo" "$r"
+    else result FAIL "$b timedemo" "$r"; fi
+  else
+    result FAIL "$b timedemo" "did not complete (see $OUT/timedemo-$b.log)"
+  fi
+done
+
+# ---------------------------------------------------------------- optional extras
+if [ $WEBGPU = 1 ]; then
+  for b in $NAMES; do
+    step "$b: WebGPU vs WebGL2"
+    if logged "shots-$b-webgpu" node tools/bench.mjs "$(url_of $b)?gfx=webgpu" --shots "$b-webgpu" \
+       && grep -q '"backend":"webgpu"' "$OUT/shots-$b-webgpu.log"; then
+      if [ -d "$OUT/shots/$b-a" ]; then
+        python3 tools/shotdiff.py "$b-a" "$b-webgpu" --shots-dir "$OUT/shots" >"$OUT/shotdiff-$b-webgpu.log" 2>&1
+        cat "$OUT/shotdiff-$b-webgpu.log"
+        if r=$(frames_ok "$OUT/shotdiff-$b-webgpu.log"); then result PASS "$b WebGPU vs WebGL2" "$r frames ok"
+        else result FAIL "$b WebGPU vs WebGL2" "$r (see $OUT/shotdiff-$b-webgpu.log)"; fi
+      else
+        result FAIL "$b WebGPU vs WebGL2" "no WebGL2 reference capture"
+      fi
+    else
+      result SKIP "$b WebGPU vs WebGL2" "WebGPU not available in this browser"
+    fi
+  done
+fi
+
+if [ $ANDROID = 1 ]; then
+  step "android timedemo"
+  if [ -z "${ADB_SERIAL:-}" ]; then result SKIP "android timedemo" "ADB_SERIAL not set"
+  elif ! command -v "${ADB:-adb}" >/dev/null 2>&1; then result SKIP "android timedemo" "adb not found"
+  elif ! "${ADB:-adb}" -s "$ADB_SERIAL" get-state >/dev/null 2>&1; then result SKIP "android timedemo" "device $ADB_SERIAL not connected"
+  elif logged timedemo-android node tools/bench.mjs "$(url_of mt)" 1 --android; then
+    result PASS "android timedemo" "$(grep -E '^run 1:' "$OUT/timedemo-android.log" | cut -c1-120)"
+  else
+    result FAIL "android timedemo" "see $OUT/timedemo-android.log"
+  fi
+fi
+
+summary
+exit $((FAILED != 0))

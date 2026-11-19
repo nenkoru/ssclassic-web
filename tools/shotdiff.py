@@ -2,12 +2,14 @@
 """Compare two visual-regression capture sets (tools/bench.mjs --shots <label>).
 
   tools/shotdiff.py <ref-label> <new-label> [--shots-dir data/shots]
-                    [--max-mean 1.5] [--max-changed 1.0] [--pixel-threshold 24]
+                    [--max-mean 1.5] [--max-changed 1.0] [--pixel-threshold 24] [--exact]
 
 Per frame: mean absolute RGB difference (0..255), and the share of pixels whose largest channel
 difference exceeds --pixel-threshold. A frame fails when mean > --max-mean or changed% >
---max-changed. Same-build runs measure <= 0.6 mean / 0.3% (flare fade). Heat maps of failing (and all, with --all-heatmaps) frames go to
-<shots-dir>/diff_<ref>_vs_<new>/. Exit code 1 if any frame fails or is missing.
+--max-changed, or with --exact when any pixel differs at all. Same-build runs measure <= 0.6 mean /
+0.3% (flare fade); with SE1Mod/shots.ini a few muzzle-flash/flame pixels still vary (<= 0.01%), so
+frames are not always bit-identical. Heat maps of failing (and all, with --all-heatmaps) frames go
+to <shots-dir>/diff_<ref>_vs_<new>/. Exit code 1 if any frame fails or is missing.
 
 Captures are game frames made from the user's own game data: they stay local (data/ is ignored).
 """
@@ -34,6 +36,7 @@ def main():
     ap.add_argument("--max-changed", type=float, default=1.0, help="percent of pixels")
     ap.add_argument("--pixel-threshold", type=int, default=24)
     ap.add_argument("--all-heatmaps", action="store_true")
+    ap.add_argument("--exact", action="store_true", help="fail on any pixel difference")
     a = ap.parse_args()
 
     rdir, ndir = os.path.join(a.shots_dir, a.ref), os.path.join(a.shots_dir, a.new)
@@ -42,7 +45,7 @@ def main():
     if not refs:
         print(f"no reference frames in {rdir}")
         return 1
-    failed = 0
+    failed = identical = 0
     print(f"{'frame':28} {'mean':>6} {'changed%':>9}  result")
     for f in refs:
         npath = os.path.join(ndir, f)
@@ -59,7 +62,9 @@ def main():
             m = ch.point(lambda v: 255 if v > a.pixel_threshold else 0)
             mask = m if mask is None else ImageChops.lighter(mask, m)
         changed = 100.0 * mask.histogram()[255] / (d.width * d.height)
-        bad = mean > a.max_mean or changed > a.max_changed
+        same = d.getbbox() is None
+        identical += same
+        bad = (not same) if a.exact else (mean > a.max_mean or changed > a.max_changed)
         failed += bad
         print(f"{f:28} {mean:6.2f} {changed:9.3f}  {'FAIL' if bad else 'ok'}")
         if bad or a.all_heatmaps:
@@ -67,7 +72,7 @@ def main():
             # amplified difference, upright (captures are bottom-up)
             heat = d.point(lambda v: min(255, v * 8)).transpose(Image.FLIP_TOP_BOTTOM)
             heat.save(os.path.join(out, f[:-5] + "_diff.png"))
-    print(f"{len(refs) - failed}/{len(refs)} frames ok" + (f"; heat maps in {out}" if failed else ""))
+    print(f"{len(refs) - failed}/{len(refs)} frames ok ({identical} bit-identical)" + (f"; heat maps in {out}" if failed else ""))
     return 1 if failed else 0
 
 
