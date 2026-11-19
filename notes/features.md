@@ -62,7 +62,7 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
 | Playtest recording + report | ✅ | port/web/playtest.js, lib.rs `post_telemetry`, tools/devserver.py, tools/playtest-report.py | `?rec=1` | playtesttest, test_playtest_report.py | mod |
 | Benchmarks, visual regression | ✅ | port/web/bench.js, tools/{bench.mjs,shotdiff.py} | `?timedemo`, `?shots=` | test.sh | — |
 | Bots: navigation graph | 🚧 | rust/se1-mod/src/bots/nav.rs | — | tests/bots_nav_accept.rs | — |
-| Bots: brain | 🚧 | rust/se1-mod/src/bots/brain.rs | — | tests/bots_brain_accept.rs | — |
+| Bots: brain | ✅ | rust/se1-mod/src/bots/brain.rs (pure Rust, behind the `Paths` trait) | — | tests/bots_brain_accept.rs, bots_brain_accept2.rs | — |
 | Bots: engine wiring (virtual players) | 📝 | Server.cpp hook, new port/common/Bots.cpp, host API v8 | `?bots=N` | bottest | nav, brain, mod |
 | More than 16 players | 📝 | Network.h limits, wire format | — | mptest at 32+ | LAN |
 | War mode (lines, side missions, game master, roles, building) | 📝 | rust/se1-mod/src/war/, port/web/war.js | `?mode=war` | — | bots, >16 players |
