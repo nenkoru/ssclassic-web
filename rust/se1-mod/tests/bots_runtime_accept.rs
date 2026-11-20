@@ -213,7 +213,7 @@ fn builds_the_graph_within_the_ray_budget() {
     assert!(rt.nav_ready(), "the graph finishes");
     assert!(rt.nav_nodes() > 10_000, "150 m around the human on a 2 m grid: {} nodes", rt.nav_nodes());
     assert!(worst <= NAV_RAYS_PER_TICK + 300, "rays in one tick: {worst}");
-    rt.level_started();
+    rt.level_started("");
     assert!(!rt.nav_ready(), "a new level forgets the graph");
 }
 
@@ -324,4 +324,45 @@ fn time_runs_in_seconds_so_a_stuck_bot_jumps_rarely() {
     ticks(&mut rt, &h, 100); // 5 s
     let jumps = h.actions.borrow()[before..].iter().filter(|a| a.0 == 1 && a.1[1] > 0.0).count();
     assert!((1..=4).contains(&jumps), "a stuck bot jumps about once per 1.5 s, got {jumps} in 5 s");
+}
+
+#[test]
+fn nav_file_maps_levels() {
+    use se1_mod::bots::runtime::nav_file;
+    assert_eq!(nav_file("Levels/01_Hatshepsut.wld"), "Nav/Levels/01_Hatshepsut.nav");
+    assert_eq!(nav_file("Levels\\KarnakDemo.wld"), "Nav/Levels/KarnakDemo.nav");
+}
+
+#[test]
+fn baked_graph_is_used_at_once_and_never_rebuilt() {
+    use se1_mod::bots::nav::{NavBuilder, NavParams, World};
+    struct Plane;
+    impl World for Plane {
+        fn ray(&self, a: [f32; 3], b: [f32; 3]) -> Option<f32> {
+            if a[1] <= 0.0 { return Some(0.0); }
+            if b[1] >= 0.0 { return None; }
+            let t = a[1] / (a[1] - b[1]);
+            Some(t * ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2) + (b[2] - a[2]).powi(2)).sqrt())
+        }
+    }
+    let mut nb = NavBuilder::new([-20.0, -2.0, -20.0], [20.0, 5.0, 20.0], NavParams::default());
+    while !nb.step(&Plane, usize::MAX) {}
+    let g = nb.finish(&[]);
+    let n = g.node_count();
+
+    let h = Fake::new();
+    h.opt("se1Bots", 1.0);
+    h.humans.borrow_mut().push([0.0, 0.0, 0.0]);
+    let mut rt = Runtime::new();
+    rt.level_started("Levels/Test.wld");
+    rt.use_baked(g, &h);
+    assert!(rt.nav_ready());
+    assert_eq!(rt.nav_nodes(), n);
+    ticks(&mut rt, &h, 20);
+    // the human walks far away: a live graph would be rebuilt around it, a baked one stays
+    h.humans.borrow_mut()[0] = [500.0, 0.0, 500.0];
+    ticks(&mut rt, &h, 20);
+    assert!(rt.nav_ready());
+    assert_eq!(rt.nav_nodes(), n);
+    assert!(h.rays.get() < NAV_RAYS_PER_TICK, "no graph building: {} rays", h.rays.get());
 }

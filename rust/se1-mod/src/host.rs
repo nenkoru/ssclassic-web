@@ -4,7 +4,7 @@ use std::ffi::{c_char, c_int, CStr, CString};
 
 use crate::config::CvarValue;
 
-pub const API_VERSION: u32 = 9;
+pub const API_VERSION: u32 = 10;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -68,6 +68,8 @@ pub struct SE1ModHost {
     pub is_server: Option<extern "C" fn() -> c_int>,
     pub bot_release: Option<extern "C" fn(c_int)>,
     pub bot_teleport: Option<extern "C" fn(c_int, *const f32, f32)>,
+    // v10
+    pub ray_door: Option<extern "C" fn(*const f32, *const f32, c_int, *mut u32, *mut c_int) -> f32>,
 }
 
 /// What a bot's player entity looks like right now (`Host::bot_state`).
@@ -441,6 +443,15 @@ impl Host {
         let f = self.raw.ray?;
         let d = f(from.as_ptr(), to.as_ptr(), hit_models as c_int);
         (d >= 0.0).then_some(d)
+    }
+    /// `ray` that knows doors (moving brushes): with `pass_doors` the hit is the first solid that isn't
+    /// a door, and the id is the first door passed; without, the id is the door hit. 0: no door.
+    /// The third value: the polygon hit is too steep to stand on (its surface's climb slope).
+    pub fn ray_door(&self, from: [f32; 3], to: [f32; 3], pass_doors: bool) -> (Option<f32>, u32, bool) {
+        let Some(f) = self.raw.ray_door else { return (self.ray(from, to, false), 0, false) };
+        let (mut door, mut steep) = (0u32, 0 as c_int);
+        let d = f(from.as_ptr(), to.as_ptr(), if pass_doors { 2 } else { 0 }, &mut door, &mut steep);
+        ((d >= 0.0).then_some(d), door, steep != 0)
     }
     /// Live enemies: (entity id, position, health).
     pub fn enemies(&self, max: usize) -> Vec<(i32, [f32; 3], f32)> {

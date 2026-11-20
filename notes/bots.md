@@ -48,12 +48,70 @@ engine (C++)                         Rust mod (rust/se1-mod/src/bots/)
   - items (Se1ModEntities.cpp);
   - players' positions.
 - **Navigation.**
-  - Levels have no nav mesh, so `nav.rs` builds one by sampling the level with rays, spread over
-    frames.
-  - It is cached per world file (OPFS/IndexedDB) after the first build.
+  - Levels have no nav mesh, so `nav.rs` builds one by sampling the level with rays.
+  - Each level's graph is baked ahead of time (`tools/navbake.mjs`, below) and shipped with the game
+    data; a level without one gets a graph built around the player while it plays, spread over ticks.
   - The level's own `NavigationMarker` graph, built for monsters, could seed or check it later.
 - **Hosting.** Bots exist only on the host of a network game. A solo player hosts a game on the
   virtual LAN as today (`?room=X&host=1`) and adds bots with `?bots=N`.
+
+## Baked nav graphs and doors
+
+`tools/navbake.mjs <url> <data dir> [--jobs N] [level.wld ...]` opens each level (all
+`Levels/*.wld` when none are given) in headless Chrome with `?navbake=1`. The mod maps the level
+in one go and writes it to the page's in-memory filesystem, and the tool copies it to
+`<data dir>/Nav/Levels/<level>.nav`:
+
+```bash
+node tools/navbake.mjs http://127.0.0.1:8096/serioussam.html data/tfe-full-web
+```
+
+The next build packages the files with the rest of the data folder. At level start the mod loads
+`Nav/<world>.nav` when it's there (`lib.rs` `load_baked_nav`, logged as `bots nav ready: N nodes,
+D doors (baked)`), so bots are ready at once and the graph covers the whole level. Rebake after
+changing how the graph is built: the file has a version byte (`SE1NAV` + 2), and a mod that reads
+another version builds a graph live instead.
+
+How the graph is built (`nav.rs`):
+- **From seeds, not the whole box** (`NavBuilder::flood`). The graph spreads breadth first from
+  the players and every item in the level (items are placed where a player can reach them). Only
+  the columns next to a reached node are sampled, so the scenery around a level costs nothing.
+  Hatshepsut's bounds are 4.8 × 2.9 km. Sampling all of them took 24.7 M rays and 11 minutes.
+- **The start can be anywhere.** A level's intro may hold the player far from the level:
+  Hatshepsut's is a closed 64 m box at the edge of the world. Seeded only at the player, the first
+  bake was that box (1024 nodes). The item seeds fix that.
+- **Doors** are brushes that move: doors, lifts, bridges, anything with `EPF_MOVABLE`. A closed
+  door is solid to a normal ray, so a graph built while it's closed ends at the door. The bake uses
+  `ray_door` (host API v10), which can pass doors: the engine hides each door it hits for the rest
+  of that one ray and casts again. Every edge through a door, or touching a node that stands in one,
+  remembers the door. Each door also keeps one probe ray, which the door blocks while it's closed.
+- **Slopes players slide down** have no nodes: the floor ray reports whether the polygon hit is
+  steeper than its surface type's climb slope (Standard 45°, "no step" 10°, the ices 5–15°).
+- **A reach limit** (`NavParams::max_reach`, 80 m for bakes): nodes farther than that from every
+  seed are kept but not spread from. Hatshepsut's desert bowl in front of the temple is walkable
+  out to the mountains, 3.7 km², with nothing in it.
+- **Seeds**: the humans, all items, and the monsters present at level start, except spawner
+  templates (`m_bTemplate`, parked in hidden rooms; also no longer foes for the bots).
+- Result on Hatshepsut (2026-11-20): 16 105 nodes, 12 doors, 215 000 rays, baked in 6.4 s, 218 KB
+  (format 3: a node is its height and one byte per edge, x/z come from its grid column). The
+  first versions: 1024 nodes (the intro box), then 1.06 M nodes and 107 MB (the desert).
+  A few small islands remain (the intro box and two closed rooms seeded by something in them).
+- **While playing**, the runtime casts 8 door probes a tick, round-robin, and the bots' paths skip
+  the doors that are closed right now (`NavGraph::path_gated`).
+
+Open (2026-11-20): `tools/bottest.mjs` on the demo build (live graph, KarnakDemo Survivors) failed
+"bots move" twice: the graph is ready (13 759 nodes, 9 doors) and the bots fight, but neither moved
+5 m within the window. Likely timing: the live graph is now ready about 100 s sooner, and a bot
+near a human who stands still only moves by strafing in a fight. Not yet compared with the old
+code on the same build. On Hatshepsut with the baked graph every check passed.
+
+Limits:
+- A door that opens when someone walks up to it looks closed until a human opens it, so bots won't
+  plan through it on their own.
+- A lift's platform counts as a door wherever the links pass through it, so bots treat the lift
+  as closed.
+- Teleporters aren't followed. A part of a level reached only by a teleporter is in the graph only
+  if an item is there.
 
 ## How to use
 
@@ -85,9 +143,8 @@ Behaviour worth knowing (2026-11-20):
   2 nearest foes per bot every other tick, the graph at 400 rays or 4 ms a tick.
 
 Known limits (2026-11-20):
-- The graph covers 150 m around the player at the time it's built, and isn't refreshed. Doors are
-  solid to the rays, so the graph depends on which doors are open: on the KarnakDemo Survivors
-  arena it came out at 116 or 2593 nodes in different runs. Phase 3 refreshes it.
+- Without a baked file the graph covers 150 m around the player at the time it's built, rebuilt
+  when the player gets 105 m from its centre.
 - In single player all players start on the same marker, so the bots spawn on the player's spot
   and spread out once they move.
 - Sight checks hit level geometry only (not monsters or players), so a bot can shoot through

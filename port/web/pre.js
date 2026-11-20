@@ -14,6 +14,8 @@
   // ?bots=N: N AI co-op bots on the host (rust/se1-mod/src/bots); ?botskill=0..1 their skill
   if (q.get('bots')) Module['se1Bots'] = Math.min(15, Math.max(0, +q.get('bots') || 0));
   if (q.get('botskill')) Module['se1BotSkill'] = Math.min(1, Math.max(0, +q.get('botskill')));
+  // ?navbake=1 (tools/navbake.mjs): bake the level's bot nav graph once a player is in it
+  if (q.get('navbake')) Module['se1NavBake'] = 1;
   // ?vrange=0: gl1shim copies the whole client array [0, maxIndex] for indexed draws instead of
   // just the range the indices use (A/B switch for tools/vrangetest.mjs; 1 is the default)
   if (q.get('vrange') === '0') Module['se1VRange'] = 0;

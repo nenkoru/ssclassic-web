@@ -270,9 +270,28 @@ pub extern "C" fn se1mod_level_started(world_file: *const c_char) {
     run_commands(&st.host, &st.config.level.commands);
     // ?mode=survivors (port/web/survivors.js): run Serious Survivors in this level
     st.survivors = (st.host.page_option("se1Survivors") > 0.0).then(|| survivors::Survivors::new(&st.host));
-    st.bots.level_started();
+    st.bots.level_started(&world);
+    load_baked_nav(&mut st.bots, &st.host, &world);
     if let Some(cmds) = st.config.level.per_world.get(&world) {
         run_commands(&st.host, cmds);
+    }
+}
+
+/// The level's baked nav graph (tools/navbake.mjs), if the game data has one: bots are ready at
+/// once instead of building a graph around the player. Not in bake mode, which makes a new one.
+fn load_baked_nav(bots: &mut bots::runtime::Runtime, host: &host::Host, world: &str) {
+    if world.is_empty() || host.page_option("se1NavBake") > 0.0 {
+        return;
+    }
+    let mut path = host.data_dir().to_string();
+    if !path.ends_with('/') {
+        path.push('/');
+    }
+    path.push_str(&bots::runtime::nav_file(world));
+    let Ok(bytes) = std::fs::read(&path) else { return };
+    match bots::nav::NavGraph::from_bytes(&bytes) {
+        Some(g) => bots.use_baked(g, host),
+        None => host.log(&format!("se1mod: {path} is not a nav graph this version reads; building one")),
     }
 }
 

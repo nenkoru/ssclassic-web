@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-#define SE1MOD_API_VERSION 9
+#define SE1MOD_API_VERSION 10
 
 typedef struct SE1ModHost {
   uint32_t api_version;   /* SE1MOD_API_VERSION */
@@ -103,6 +103,12 @@ typedef struct SE1ModHost {
   int   (*is_server)(void);
   void  (*bot_release)(int id);              /* v9: end the auto-actions holding a bot (bot_state blocked 2) */
   void  (*bot_teleport)(int id, const float *pos3, float heading);   /* v9: put a bot there (feet position) */
+  /* v10: ray for the bots' nav graph, aware of doors (moving brushes: doors, lifts, bridges).
+     flags: 1 hit models, 2 pass doors (the hit is the first solid that isn't a door).
+     *door: the first door passed (flag 2) or the door hit (no flag 2), its entity id; 0 if none.
+     *steep: 1 if the polygon hit is too steep to stand on (steeper than its surface type's climb
+     slope: designers keep players in with slopes they slide down), else 0. */
+  float (*ray_door)(const float *from3, const float *to3, int flags, uint32_t *door, int *steep);
 } SE1ModHost;
 
 /* called once after the engine and game library are initialized; returns 0 on success */

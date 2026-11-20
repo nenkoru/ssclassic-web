@@ -23,6 +23,12 @@ pub trait BotHost {
     /// Put a bot at a position (feet), facing `heading`.
     fn bot_teleport(&self, id: i32, pos: [f32; 3], heading: f32);
     fn ray(&self, from: [f32; 3], to: [f32; 3], hit_models: bool) -> Option<f32>;
+    /// `nav::World::ray_door` (level only, no models), plus whether the polygon hit is too steep
+    /// to stand on (`nav::World::ray_floor`).
+    fn ray_door(&self, from: [f32; 3], to: [f32; 3], pass_doors: bool) -> (Option<f32>, u32, bool) {
+        let _ = pass_doors;
+        (self.ray(from, to, false), 0, false)
+    }
     fn enemies(&self, max: usize) -> Vec<(i32, [f32; 3], f32)>;
     fn items(&self, max: usize) -> Vec<(i32, [f32; 3])>;
     fn humans(&self, max: usize) -> Vec<[f32; 3]>;
@@ -58,6 +64,9 @@ impl BotHost for crate::host::Host {
     fn ray(&self, from: [f32; 3], to: [f32; 3], hit_models: bool) -> Option<f32> {
         crate::host::Host::ray(self, from, to, hit_models)
     }
+    fn ray_door(&self, from: [f32; 3], to: [f32; 3], pass_doors: bool) -> (Option<f32>, u32, bool) {
+        crate::host::Host::ray_door(self, from, to, pass_doors)
+    }
     fn enemies(&self, max: usize) -> Vec<(i32, [f32; 3], f32)> {
         crate::host::Host::enemies(self, max)
     }
@@ -91,6 +100,10 @@ const TELEPORT_JUMP: f32 = 30.0;
 const NAV_TIME_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
 /// Radius, metres, around the first human for the nav graph.
 pub const NAV_RADIUS: f32 = 150.0;
+/// Doors whose state (open or closed) is checked per tick, round-robin.
+const DOOR_CHECKS_PER_TICK: usize = 8;
+/// Bake mode logs its progress this often.
+const BAKE_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 /// How many bots, at most.
 pub const MAX_BOTS: usize = 15;
 
@@ -153,7 +166,55 @@ impl World for RayWorld<'_> {
     fn ray(&self, from: [f32; 3], to: [f32; 3]) -> Option<f32> {
         self.h.ray(from, to, false)
     }
+    fn ray_door(&self, from: [f32; 3], to: [f32; 3], pass_doors: bool) -> (Option<f32>, u32) {
+        let (hit, door, _) = self.h.ray_door(from, to, pass_doors);
+        (hit, door)
+    }
+    fn ray_floor(&self, from: [f32; 3], to: [f32; 3]) -> (Option<f32>, u32, bool) {
+        self.h.ray_door(from, to, false)
+    }
 }
+
+/// The nav graph with the doors closed right now taken out.
+struct GatedNav<'a> {
+    nav: &'a NavGraph,
+    closed: &'a [bool],
+}
+impl Paths for GatedNav<'_> {
+    fn path(&self, from: [f32; 3], to: [f32; 3]) -> Option<Vec<[f32; 3]>> {
+        self.nav.path_gated(from, to, self.closed)
+    }
+    fn random_near(&self, p: [f32; 3], r: f32, seed: u64) -> Option<[f32; 3]> {
+        self.nav.random_node_near(p, r, seed)
+    }
+}
+
+/// Where a level's baked nav graph lives, relative to the game data root:
+/// "Levels/01_Hatshepsut.wld" → "Nav/Levels/01_Hatshepsut.nav" (`tools/navbake.mjs` writes them).
+pub fn nav_file(world: &str) -> String {
+    let w = world.replace('\\', "/");
+    let stem = w.strip_suffix(".wld").unwrap_or(&w);
+    format!("Nav/{stem}.nav")
+}
+
+/// Where the graph spreads from: the humans, every item in the level (placed where a player can get
+/// to it) and the monsters already in it (where the fights are). A level's intro can hold the player
+/// somewhere else entirely: Hatshepsut's is a closed box at the edge of the world.
+fn nav_seeds(h: &dyn BotHost) -> Vec<[f32; 3]> {
+    let mut seeds = h.humans(MAX_BOTS);
+    seeds.extend(h.items(MAX_SEEDS).into_iter().map(|(_, p)| p));
+    seeds.extend(h.enemies(MAX_SEEDS).into_iter().map(|(_, p, _)| p));
+    seeds
+}
+
+/// Items and monsters asked from the engine as nav seeds, each.
+const MAX_SEEDS: usize = 4096;
+/// A baked graph reaches this far (metres walked) past the nearest seed: farther out a level is
+/// open ground nothing leads to, where walking straight works.
+const BAKE_REACH: f32 = 80.0;
+
+/// Where bake mode (`?navbake=1`) writes the graph, in the browser's in-memory filesystem.
+pub const BAKE_DIR: &str = "/navbake/";
 
 /// Straight-line `Paths` used until the nav graph is ready.
 struct DirectPaths;
@@ -192,6 +253,11 @@ pub struct Runtime {
     bots: Vec<Bot>,
     build: Option<NavBuilder>,
     nav: Option<NavGraph>,
+    /// Per door of `nav`: closed right now (checked DOOR_CHECKS_PER_TICK a tick); the next to check.
+    doors_closed: Vec<bool>,
+    door_next: usize,
+    /// The level's world file, for the bake output.
+    world: String,
     ticks: u32,
     /// microseconds spent in `tick` since the last status line: (sum, worst)
     tick_us: (u64, u64),
@@ -205,7 +271,7 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn new() -> Self {
-        Runtime { bots: Vec::new(), build: None, nav: None, ticks: 0, tick_us: (0, 0), jumps: 0, last_human: None, nav_center: None, add_fail_ticks: 0 }
+        Runtime { bots: Vec::new(), build: None, nav: None, doors_closed: Vec::new(), door_next: 0, world: String::new(), ticks: 0, tick_us: (0, 0), jumps: 0, last_human: None, nav_center: None, add_fail_ticks: 0 }
     }
 
     pub fn tick(&mut self, h: &dyn BotHost) {
@@ -217,6 +283,7 @@ impl Runtime {
         self.follow_human_moves(h);
         self.sync_bots(h);
         self.build_nav(h);
+        self.check_doors(h);
         self.act(h);
         // the bots run inside the server's tick: keep an eye on what they cost
         let us = start.elapsed().as_micros() as u64;
@@ -300,6 +367,10 @@ impl Runtime {
         if self.nav.is_some() {
             return;
         }
+        if h.page_option("se1NavBake") > 0.0 {
+            self.bake(h);
+            return;
+        }
         if self.build.is_none() {
             let Some(human) = h.humans(1).into_iter().next() else {
                 return;
@@ -314,7 +385,8 @@ impl Runtime {
                     [human[0] + 60.0, human[1] + 60.0, human[2] + 60.0],
                 ),
             };
-            self.build = Some(NavBuilder::new(min, max, NavParams::default()));
+            let seeds = nav_seeds(h);
+            self.build = Some(NavBuilder::flood(min, max, NavParams { doors: true, ..NavParams::default() }, &seeds));
             self.nav_center = Some(human);
         }
         let Some(build) = self.build.as_mut() else {
@@ -336,12 +408,83 @@ impl Runtime {
         }
         if done {
             let rays = build.rays_cast();
-            let seeds = h.humans(MAX_BOTS);
             let b = self.build.take().unwrap();
-            let nav = b.finish(&seeds);
-            self.nav = Some(nav);
-            h.log(&format!("se1mod: bots nav ready: {} nodes, {rays} rays", self.nav_nodes()));
+            let nav = b.finish(&[]);
+            self.set_nav(nav, false);
+            h.log(&format!("se1mod: bots nav ready: {} nodes, {} doors, {rays} rays", self.nav_nodes(), self.doors_closed.len()));
         }
+    }
+
+    fn set_nav(&mut self, nav: NavGraph, baked: bool) {
+        self.doors_closed = vec![false; nav.door_count()];
+        self.door_next = 0;
+        self.nav = Some(nav);
+        self.build = None;
+        if baked {
+            self.nav_center = None; // the whole level: never rebuilt around the player
+        }
+    }
+
+    /// `?navbake=1` (tools/navbake.mjs): once a human is in the level, build the graph of the whole
+    /// level through its doors in one go, spreading from `nav_seeds`, and write it to
+    /// BAKE_DIR + `nav_file`. Blocks the tick for as long as it takes (a minute or more).
+    fn bake(&mut self, h: &dyn BotHost) {
+        let (false, Some((min, max))) = (h.humans(1).is_empty(), h.world_bounds()) else {
+            return;
+        };
+        let start = std::time::Instant::now();
+        h.log(&format!("se1mod: nav bake: {} from {min:?} to {max:?}", self.world));
+        let seeds = nav_seeds(h);
+        let p = NavParams { doors: true, max_reach: BAKE_REACH, ..NavParams::default() };
+        let mut b = NavBuilder::flood(min, max, p, &seeds);
+        let w = RayWorld { h };
+        let mut last_log = start;
+        while !b.step(&w, 20_000) {
+            if last_log.elapsed() > BAKE_LOG_EVERY {
+                last_log = std::time::Instant::now();
+                h.log(&format!("se1mod: nav bake: {} rays, {:.0} s", b.rays_cast(), start.elapsed().as_secs_f32()));
+            }
+        }
+        let (rays, cols) = (b.rays_cast(), b.columns_sampled());
+        let nav = b.finish(&[]);
+        let bytes = nav.to_bytes();
+        let path = format!("{BAKE_DIR}{}", nav_file(&self.world));
+        let written = std::path::Path::new(&path)
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|_| std::fs::write(&path, &bytes));
+        let ms = start.elapsed().as_millis();
+        match written {
+            Ok(()) => h.log(&format!(
+                "se1mod: nav baked: {path} {} nodes, {} edges, {} doors, {} door edges, {} seeds, {cols} columns, {rays} rays, {ms} ms, {} bytes",
+                nav.node_count(),
+                nav.edge_count(),
+                nav.door_count(),
+                nav.door_edge_count(),
+                seeds.len(),
+                bytes.len()
+            )),
+            Err(e) => h.log(&format!("se1mod: nav bake failed: {path}: {e}")),
+        }
+        self.set_nav(nav, true);
+    }
+
+    /// Doors open and close: check a few each tick with their probe rays (a closed door blocks it).
+    fn check_doors(&mut self, h: &dyn BotHost) {
+        let Some(nav) = self.nav.as_ref() else { return };
+        let n = self.doors_closed.len();
+        for _ in 0..DOOR_CHECKS_PER_TICK.min(n) {
+            let i = self.door_next % n;
+            let (a, b) = nav.door_probe(i);
+            self.doors_closed[i] = h.ray(a, b, false).is_some();
+            self.door_next = i + 1;
+        }
+    }
+
+    /// Use a baked graph for this level (after `level_started`): the bots are ready at once.
+    pub fn use_baked(&mut self, nav: NavGraph, h: &dyn BotHost) {
+        h.log(&format!("se1mod: bots nav ready: {} nodes, {} doors (baked)", nav.node_count(), nav.door_count()));
+        self.set_nav(nav, true);
     }
 
     /// Sense each bot and apply the brain's action (or the respawn press).
@@ -353,8 +496,9 @@ impl Runtime {
         let enemies = h.enemies(MAX_ENEMIES);
         let items = h.items(16);
         let direct = DirectPaths;
-        let inner: &dyn Paths = match self.nav.as_ref() {
-            Some(nav) => nav,
+        let gated = self.nav.as_ref().map(|nav| GatedNav { nav, closed: &self.doors_closed });
+        let inner: &dyn Paths = match gated.as_ref() {
+            Some(g) => g,
             None => &direct,
         };
         let paths = BudgetPaths { inner, left: std::cell::Cell::new(PATHS_PER_TICK) };
@@ -463,10 +607,17 @@ impl Runtime {
                 st.blocked
             ));
         }
-        h.log(&format!("se1mod: bots: {n} {} | tick avg {:.2} ms, worst {:.2} ms, jumps {}", parts.join(" "), self.tick_us.0 as f64 / 200_000.0, self.tick_us.1 as f64 / 1000.0, self.jumps));
+        let nav = match (&self.nav, &self.build) {
+            (Some(g), _) => format!("nav {} nodes", g.node_count()),
+            (None, Some(b)) => format!("nav building, {} rays", b.rays_cast()),
+            (None, None) => "no nav".to_string(),
+        };
+        h.log(&format!("se1mod: bots: {n} {} | tick avg {:.2} ms, worst {:.2} ms, jumps {} | {nav}", parts.join(" "), self.tick_us.0 as f64 / 200_000.0, self.tick_us.1 as f64 / 1000.0, self.jumps));
     }
 
-    pub fn level_started(&mut self) {
+    pub fn level_started(&mut self, world: &str) {
+        self.world = world.to_string();
+        self.doors_closed.clear();
         // the engine keeps players (bots included) across a level change: keep ours, and put them
         // next to the humans again once they can move
         for b in &mut self.bots {

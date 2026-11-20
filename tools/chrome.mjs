@@ -50,11 +50,12 @@ const rmProfile = (dir) => {
   }
 };
 
-export async function closeChrome(proc) {
+export async function closeChrome(proc, profileDir) {
   // each Chrome gets the oldest unclaimed profile: the tools launch one Chrome per profile,
   // closing them in launch order, and the profile path is what a signal handler uses to find
-  // and kill a stray Chrome
-  const profile = profiles.shift();
+  // and kill a stray Chrome. Tools that close them out of order pass the Chrome's own profile.
+  const k = profileDir ? profiles.indexOf(profileDir) : 0;
+  const profile = k >= 0 ? profiles.splice(k, 1)[0] : profileDir;
   if (proc && proc.exitCode === null && !proc.killed) proc.kill();
   if (!proc) return;
   const exited = proc.exitCode !== null ? Promise.resolve() : new Promise((r) => proc.once('exit', r));

@@ -1,4 +1,4 @@
-/* Bots for the se1mod host (host API v8, notes/bots.md).
+/* Bots for the se1mod host (host API v8+, notes/bots.md).
  *
  * Bots are server-side virtual players (CServer::AddVirtualPlayer): other clients see normal
  * players. Once per simulated tick the server calls _pSE1ServerTickHook, which runs the mod's
@@ -15,8 +15,13 @@
 #include <Engine/Network/PlayerSource.h>
 #include <Engine/World/World.h>
 #include <Engine/World/WorldRayCasting.h>
+#include <Engine/World/WorldSettings.h>
+#include <Engine/Brushes/Brush.h>
+#include <Engine/Templates/StaticArray.cpp>
 #include "se1mod.h"
 #include "Se1ModEntities.h"
+#include "Entities/StdH/StdH.h"
+#include "Entities/EnemyBase.h"
 
 static bool is_bot(int id) { return _pNetwork->IsServer() && _pNetwork->ga_srvServer.IsVirtualPlayer(id); }
 
@@ -106,6 +111,48 @@ static float host_ray(const float *from3, const float *to3, int hit_models)
   _pNetwork->ga_World.CastRay(cr);
   return cr.cr_penHit != NULL ? cr.cr_fHitDistance : -1.0f;
 }
+/* a door: a brush that moves (doors, lifts, bridges), not the static level (WorldBase) */
+static bool is_door(CEntity *pen)
+{
+  return pen != NULL && pen->GetRenderType() == CEntity::RT_BRUSH && (pen->en_ulPhysicsFlags & EPF_MOVABLE);
+}
+/* host_ray, door-aware (se1mod.h). Passing doors hides each door hit for the rest of this call and
+   casts again: the cast skips hidden brushes (CCastRay::TestBrushSector), so only the ray sees it. */
+static float host_ray_door(const float *from3, const float *to3, int flags, uint32_t *door, int *steep)
+{
+  enum { MAX_PASSED = 8 };
+  CEntity *apenHidden[MAX_PASSED];
+  int ctHidden = 0;
+  *door = 0;
+  *steep = 0;
+  float d = -1.0f;
+  for (;;) {
+    CCastRay cr(NULL, FLOAT3D(from3[0], from3[1], from3[2]), FLOAT3D(to3[0], to3[1], to3[2]));
+    cr.cr_ttHitModels = (flags & 1) ? CCastRay::TT_SIMPLE : CCastRay::TT_NONE;
+    cr.cr_bHitPortals = FALSE;
+    cr.cr_bHitTranslucentPortals = FALSE;
+    cr.cr_bPhysical = TRUE;
+    _pNetwork->ga_World.CastRay(cr);
+    CEntity *pen = cr.cr_penHit;
+    d = pen != NULL ? cr.cr_fHitDistance : -1.0f;
+    CBrushPolygon *pbpo = pen != NULL ? cr.cr_pbpoBrushPolygon : NULL;
+    if (pbpo != NULL) {
+      /* the player stands on a floor whose normal is within the surface's climb slope of up
+         (CMovableEntity: vHitPlane%en_vGravityDir < -st_fClimbSlopeCos, gravity down) */
+      CStaticArray<CSurfaceType> &ast = _pNetwork->ga_World.wo_astSurfaceTypes;
+      INDEX iSurface = pbpo->bpo_bppProperties.bpp_ubSurfaceType;
+      FLOAT fClimbCos = iSurface < ast.Count() ? ast[iSurface].st_fClimbSlopeCos : 0.7071f;
+      *steep = Abs(((const FLOAT3D &)pbpo->bpo_pbplPlane->bpl_plAbsolute)(2)) <= fClimbCos ? 1 : 0;
+    }
+    if (!is_door(pen)) break;
+    if (*door == 0) *door = pen->en_ulID;
+    if (!(flags & 2) || ctHidden == MAX_PASSED) break;
+    pen->en_ulFlags |= ENF_HIDDEN;
+    apenHidden[ctHidden++] = pen;
+  }
+  for (int i = 0; i < ctHidden; i++) apenHidden[i]->en_ulFlags &= ~ENF_HIDDEN;
+  return d;
+}
 /* live enemies: entity id, then x y z health */
 static int host_enemies(int32_t *ids, float *pos4, int max)
 {
@@ -114,6 +161,8 @@ static int host_enemies(int32_t *ids, float *pos4, int max)
     CEntity *pen = &*iten;
     if (n >= max) break;
     if (!live(pen) || !IsDerivedFromClass(pen, "Enemy Base")) continue;
+    /* a template is a spawner's copy source, parked in a hidden room: not a foe */
+    if (((CEnemyBase *)pen)->m_bTemplate) continue;
     float hp = ((CLiveEntity *)pen)->GetHealth();
     if (hp <= 0) continue;
     const FLOAT3D &v = pen->GetPlacement().pl_PositionVector;
@@ -208,5 +257,6 @@ void SE1ModBots_Register(SE1ModHost &host)
   host.is_server = host_is_server;
   host.bot_release = bot_release;
   host.bot_teleport = bot_teleport;
+  host.ray_door = host_ray_door;
   _pSE1ServerTickHook = server_tick;
 }
