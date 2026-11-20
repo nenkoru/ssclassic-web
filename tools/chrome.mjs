@@ -66,11 +66,12 @@ export async function closeChrome(proc) {
 // A tool killed with SIGKILL (a timeout, a killed agent shell) runs none of the handlers below, and
 // its headless Chrome lives on with the parent gone: one stray burned CPU for hours and kept a
 // ~400 MB profile. So every tool, on load, reaps those strays first: a headless Chrome whose parent
-// is gone (ppid 1) and whose profile is one of ours (tmpdir/se1*), then the profiles no Chrome uses
-// that are over 10 minutes old (younger ones may belong to a run that is just starting).
+// is gone (ppid 1) and whose profile is in the temp folder (ours are tmpdir/se1*; omp's ad-hoc
+// scripts use other prefixes), then the profiles no Chrome uses: the strays', and our se1* ones
+// over 10 minutes old (younger ones may belong to a run that is just starting).
 function reapStrays() {
   if (process.platform === 'win32') return;
-  const prefix = join(tmpdir(), 'se1');
+  const prefix = join(tmpdir(), '/');
   let ps;
   try { ps = execFileSync('ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8' }); } catch { return; }
   const procs = [];   // [pid, ppid, profile dir] of our headless Chromes and their helpers
@@ -89,6 +90,9 @@ function reapStrays() {
   const gone = (pid) => { try { process.kill(pid, 0); return false; } catch { return true; } };
   const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   for (let i = 0; i < 40 && !killed.every(gone); i++) sleep(50);
+  for (const dir of strayDirs) if (!dir.slice(prefix.length).startsWith('se1')) {
+    try { rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch {}
+  }
   let names = [];
   try { names = readdirSync(tmpdir()).filter((n) => n.startsWith('se1')); } catch {}
   for (const n of names) {
