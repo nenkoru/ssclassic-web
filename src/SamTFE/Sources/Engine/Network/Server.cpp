@@ -1178,7 +1178,12 @@ void CServer::HandleAllForAClient(INDEX iClient)
   }
 
 	// update the client's max BPS limit from the session socket parameters
-	cm_aciClients[iClient].ci_pbOutputBuffer.pb_pbsLimits.pbs_fBandwidthLimit = srv_assoSessions[iClient].sso_sspParams.ssp_iMaxBPS*8;
+	// (web port: not for client 0, the server's own in-process client. Its packets only move between
+	// two buffers, but they were paced at cli_iMaxBPS (4000 B/s by default) like a modem's: with many
+	// players moving (bots), every tick's actions outgrew that, the queue grew while they moved, and
+	// the host's own controls lagged by seconds. SendGameStreamBlocks already exempts client 0.)
+	cm_aciClients[iClient].ci_pbOutputBuffer.pb_pbsLimits.pbs_fBandwidthLimit =
+	  iClient == 0 ? 0.0f : srv_assoSessions[iClient].sso_sspParams.ssp_iMaxBPS*8;
 
   // find session of this client
   CSessionSocket &sso = srv_assoSessions[iClient];

@@ -73,6 +73,13 @@ Behaviour worth knowing (2026-11-20):
 - The view is steered by the angles the bot commanded, not by its state: the engine shows an
   action a few ticks late, more with many bots, and steering by the late value swung the view to
   the pitch limit (bots looking at the sky).
+- The host's own controls lagged by seconds while many players moved (fixed 2026-11-20): the engine
+  paced the server's in-process loopback to its own client at `cli_iMaxBPS` (4000 B/s by default,
+  a modem preset), and 16 moving players' actions outgrow that, so a queue built up while they
+  moved and drained when they stopped. Client 0 is now unpaced (Server.cpp `HandleAllForAClient`).
+  Measured with 15 bots, time the player keeps moving after the keys are let go: 7.4 s before,
+  0.2 s after. Remote clients still get their connection preset (a `?room=` game uses 5mb-Fiber,
+  457 000 B/s).
 - Cost per server tick, 15 bots on Hatshepsut: about 4 ms on average, about 11 ms at worst
   (status line: `tick avg`). Path searches are capped at 2 a tick for all bots, sight rays at the
   2 nearest foes per bot every other tick, the graph at 400 rays or 4 ms a tick.
