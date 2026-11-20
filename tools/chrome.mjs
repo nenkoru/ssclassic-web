@@ -67,8 +67,8 @@ export async function closeChrome(proc) {
 // its headless Chrome lives on with the parent gone: one stray burned CPU for hours and kept a
 // ~400 MB profile. So every tool, on load, reaps those strays first: a headless Chrome whose parent
 // is gone (ppid 1) and whose profile is in the temp folder (ours are tmpdir/se1*; omp's ad-hoc
-// scripts use other prefixes), then the profiles no Chrome uses: the strays', and our se1* ones
-// over 10 minutes old (younger ones may belong to a run that is just starting).
+// scripts use other prefixes), then the profiles no Chrome uses (see below). 176 of them had
+// piled up once, 9.6 GB.
 function reapStrays() {
   if (process.platform === 'win32') return;
   const prefix = join(tmpdir(), '/');
@@ -93,14 +93,18 @@ function reapStrays() {
   for (const dir of strayDirs) if (!dir.slice(prefix.length).startsWith('se1')) {
     try { rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch {}
   }
+  // left-over profiles: ours (se1*) after 10 minutes; any other Chrome profile in the temp folder
+  // (has "Local State": ad-hoc probe scripts, omp's debug scripts) after an hour. In use: never.
   let names = [];
-  try { names = readdirSync(tmpdir()).filter((n) => n.startsWith('se1')); } catch {}
+  try { names = readdirSync(tmpdir()); } catch {}
   for (const n of names) {
     const dir = join(tmpdir(), n);
     try {
       const st = statSync(dir);
-      const stale = strayDirs.has(dir) || Date.now() - st.mtimeMs > 10 * 60e3;
-      if (st.isDirectory() && !inUse.has(dir) && stale) rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+      if (!st.isDirectory() || inUse.has(dir)) continue;
+      const age = Date.now() - st.mtimeMs;
+      const stale = n.startsWith('se1') ? age > 10 * 60e3 : existsSync(join(dir, 'Local State')) && age > 60 * 60e3;
+      if (stale) rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     } catch {}
   }
 }

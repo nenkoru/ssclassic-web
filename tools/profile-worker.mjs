@@ -16,7 +16,7 @@ if (android) {
   adb('reverse', `tcp:${new URL(url).port}`, `tcp:${new URL(url).port}`);
   const awake = () => { try { adb('shell', 'input keyevent KEYCODE_WAKEUP; input keyevent KEYCODE_UNKNOWN'); } catch {} };
   awake(); setInterval(awake, 10000).unref();
-} else c = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${tempProfile('wp-')}`, '--mute-audio', ...gpuFlags(), ...EXTRA_FLAGS, 'about:blank'], { stdio: 'ignore' });
+} else c = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${tempProfile('se1wp-')}`, '--mute-audio', ...gpuFlags(), ...EXTRA_FLAGS, 'about:blank'], { stdio: 'ignore' });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 let ws; for (let t = 0; t < 50 && !ws; t++) { try { const v = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json(); ws = new WebSocket(v.webSocketDebuggerUrl); } catch { await sleep(200); } }
 await new Promise(r => ws.onopen = r); let id = 0; const pend = new Map(); const workers = [];
