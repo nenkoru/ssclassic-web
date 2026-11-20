@@ -89,10 +89,41 @@ Background:
 | XL2 Laser | Chain Lightning | Sirian Storm Cannon |
 | SBC Cannon (full game) | Serious Bomb | Cannon of Mass Destruction |
 
-- **Auto-fire:** the twin Schofields fire by themselves at the nearest visible enemy (within 35 m,
-  line of sight). One shot every `autofire_interval(rank)` seconds (0.45 s at rank I, −0.04 s per
-  rank, floor 0.20 s). Alternates left and right gun. Damage and crits scale like a manual revolver
-  hit. Off with `?svautofire=0`. Manual aiming and shooting work as before.
+- **Auto guns:** every gun you own (rank ≥ 1) fires on its own with its own timer, targeting and
+  look (Vampire Survivors style). The player only moves and jumps; the gun in hand still works
+  manually. One shared sight cache (up to 8 visible foes within 50 m, refreshed at most every
+  0.1 s, at most 10 rays) feeds all guns; no ammo is used, the view is not turned. Off with
+  `?svautofire=0`.
+
+  | Gun | Aim | Range | Interval (s) | Dmg/hit | Splash (m) |
+  |---|---|---|---|---|---|
+  | Knife | ring around the player | — | 0.9 | 45 | 3.5 |
+  | Schofield Revolver | nearest visible foe | 35 | 0.45 | 10 | — |
+  | Pump Shotgun | nearest visible foe | 18 | 1.2 | 30 | 2.5 |
+  | Double Coach Gun | nearest visible foe | 12 | 1.8 | 55 | 3.5 |
+  | Tommy Gun | nearest visible foe | 40 | 0.15 | 8 | — |
+  | XM214 Minigun | nearest visible foe | 45 | 0.08 | 9 | — |
+  | Rocket Launcher | thickest crowd | 45 | 2.0 | 70 | 4.0 |
+  | XL2 Laser | nearest visible foe | 50 | 0.18 | 14 | — |
+  | SBC Cannon | thickest crowd | 35 | 4.5 | 150 | 5.0 |
+
+  The interval shortens per rank (floor per gun); damage scales with rank, might and the same
+  per-rank bonus as manual fire; crits double damage (chance `luck × 0.5`, plus `0.05 × rank` for
+  the Revolver). Ranks 3/5 take 2/3 targets; Crowd guns fire extra blasts 2–5 m from the centre
+  at those ranks. The Revolver keeps its left/right muzzle alternation; Minigun and Laser use a
+  thinner tracer. At most one sound per gun every 0.12 s.
+
+  Worth knowing (2026-11-20):
+  - The guns only shoot what the player can see (level geometry blocks the sight rays). The
+    KarnakDemo run starts indoors and the director spawns around the player, mostly behind walls,
+    so standing still the hitscan guns get few targets; the Rocket Launcher and Cannon aim at the
+    crowd centre without a sight check. Moving into the open is what feeds them.
+  - A different gun goes first each frame. In table order, the first guns killed every foe in sight
+    (Gnaars die in a shot or two) and the Minigun and Laser never fired.
+  - The demo data has no Cannon model: a gun card never offers it there, and `?svgive` skips it
+    too (giving it was a fatal "Cannot open file Cannon.mdl").
+  - Test option `?svring=N` keeps N Kleers within 20 m, spawned in sight 2–18 m away (once a
+    second, at most 4 at a time), so every gun has targets (`tools/autogunstest.mjs`).
 
 ## Meta progression (page side)
 
@@ -140,6 +171,7 @@ Background:
   | `svcap=N` | monster cap |
   | `svstress=N` with `svkind=K` | monster stress test (`tools/stress.mjs`) |
   | `svbehind=N` | spawn one enemy of kind N-1 behind the player at run start |
+  | `svring=N` | keep N Kleers within 20 m, spawned where the player can see them (auto-gun test) |
   | `svthreats=0` | hide the threat markers and hit glow |
   | `svautofire=0` | disable the auto-fire (on by default) |
 

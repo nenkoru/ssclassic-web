@@ -276,11 +276,18 @@ pub struct Survivors {
     achieved: Vec<&'static str>,
     dead_posted: bool,
     debug_chest: u32,
+    debug_ring: usize, // ?svring=N: keep N monsters in sight around the player (tests)
+    debug_ring_t: f64,
     started_at: f64,
     hook_log_t: f64,
     weapons_t: f64,   // last check that every ranked gun is really owned (ensure_weapons)
     hold_colts: u8,   // switching to the dual Schofields: 1 wanted, 2 key pressed (hold_colts)
     autofire_side: u8, // auto-fire: 0 = left gun, 1 = right gun
+    sight: [i32; 8],      // auto-gun sight cache: enemy handles (refresh_sight)
+    sight_n: usize,
+    sight_t: f64,
+    auto_first: usize,    // the auto gun that goes first this frame (auto_guns)
+    gun_sound_t: [f64; 9], // last auto-gun sound time, indexed like AUTO_GUNS
     // debug / test
     stress: usize,
     stress_kind: usize,
@@ -311,7 +318,8 @@ impl Survivors {
             weapon: 0, ammo: [0; 6], ammo_acc: [0.0; 6], shots: [0; 17], firing_until: -1.0,
             revolver_hits: 0, typewriter_kills: 0, hurricane_t: 0.0,
             hits: Vec::new(), flash: false, stats: Vec::new(), powers: Vec::new(), speed_set: 1.0,
-            hud_t: 0.0, sound_t: 0.0, procs: Vec::new(), achieved: Vec::new(), dead_posted: false, debug_chest: 0, started_at: 0.0, hook_log_t: 0.0, weapons_t: 0.0, hold_colts: 0, autofire_side: 0,
+            hud_t: 0.0, sound_t: 0.0, procs: Vec::new(), achieved: Vec::new(), dead_posted: false, debug_chest: 0, debug_ring: 0, debug_ring_t: 0.0, started_at: 0.0, hook_log_t: 0.0, weapons_t: 0.0, hold_colts: 0, autofire_side: 0,
+            sight: [-1; 8], sight_n: 0, sight_t: 0.0, auto_first: 0, gun_sound_t: [-1e9; 9],
             stress: host.page_option("se1SurvivorsStress").max(0.0) as usize,
             stress_kind: match host.page_option("se1SurvivorsStressKind") as i32 {
                 1 => K_KLEER, 2 => K_GNAAR, 3 => K_ARACH, 4 => K_BULL, _ => K_FIRE,
@@ -605,7 +613,8 @@ impl Survivors {
         let give = host.page_option("se1SurvivorsGive") as u64;
         let give_rank = match host.page_option("se1SurvivorsGiveRank") as u32 { 0 => MAX_RANK, r => r.min(MAX_RANK) };
         for (i, &u) in ALL.iter().enumerate() {
-            if give & (1 << i) != 0 {
+            // only what a card could give: no Cannon on the demo data (no model: a fatal error)
+            if give & (1 << i) != 0 && (u != Up::Cannon || self.full_data) {
                 while self.rank(u) < give_rank {
                     self.take(host, Card::Up(u), false);
                 }
@@ -620,6 +629,7 @@ impl Survivors {
         self.started_at = self.time;
         self.weapons_t = self.time - 1.0; // check the guns on the first frame (the clock restarted)
         self.debug_chest = host.page_option("se1SurvivorsChest").max(0.0) as u32;
+        self.debug_ring = host.page_option("se1SurvivorsRing").clamp(0.0, 40.0) as usize;
         self.hurt = None;
         let _ = host.player_hurt(); // drop a hit left over from before this run
         // debug/test: ?svbehind=N spawns one enemy of kind N-1 behind the player at run start
@@ -734,6 +744,9 @@ impl Survivors {
         self.update_gems(host, dt);
         self.update_drops(host);
         self.director(host, t);
+        if self.debug_ring > 0 {
+            self.feed_ring(host);
+        }
         self.abilities(host);
         self.passives(host, dt);
         self.update_powers(host);
@@ -1369,38 +1382,155 @@ impl Survivors {
         Some(h)
     }
 
+    /// Test option ?svring=N: once a second, top up to N live monsters within 20 m, spawned 2-18 m
+    /// away where the player can see them (the auto guns need targets in sight; the director
+    /// spawns out of sight, behind walls in an indoor start).
+    fn feed_ring(&mut self, host: &Host) {
+        if self.time - self.debug_ring_t < 1.0 {
+            return;
+        }
+        self.debug_ring_t = self.time;
+        let missing = self.debug_ring.saturating_sub(self.near(self.pos, 20.0).len());
+        for _ in 0..missing.min(4) {
+            let a = self.rand() * TAU;
+            let r = 2.0 + self.rand() as f32 * 16.0;
+            let q = [self.pos[0] + (a.cos() as f32) * r, self.pos[1] + 0.5, self.pos[2] + (a.sin() as f32) * r];
+            if host.ray(self.eye, [q[0], q[1] + 0.5, q[2]], false).is_none() {
+                self.spawn_at(host, K_KLEER, q, 1.0, false, false);
+            }
+        }
+    }
+
     // ------------------------------------------------------------------ abilities
-    /// The twin Schofields fire at the nearest visible enemy on their own (Vampire Survivors style).
-    fn auto_fire(&mut self, host: &Host) {
-        let r = self.rank(Up::Revolver);
-        if r < 1 || host.page_option("se1SurvivorsAutofire") < 0.5 {
+    /// Every owned gun (rank >= 1) fires on its own (Vampire Survivors style).
+    fn auto_guns(&mut self, host: &Host) {
+        if host.page_option("se1SurvivorsAutofire") < 0.5 {
             return;
         }
-        // sight rays only when a shot is due (this runs every frame)
-        if self.cooldowns.iter().any(|(u, next)| *u == Up::Revolver && self.time < *next) {
+        self.refresh_sight(host);
+        // a different gun goes first each frame: with few foes in sight the first guns would
+        // kill them all and the later ones (Minigun, Laser) would never fire
+        self.auto_first = (self.auto_first + 1) % AUTO_GUNS.len();
+        for j in 0..AUTO_GUNS.len() {
+            let k = (self.auto_first + j) % AUTO_GUNS.len();
+            let g = &AUTO_GUNS[k];
+            let r = self.rank(g.up);
+            if r < 1 {
+                continue;
+            }
+            // the cooldown must be ready before we spend it (no target: no cooldown spent)
+            if self.cooldowns.iter().any(|(u, next)| *u == g.up && self.time < *next) {
+                continue;
+            }
+            if self.auto_shot(host, g, r) {
+                self.ready(g.up, auto_interval(g, r));
+                if self.time - self.gun_sound_t[k] >= 0.12 {
+                    self.gun_sound_t[k] = self.time;
+                    host.sound(g.sound, 0.5);
+                }
+            }
+        }
+    }
+    /// One auto-gun volley. Returns false when there was no target (no cooldown spent).
+    fn auto_shot(&mut self, host: &Host, g: &AutoGun, rank: u32) -> bool {
+        let dmg = g.dmg * self.might() * (1.0 + if g.up == Up::Knife { 0.25 } else { 0.20 } * (rank - 1) as f32);
+        let crit = (self.rand() as f32) < self.luck() * 0.5 + if g.up == Up::Revolver { 0.05 * rank as f32 } else { 0.0 };
+        let idx = |h: i32| self.enemies.iter().position(|e| e.h == h && e.hp > 0.0);
+        match g.aim {
+            Aim::Nearest => {
+                let mut t = Vec::new();
+                for &h in self.sight.iter().take(self.sight_n) {
+                    if let Some(i) = idx(h) {
+                        if dist(self.enemies[i].pos, self.pos) <= g.range {
+                            t.push(i);
+                        }
+                        if t.len() >= auto_targets(rank) {
+                            break;
+                        }
+                    }
+                }
+                if t.is_empty() {
+                    return false;
+                }
+                let thin = matches!(g.up, Up::Minigun | Up::Laser);
+                for i in t {
+                    let chest = [self.enemies[i].pos[0], self.enemies[i].pos[1] + 1.0, self.enemies[i].pos[2]];
+                    // the Schofields alternate left/right hand
+                    let side = if g.up == Up::Revolver { self.autofire_side ^= 1; self.autofire_side as f32 * 2.0 - 1.0 } else { 0.0 };
+                    let muzzle = [self.eye[0] + 0.25 * side, self.eye[1] - 0.2, self.eye[2]];
+                    host.lightning(muzzle, chest, if thin { 0.15 } else { 0.25 }, 0.06);
+                    let dealt = self.hit(host, i, dmg * if crit { 2.0 } else { 1.0 }, Src::Gun(g.up), crit);
+                    self.on_gun_hit_effects(host, i, dealt, g.up);
+                    if g.splash > 0.0 {
+                        for (j, _) in self.near(chest, g.splash) {
+                            if j != i {
+                                let d2 = self.hit(host, j, dmg * 0.5, Src::Gun(g.up), false);
+                                self.on_gun_hit_effects(host, j, d2, g.up);
+                            }
+                        }
+                    }
+                }
+                true
+            }
+            Aim::Ring => {
+                if self.near(self.pos, g.splash).is_empty() {
+                    return false;
+                }
+                let feet = [self.pos[0], self.pos[1] + 0.15, self.pos[2]];
+                self.blast(host, self.pos, g.splash, dmg, Src::Gun(g.up), true);
+                host.effect(BET_SHOCKWAVE, feet, 0.6);
+                true
+            }
+            Aim::Crowd => {
+                let Some(c) = self.crowd_center(g.range, false) else { return false };
+                if dist(c, self.pos) < 5.0 {
+                    return false; // no point-blank blasts
+                }
+                if g.up == Up::RocketLauncher {
+                    host.lightning(self.eye, c, 0.6, 0.2);
+                }
+                self.auto_blast(host, g, c, dmg);
+                for _ in 1..auto_targets(rank) {
+                    let a = self.rand() * TAU;
+                    let d = 2.0 + self.rand() as f32 * 3.0;
+                    self.auto_blast(host, g, [c[0] + (a.cos() as f32) * d, c[1], c[2] + (a.sin() as f32) * d], dmg);
+                }
+                true
+            }
+        }
+    }
+    /// One explosion of a Crowd auto gun (Rocket Launcher, Cannon) at q.
+    fn auto_blast(&mut self, host: &Host, g: &AutoGun, q: [f32; 3], dmg: f32) {
+        if g.up == Up::RocketLauncher {
+            host.effect(BET_ROCKET, [q[0], q[1] + 0.5, q[2]], 1.0);
+        } else {
+            host.effect(BET_CANNON, q, 1.5);
+        }
+        self.blast(host, q, g.splash * self.area(), dmg, Src::Gun(g.up), true);
+    }
+    /// Sight cache: up to 8 live enemies within 50 m, nearest first, chest in sight.
+    fn refresh_sight(&mut self, host: &Host) {
+        if self.time - self.sight_t < 0.1 {
             return;
         }
-        // nearest visible enemy within 35 m (check at most 6, nearest first)
-        let cands: Vec<usize> = self.near(self.eye, 35.0).into_iter().take(6).map(|(i, _)| i).collect();
-        let target = cands.into_iter().find(|&i| host.ray(self.eye, [self.enemies[i].pos[0], self.enemies[i].pos[1] + 1.0, self.enemies[i].pos[2]], false).is_none());
-        let Some(i) = target else { return }; // no target: no shot, no cooldown spent
-        if !self.ready(Up::Revolver, data::autofire_interval(r)) {
-            return;
+        self.sight_t = self.time;
+        let mut cands = self.near(self.eye, 50.0);
+        cands.truncate(10); // at most 10 rays per refresh
+        let mut v: Vec<(f32, i32)> = Vec::new();
+        for (i, d) in cands {
+            let p = self.enemies[i].pos;
+            if host.ray(self.eye, [p[0], p[1] + 1.0, p[2]], false).is_none() {
+                v.push((d, self.enemies[i].h));
+            }
         }
-        let chest = [self.enemies[i].pos[0], self.enemies[i].pos[1] + 1.0, self.enemies[i].pos[2]];
-        // alternate left/right muzzle
-        let side = self.autofire_side as f32 * 2.0 - 1.0; // -1 left, +1 right
-        self.autofire_side = (self.autofire_side + 1) % 2;
-        let muzzle = [self.eye[0] + 0.25 * side, self.eye[1] - 0.2, self.eye[2]];
-        host.lightning(muzzle, chest, 0.25, 0.06);
-        host.sound("Models\\Weapons\\Colt\\Sounds\\Fire.wav", 0.6);
-        // same scaling as the manual revolver hit: base 10 × gun multiplier, crit ×2
-        let dmg = 10.0 * self.might() * (1.0 + 0.20 * (r - 1) as f32);
-        let crit = (self.rand() as f32) < self.luck() * 0.5 + 0.05 * r as f32;
-        self.hit(host, i, dmg * if crit { 2.0 } else { 1.0 }, Src::Gun(Up::Revolver), crit);
+        v.sort_by(|a, b| a.0.total_cmp(&b.0));
+        self.sight_n = v.len().min(8);
+        for k in 0..self.sight_n {
+            self.sight[k] = v[k].1;
+        }
     }
     fn abilities(&mut self, host: &Host) {
-        self.auto_fire(host);
+        self.auto_guns(host);
         let p = self.pos;
         let might = self.might();
         let area = self.area();
@@ -1640,6 +1770,13 @@ impl Survivors {
         host.ui_post(&format!(r#"{{"type":"chest","items":[{}],"gold":{gold:.0}}}"#, items.join(",")));
     }
 
+    /// Top-12 damage stats as a JSON list (end screen and HUD).
+    fn dmg_list(&self) -> String {
+        let mut stats = self.stats.clone();
+        stats.sort_by(|a, b| b.1.total_cmp(&a.1));
+        stats.iter().take(12).map(|(n, v)| format!(r#"["{n}",{v:.0}]"#)).collect::<Vec<_>>().join(",")
+    }
+
     fn end(&mut self, host: &Host, victory: bool) {
         self.dead_posted = true;
         self.state = State::End;
@@ -1647,13 +1784,11 @@ impl Survivors {
         let time_bonus = if victory { ((25.0 * 60.0 - self.time).max(0.0) * 100.0) as u64 } else { 0 };
         self.score += time_bonus;
         let gold = ((self.gold + self.kills as f32 / 8.0 + if victory { 300.0 } else { 0.0 }) * self.gold_mul()).round();
-        let mut stats = self.stats.clone();
-        stats.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let dmg: Vec<String> = stats.iter().take(12).map(|(n, v)| format!(r#"["{n}",{v:.0}]"#)).collect();
+        let dmg = self.dmg_list();
         let build: Vec<String> = self.ranks.iter().map(|(u, r)| format!(r#""{} {}""#, u.name(), roman(*r))).chain(self.evolved.iter().map(|e| format!(r#""{}""#, e.name()))).collect();
         host.ui_post(&format!(
             r#"{{"type":"end","victory":{},"time":{:.0},"level":{},"kills":{},"score":{},"timeBonus":{},"gold":{},"dmg":[{}],"build":[{}],"character":"{}","difficulty":{}}}"#,
-            victory, self.time, self.level, self.kills, self.score, time_bonus, gold, dmg.join(","), build.join(","), CHARACTERS[self.character].name, self.difficulty
+            victory, self.time, self.level, self.kills, self.score, time_bonus, gold, dmg, build.join(","), CHARACTERS[self.character].name, self.difficulty
         ));
         if victory {
             host.sound("Sounds\\Player\\Quotes\\Yeah_baby!!!.wav", 1.0);
@@ -1760,8 +1895,9 @@ impl Survivors {
         let ranks: Vec<String> = self.ranks.iter().map(|(u, r)| format!(r#"{{"id":"{}","name":"{}","rank":{}}}"#, u.id(), u.name(), r)).collect();
         // touch controls (port/web/touch.js) + tools/touchtest.mjs read these
         let yaw = host.player_view().map(|d| (d[2] as f64).atan2(d[0] as f64).to_degrees()).unwrap_or(0.0);
+        let dmg = self.dmg_list();
         host.ui_post(&format!(
-            r#"{{"type":"hud","time":{:.1},"run":{:.0},"level":{},"xp":{:.1},"next":{:.0},"kills":{},"score":{},"combo":{},"gold":{:.0},"alive":{},"gems":{},"guns":[{}],"abilities":[{}],"passives":[{}],"ranks":[{}],"boss":{},"arrows":[{}],"threats":[{}],"hurt":{},"powers":[{}],"procs":[{}],"endless":{},"state":"{}","pos":[{:.2},{:.2},{:.2}],"yaw":{:.1},"weapon":{}}}"#,
+            r#"{{"type":"hud","time":{:.1},"run":{:.0},"level":{},"xp":{:.1},"next":{:.0},"kills":{},"score":{},"combo":{},"gold":{:.0},"alive":{},"gems":{},"guns":[{}],"abilities":[{}],"passives":[{}],"ranks":[{}],"dmg":[{}],"boss":{},"arrows":[{}],"threats":[{}],"hurt":{},"powers":[{}],"procs":[{}],"endless":{},"state":"{}","pos":[{:.2},{:.2},{:.2}],"yaw":{:.1},"weapon":{}}}"#,
             self.time,
             RUN_S,
             self.level,
@@ -1777,6 +1913,7 @@ impl Survivors {
             list(Cat::Ability),
             list(Cat::Passive),
             ranks.join(","),
+            dmg,
             boss,
             arrows.join(","),
             threats.join(","),

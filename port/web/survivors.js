@@ -25,6 +25,7 @@
   if (q.get('svgod')) Module.se1SurvivorsGod = 1;
   if (q.get('svautofire') === '0') Module.se1SurvivorsAutofire = 0; else Module.se1SurvivorsAutofire = 1;
   if (q.get('svbehind')) Module.se1SurvivorsBehind = +q.get('svbehind');   // spawn one enemy of kind N-1 behind the player
+  if (q.get('svring')) Module.se1SurvivorsRing = +q.get('svring');       // keep N monsters in sight around the player (tests)
   if (q.get('svthreats') === '0') Module.se1SurvivorsThreats = 0;
   // monster cap: phones and small CPUs get fewer (notes/big-ideas.md, "How many enemies on screen")
   Module.se1SurvivorsCap = +q.get('svcap') || (/Android|iPhone|iPad/.test(navigator.userAgent) || (navigator.hardwareConcurrency || 8) <= 4 ? 60 : 110);

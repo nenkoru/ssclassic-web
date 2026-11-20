@@ -201,14 +201,22 @@ impl Up {
         use Up::*;
         let rf = r as f32;
         let gun = |extra: &str| format!("+{:.0}% damage{}", 20.0 * (rf - 1.0), extra);
+        let auto = |g: &AutoGun, t: &str| {
+            if g.aim == Aim::Nearest { format!("Fires itself: {} at the nearest foe within {} m", t, g.range as i32) }
+            else if g.aim == Aim::Ring { format!("Fires itself: hits all foes within {:.1} m", g.splash) }
+            else { format!("Fires itself: {} into the thickest crowd", t) }
+        };
+        let more = if r == 3 || r == 5 { ", +1 target" } else { "" };
         match self {
-            Knife => if r == 1 { "Cutting-edge archaeology".into() } else { format!("+{:.0}% damage; kills heal {}", 25.0 * (rf - 1.0), r / 2) },
-            Revolver => if r == 1 { "Sam's trusty sidearms, one in each hand".into() } else { gun(&format!(", {:.0}% crit chance", 5.0 * rf)) },
-            Shotgun | DoubleShotgun => if r == 1 { "New gun, with shells".into() } else { gun(&format!(", shells regenerate {:.1}/s", 0.4 * (rf - 1.0))) },
-            TommyGun | Minigun => if r == 1 { "New gun, with bullets".into() } else { gun(&format!(", bullets regenerate {:.0}/s", 3.0 * (rf - 1.0))) },
-            RocketLauncher => if r == 1 { "New gun, with rockets".into() } else { gun(&format!(", rockets regenerate {:.2}/s{}", 0.15 * (rf - 1.0), if r >= 3 { ", twin rockets" } else { "" })) },
-            Laser => if r == 1 { "New gun, with cells".into() } else { gun(&format!(", cells regenerate {:.0}/s", 1.5 * (rf - 1.0))) },
-            Cannon => if r == 1 { "New gun, with cannonballs".into() } else { gun(&format!(", cannonballs regenerate {:.2}/s", 0.06 * (rf - 1.0))) },
+            Knife => if r == 1 { auto(auto_gun(Up::Knife), "slashes") } else { format!("+{:.0}% damage; kills heal {}{}", 25.0 * (rf - 1.0), r / 2, more) },
+            Revolver => if r == 1 { auto(auto_gun(Up::Revolver), "one shot") } else { gun(&format!(", {:.0}% crit chance{}", 5.0 * rf, more)) },
+            Shotgun => if r == 1 { auto(auto_gun(Up::Shotgun), "3 pellets") } else { gun(&format!(", shells regenerate {:.1}/s{}", 0.4 * (rf - 1.0), more)) },
+            DoubleShotgun => if r == 1 { auto(auto_gun(Up::DoubleShotgun), "2 shells") } else { gun(&format!(", shells regenerate {:.1}/s{}", 0.4 * (rf - 1.0), more)) },
+            TommyGun => if r == 1 { auto(auto_gun(Up::TommyGun), "a burst") } else { gun(&format!(", bullets regenerate {:.0}/s{}", 3.0 * (rf - 1.0), more)) },
+            Minigun => if r == 1 { auto(auto_gun(Up::Minigun), "a burst") } else { gun(&format!(", bullets regenerate {:.0}/s{}", 3.0 * (rf - 1.0), more)) },
+            RocketLauncher => if r == 1 { auto(auto_gun(Up::RocketLauncher), "a rocket") } else { gun(&format!(", rockets regenerate {:.2}/s{}{}", 0.15 * (rf - 1.0), if r >= 3 { ", twin rockets" } else { "" }, more)) },
+            Laser => if r == 1 { auto(auto_gun(Up::Laser), "a beam") } else { gun(&format!(", cells regenerate {:.0}/s{}", 1.5 * (rf - 1.0), more)) },
+            Cannon => if r == 1 { auto(auto_gun(Up::Cannon), "a cannonball") } else { gun(&format!(", cannonballs regenerate {:.2}/s{}", 0.06 * (rf - 1.0), more)) },
             Consecration => format!("Holy ground: {:.0} damage/s to foes within {:.1} m", 10.0 + 8.0 * rf, 4.0 + 1.2 * rf),
             ChainLightning => format!("Every {:.1} s a bolt hits for {:.0} and jumps {} times (elites first)", (2.4 - 0.2 * rf).max(1.0), 25.0 + 15.0 * rf, 2 + r),
             Missiles => format!("Every 1.4 s, {} bolts strike the nearest foes for {:.0}", 1 + r, 16.0 + 8.0 * rf),
@@ -339,9 +347,67 @@ pub fn xp_for_level(level: u32) -> f32 {
     }
 }
 
-/// Seconds between auto-fire shots for a revolver at the given rank.
+/// Seconds between auto-fire shots for a revolver at the given rank (kept for the table test).
+#[allow(dead_code)]
 pub fn autofire_interval(rank: u32) -> f64 {
     (0.45 - 0.04 * (rank.saturating_sub(1)) as f64).max(0.20)
+}
+
+/// How an auto gun picks its target.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Aim {
+    /// Nearest visible foes (from the sight cache).
+    Nearest,
+    /// Everything around the player (melee ring).
+    Ring,
+    /// The thickest crowd.
+    Crowd,
+}
+
+/// One row of the auto-gun table: every owned gun (rank >= 1) fires on its own.
+#[derive(Clone, Copy)]
+pub struct AutoGun {
+    pub up: Up,
+    pub aim: Aim,
+    pub range: f32,      // m
+    pub interval: f64,   // s between volleys at rank 1
+    pub per_rank: f64,   // s less per rank above 1
+    pub min_interval: f64,
+    pub dmg: f32,        // per hit at rank 1, before might
+    pub splash: f32,     // Nearest: also hit foes within this many m of each target (0 = none); Crowd/Ring: blast radius
+    pub sound: &'static str,
+}
+
+/// The auto-gun table, one row per gun in `ALL` order.
+pub const AUTO_GUNS: &[AutoGun] = &[
+    AutoGun { up: Up::Knife, aim: Aim::Ring, range: 0.0, interval: 0.9, per_rank: 0.05, min_interval: 0.6, dmg: 45.0, splash: 3.5, sound: "Models\\Weapons\\Knife\\Sounds\\Long.wav" },
+    AutoGun { up: Up::Revolver, aim: Aim::Nearest, range: 35.0, interval: 0.45, per_rank: 0.04, min_interval: 0.20, dmg: 10.0, splash: 0.0, sound: "Models\\Weapons\\Colt\\Sounds\\Fire.wav" },
+    AutoGun { up: Up::Shotgun, aim: Aim::Nearest, range: 18.0, interval: 1.2, per_rank: 0.08, min_interval: 0.8, dmg: 30.0, splash: 2.5, sound: "Models\\Weapons\\SingleShotgun\\Sounds\\_Fire.wav" },
+    AutoGun { up: Up::DoubleShotgun, aim: Aim::Nearest, range: 12.0, interval: 1.8, per_rank: 0.1, min_interval: 1.2, dmg: 55.0, splash: 3.5, sound: "Models\\Weapons\\DoubleShotgun\\Sounds\\Fire.wav" },
+    AutoGun { up: Up::TommyGun, aim: Aim::Nearest, range: 40.0, interval: 0.15, per_rank: 0.01, min_interval: 0.10, dmg: 8.0, splash: 0.0, sound: "Models\\Weapons\\TommyGun\\Sounds\\_Fire.wav" },
+    AutoGun { up: Up::Minigun, aim: Aim::Nearest, range: 45.0, interval: 0.08, per_rank: 0.005, min_interval: 0.06, dmg: 9.0, splash: 0.0, sound: "Models\\Weapons\\MiniGun\\Sounds\\Fire.wav" },
+    AutoGun { up: Up::RocketLauncher, aim: Aim::Crowd, range: 45.0, interval: 2.0, per_rank: 0.15, min_interval: 1.4, dmg: 70.0, splash: 4.0, sound: "Models\\Weapons\\RocketLauncher\\Sounds\\_Fire.wav" },
+    AutoGun { up: Up::Laser, aim: Aim::Nearest, range: 50.0, interval: 0.18, per_rank: 0.015, min_interval: 0.12, dmg: 14.0, splash: 0.0, sound: "Models\\Weapons\\Laser\\Sounds\\_Fire.wav" },
+    AutoGun { up: Up::Cannon, aim: Aim::Crowd, range: 35.0, interval: 4.5, per_rank: 0.35, min_interval: 3.0, dmg: 150.0, splash: 5.0, sound: "Models\\Weapons\\Cannon\\Sounds\\Fire.wav" },
+];
+
+/// The auto-gun row for a gun.
+pub fn auto_gun(u: Up) -> &'static AutoGun {
+    AUTO_GUNS.iter().find(|g| g.up == u).expect("every gun has an AUTO_GUNS row")
+}
+
+/// Seconds between volleys for an auto gun at the given rank.
+pub fn auto_interval(g: &AutoGun, rank: u32) -> f64 {
+    (g.interval - g.per_rank * (rank.saturating_sub(1)) as f64).max(g.min_interval)
+}
+
+/// Number of targets an auto gun takes at the given rank (1, 2 from rank 3, 3 at rank 5).
+pub fn auto_targets(rank: u32) -> usize {
+    match rank {
+        5 => 3,
+        3.. => 2,
+        _ => 1,
+    }
 }
 
 // Engine effect types (Entities/BasicEffects.es)
@@ -680,5 +746,50 @@ mod tests {
         // never below 0.20
         assert!((autofire_interval(10) - 0.20).abs() < 1e-9);
         assert!((autofire_interval(100) - 0.20).abs() < 1e-9);
+    }
+
+    #[test]
+    fn auto_guns_cover_every_gun() {
+        let guns: Vec<Up> = ALL.iter().copied().filter(|u| u.cat() == Cat::Gun).collect();
+        assert_eq!(AUTO_GUNS.len(), guns.len(), "expected one row per gun");
+        for g in &guns {
+            let n = AUTO_GUNS.iter().filter(|a| a.up == *g).count();
+            assert_eq!(n, 1, "gun {g:?} appears {n} times in AUTO_GUNS");
+        }
+    }
+
+    #[test]
+    fn auto_interval_matches_autofire_and_monotonic() {
+        let rev = &AUTO_GUNS[1];
+        assert_eq!(rev.up, Up::Revolver, "row 1 must be the Revolver");
+        for r in 1..=5 {
+            assert!((auto_interval(rev, r) - autofire_interval(r)).abs() < 1e-9, "rank {r}");
+        }
+        for g in AUTO_GUNS {
+            for r in 1..=10 {
+                let v = auto_interval(g, r);
+                assert!(v >= g.min_interval, "{:?} rank {r}: {v} < min {}", g.up, g.min_interval);
+                if r > 1 {
+                    assert!(v <= auto_interval(g, r - 1), "{:?} interval increases at rank {r}", g.up);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn auto_targets_by_rank() {
+        assert_eq!(auto_targets(1), 1);
+        assert_eq!(auto_targets(2), 1);
+        assert_eq!(auto_targets(3), 2);
+        assert_eq!(auto_targets(4), 2);
+        assert_eq!(auto_targets(5), 3);
+    }
+
+    #[test]
+    fn auto_describe_rank1_starts_with_fires_itself() {
+        for u in ALL.iter().copied().filter(|u| u.cat() == Cat::Gun) {
+            let d = u.describe(1);
+            assert!(d.starts_with("Fires itself"), "{} rank 1: {}", u.name(), d);
+        }
     }
 }

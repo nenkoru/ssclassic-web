@@ -204,6 +204,10 @@ for b in $NAMES; do
   if logged "autofire-$b" node tools/autofiretest.mjs "$url"; then result PASS "$b autofire" "kills on its own, off by option"
   else result FAIL "$b autofire" "see $OUT/autofire-$b.log"; fi
 
+  step "$b: autoguns"
+  if logged "autoguns-$b" node tools/autogunstest.mjs "$url"; then result PASS "$b autoguns" "all guns fire, off by option"
+  else result FAIL "$b autoguns" "see $OUT/autoguns-$b.log"; fi
+
   step "$b: touch"
   if logged "touch-$b" node tools/touchtest.mjs "$url"; then result PASS "$b touch" "stick, look, buttons, two fingers, menu"
   else result FAIL "$b touch" "see $OUT/touch-$b.log"; fi
