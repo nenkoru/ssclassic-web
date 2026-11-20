@@ -62,6 +62,21 @@ once a human is in the level, build a nav graph around the player (logged as
 `se1mod: bots nav ready`), fight nearby monsters and follow the nearest human.
 Test: `tools/bottest.mjs <url> [outdir]` (wired into `tools/test.sh` as the "bots" step).
 
+Behaviour worth knowing (2026-11-20):
+- Bots join on the first tick a human exists and are put 3 m from it, 120° apart. When the human
+  is teleported (Survivors moves the player into its arena) they follow at once; a bot more than
+  40 m from every human for 10 s, not fighting, is brought back.
+- A level's intro holds a player that joins after it (auto-actions, or a camera): the runtime asks
+  the engine to let go (`bot_release`; a camera is skipped with USE).
+- They stay within 20 m of the leader (fighting only what is within 8 m beyond that) and shoot
+  while they follow.
+- The view is steered by the angles the bot commanded, not by its state: the engine shows an
+  action a few ticks late, more with many bots, and steering by the late value swung the view to
+  the pitch limit (bots looking at the sky).
+- Cost per server tick, 15 bots on Hatshepsut: about 4 ms on average, about 11 ms at worst
+  (status line: `tick avg`). Path searches are capped at 2 a tick for all bots, sight rays at the
+  2 nearest foes per bot every other tick, the graph at 400 rays or 4 ms a tick.
+
 Known limits (2026-11-20):
 - The graph covers 150 m around the player at the time it's built, and isn't refreshed. Doors are
   solid to the rays, so the graph depends on which doors are open: on the KarnakDemo Survivors

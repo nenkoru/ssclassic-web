@@ -185,6 +185,26 @@ float SE1ModEnt_Armor(CEntity *penPlayer)
   if (penPlayer == NULL || !IsDerivedFromClass(penPlayer, "Player")) return 0;
   return ((CPlayer *)penPlayer)->m_fArmor;
 }
+/* what takes a player's controls away: 1 = a camera sequence (a new fire/use press ends it),
+   2 = auto-actions (the level moves the player along markers), 0 = nothing */
+int SE1ModEnt_PlayerBlocked(CEntity *penPlayer)
+{
+  if (penPlayer == NULL || !IsDerivedFromClass(penPlayer, "Player")) return 0;
+  CPlayer *pl = (CPlayer *)penPlayer;
+  return (pl->m_penCamera != NULL ? 1 : 0) | (pl->m_penActionMarker != NULL ? 2 : 0);
+}
+/* end a player's auto-actions: the engine's own way, a new EAutoAction (here with no first marker)
+   restarts the sequence, which then clears the marker and gives the controls back. Bots joining a
+   level after its intro start that intro alone, and its waits never end for them. */
+void SE1ModEnt_EndAutoActions(CEntity *penPlayer)
+{
+  if (penPlayer == NULL || !IsDerivedFromClass(penPlayer, "Player")) return;
+  CPlayer *pl = (CPlayer *)penPlayer;
+  if (pl->m_penActionMarker == NULL) return;
+  EAutoAction eAA;
+  eAA.penFirstMarker = NULL;
+  pl->SendEvent(eAA);
+}
 void SE1ModEnt_Eye(CEntity *penPlayer, FLOAT3D &pos, FLOAT3D &dir)
 {
   CPlacement3D pl = ((CPlayerEntity *)penPlayer)->en_plViewpoint;

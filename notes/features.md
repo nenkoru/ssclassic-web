@@ -55,7 +55,7 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
 | Multiplayer: virtual LAN switch | ✅ | rust/se1-server, port/common/NetLan.c, port/web/net.js | `?room=`, `&host=1` | mptest | — |
 | Multiplayer: WebRTC data channels | 🧪 | port/web/net.js, se1-server signal relay | `&rtc=1` | mptest --rtc (local only; internet needs STUN/TURN) | LAN |
 | Lobby | ✅ | port/web/lobby.js | Multiplayer button | lobbytest | LAN |
-| Rust mod layer (host API v8) | ✅ | port/common/{Se1ModHost,Se1ModEntities}.cpp, se1mod.h, rust/se1-mod/src/{lib,host,config}.rs | build `SE1_RUSTMOD` | cargo test | — |
+| Rust mod layer (host API v9) | ✅ | port/common/{Se1ModHost,Se1ModEntities}.cpp, se1mod.h, rust/se1-mod/src/{lib,host,config}.rs | build `SE1_RUSTMOD` | cargo test | — |
 | Damage hook + projectile attribution | ✅ | Entity.cpp hooks (3 call sites), Se1ModHost.cpp | used by Survivors | damagetest, projtest¹ | mod |
 | Serious Survivors mode (a minigame; war is the main mode) | ✅ | rust/se1-mod/src/survivors/, port/web/survivors.js | `?mode=survivors` | svtest, cargo test | mod, damage hook |
 | Threat warnings + hit direction | ✅ | survivors (mod + page) for now; move to a shared HUD module when war mode needs it. Host `player_hurt` (API v7) | `?svthreats=0` | threattest | Survivors |

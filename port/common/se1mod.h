@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-#define SE1MOD_API_VERSION 8
+#define SE1MOD_API_VERSION 9
 
 typedef struct SE1ModHost {
   uint32_t api_version;   /* SE1MOD_API_VERSION */
@@ -89,7 +89,8 @@ typedef struct SE1ModHost {
      actions are set from se1mod_bot_tick, once per simulated tick. */
   int   (*bot_add)(const char *name);          /* a server-side player; its player index, or -1 */
   void  (*bot_remove)(int id);
-  int   (*bot_state)(int id, float *out8);     /* eye x y z, heading, pitch (deg; heading +left, pitch +up), health, armor, weapon; 0 if gone */
+  int   (*bot_state)(int id, float *out9);     /* eye x y z, heading, pitch (deg; heading +left, pitch +up), health, armor, weapon,
+                                                  v9: blocked (1 camera sequence: a new fire/use press ends it, 2 auto-actions); 0 if gone */
   void  (*bot_action)(int id, const float *move3, const float *rot3, uint32_t buttons);
         /* move: strafe (+right), up (+jump), forward (NEGATIVE is forward), m/s up to 10;
            rot: ABSOLUTE accumulated heading, pitch, bank (only the change since the last action counts);
@@ -100,6 +101,8 @@ typedef struct SE1ModHost {
   int   (*humans)(float *pos3, int max);                  /* live players that are not bots */
   int   (*world_bounds)(float *min3, float *max3);        /* union of the level's brush boxes; 0 if none */
   int   (*is_server)(void);
+  void  (*bot_release)(int id);              /* v9: end the auto-actions holding a bot (bot_state blocked 2) */
+  void  (*bot_teleport)(int id, const float *pos3, float heading);   /* v9: put a bot there (feet position) */
 } SE1ModHost;
 
 /* called once after the engine and game library are initialized; returns 0 on success */

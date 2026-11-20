@@ -64,9 +64,10 @@ try {
   }
   check('bots joined', !!joined, joined || 'no `se1mod: bots: 2 [` line in 120 s');
 
-  // nav graph built around the player (a few hundred thousand rays at 400 a tick: up to a minute)
+  // nav graph built around the player (a few hundred thousand rays, at most 4 ms of them a tick:
+  // a couple of minutes on a big map)
   let nav = null;
-  for (let t = 0; t < 120 * TIMEOUT_SCALE && !nav; t++) {
+  for (let t = 0; t < 480 * TIMEOUT_SCALE && !nav; t++) {
     nav = consoleMsgs.find((m) => /^se1mod: bots nav ready: (\d+) nodes/.test(m));
     if (!nav) await sleep(500);
   }
@@ -105,6 +106,8 @@ try {
   const hd = h0 && h1 ? Math.hypot(h1[0] - h0[0], h1[2] - h0[2]) : Infinity;
   check('human unaffected', hd <= 3, `pos ${h0 ? h0.map((v) => v.toFixed(1)).join(',') : 'none'} -> ${h1 ? h1.map((v) => v.toFixed(1)).join(',') : 'none'} (d ${hd === Infinity ? 'n/a' : hd.toFixed(1)})`);
   check('no exceptions', errors.length === 0, errors.slice(0, 3).join(' | '));
+  // on a failure, the last status lines say what the bots were doing
+  if (failed) console.log(consoleMsgs.filter((m) => /^se1mod: bots/.test(m)).slice(-4).map((m) => '  ' + m.slice(0, 400)).join('\n'));
 
   // off by default: a reload with bots=0 never logs bots > 0
   await send('Page.navigate', { url: url + (url.includes('?') ? '&' : '?') + 'mute=1&mode=survivors&svauto=1&svgod=1&bots=0' });

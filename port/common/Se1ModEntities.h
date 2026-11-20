@@ -20,4 +20,6 @@ void SE1ModEnt_GiveWeapon(CEntity *penPlayer, int witType);
 void SE1ModEnt_Armor(CEntity *penPlayer, float add, float max);
 float SE1ModEnt_Armor(CEntity *penPlayer);
 void SE1ModEnt_Eye(CEntity *penPlayer, FLOAT3D &pos, FLOAT3D &dir);
+int SE1ModEnt_PlayerBlocked(CEntity *penPlayer);   /* 1 camera sequence, 2 auto-actions */
+void SE1ModEnt_EndAutoActions(CEntity *penPlayer);
 int SE1ModEnt_ProjectileWeapon(CEntity *pen);   /* WeaponType the projectile was fired with, 0 if not a player projectile */

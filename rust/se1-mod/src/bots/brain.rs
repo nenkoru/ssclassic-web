@@ -139,6 +139,13 @@ struct Aim {
     wander_t: f64,
 }
 
+/// A bot farther than this from its leader goes back to it.
+const LEASH: f32 = 20.0;
+/// ...unless a foe is this close: then it fights.
+const SELF_DEFENSE: f32 = 8.0;
+/// While following, it shoots at visible foes this close.
+const FOLLOW_SHOOT: f32 = 30.0;
+
 pub struct Brain {
     skill: f32,
     rng: Rng,
@@ -259,9 +266,13 @@ impl Brain {
             None
         };
 
+        // the leash: a bot farther than LEASH from its leader goes back to it, fighting only what's
+        // right on top of it (it still shoots while it follows: see aim_angles)
+        let leashed = s.leader.map_or(false, |l| hdist(s.pos, l) > LEASH)
+            && fight.map_or(true, |(d, _)| d > SELF_DEFENSE);
         let next = if heal_goal.is_some() {
             BotState::Heal
-        } else if fight.is_some() {
+        } else if fight.is_some() && !leashed {
             BotState::Fight
         } else if s.leader.is_some() {
             BotState::Follow
@@ -274,10 +285,6 @@ impl Brain {
             self.path_time = f64::NEG_INFINITY;
             self.path_from = None;
             self.stuck_count = 0;
-            // A new fight target gets a fresh reaction window.
-            if next == BotState::Fight {
-                self.aim = None;
-            }
             // A new roam goal gets a fresh random point.
             if next == BotState::Roam {
                 self.goal = None;
@@ -336,7 +343,13 @@ impl Brain {
 
     /// Maintain the aim: keep/switch target, run the wander, return the aim angles.
     fn aim_angles(&mut self, s: &Sense, nearest: Option<(f32, i32)>) -> (f32, f32) {
-        if self.state != BotState::Fight {
+        // aim in a fight, and also while following (run and gun) at a foe within FOLLOW_SHOOT
+        let shoots = match self.state {
+            BotState::Fight => true,
+            BotState::Follow => nearest.map_or(false, |(d, _)| d <= FOLLOW_SHOOT),
+            _ => false,
+        };
+        if !shoots {
             self.aim = None;
             return (s.yaw, s.pitch);
         }
@@ -391,16 +404,14 @@ impl Brain {
 
     /// Turn toward the aim angles, capped by max_turn_rate·dt, after the reaction delay.
     fn turn_toward(&self, s: &Sense, a_yaw: f32, aim_pitch: f32) -> (f32, f32) {
-        if self.state != BotState::Fight {
-            return (0.0, 0.0);
-        }
+        let rate = self.max_turn_rate() * s.dt;
         let Some(aim) = &self.aim else {
-            return (0.0, 0.0);
+            // nothing to aim at: bring the view back to level, like a player does
+            return (0.0, (-s.pitch * 0.2 * (s.dt * 60.0)).clamp(-rate, rate));
         };
         if s.time - aim.since <= self.reaction_time() {
             return (0.0, 0.0);
         }
-        let rate = self.max_turn_rate() * s.dt;
         let ey = norm_angle(a_yaw - s.yaw);
         let ep = aim_pitch - s.pitch;
         let turn_yaw = (ey * 0.25 * (s.dt * 60.0)).clamp(-rate, rate);
@@ -480,7 +491,9 @@ impl Brain {
 
         if s.time - self.stuck_time >= 1.5 {
             if wants && hdist(s.pos, self.stuck_pos) < 0.5 {
-                jump = true;
+                // in a fight, strafing into another bot isn't being stuck: jump only the second
+                // time in a row
+                jump = self.state != BotState::Fight || self.stuck_count >= 1;
                 // Fresh path, counted.
                 if let Some(g) = goal {
                     if let Some(wps) = nav.path(s.pos, g) {
@@ -497,6 +510,9 @@ impl Brain {
                     self.stuck_count = 0;
                 }
             }
+            if hdist(s.pos, self.stuck_pos) >= 0.5 {
+                self.stuck_count = 0; // making progress
+            }
             // New window from the current position and time.
             self.stuck_pos = s.pos;
             self.stuck_time = s.time;
@@ -506,9 +522,6 @@ impl Brain {
 
     /// Fire only at the same target we aim at, when it is visible and on our aim line.
     fn should_fire(&self, s: &Sense) -> bool {
-        if self.state != BotState::Fight {
-            return false;
-        }
         let Some(id) = self.aim.as_ref().map(|a| a.target) else {
             return false;
         };

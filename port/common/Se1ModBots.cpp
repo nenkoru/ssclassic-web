@@ -52,20 +52,37 @@ static void bot_remove(int id)
 {
   if (is_bot(id)) _pNetwork->ga_srvServer.RemoveVirtualPlayer(id);
 }
-/* eye x y z, heading, pitch (degrees, the engine's: heading +left, pitch +up), health, armor, weapon */
-static int bot_state(int id, float *out8)
+/* eye x y z, heading, pitch (degrees, the engine's: heading +left, pitch +up), health, armor, weapon,
+   blocked (1 camera sequence, 2 auto-actions) */
+static int bot_state(int id, float *out9)
 {
   CEntity *pen = player_entity(id);
   if (pen == NULL) return 0;
   FLOAT3D p, d;
   SE1ModEnt_Eye(pen, p, d);
-  out8[0] = p(1); out8[1] = p(2); out8[2] = p(3);
-  out8[3] = atan2f(-d(1), -d(3)) * 180.0f / PI;
-  out8[4] = asinf(Clamp(d(2), -1.0f, 1.0f)) * 180.0f / PI;
-  out8[5] = live(pen) ? ((CLiveEntity *)pen)->GetHealth() : 0.0f;
-  out8[6] = SE1ModEnt_Armor(pen);
-  out8[7] = (float)SE1ModEnt_Weapon(pen);
+  out9[0] = p(1); out9[1] = p(2); out9[2] = p(3);
+  out9[3] = atan2f(-d(1), -d(3)) * 180.0f / PI;
+  out9[4] = asinf(Clamp(d(2), -1.0f, 1.0f)) * 180.0f / PI;   /* measured: commanding +30 reads +30 */
+  out9[5] = live(pen) ? ((CLiveEntity *)pen)->GetHealth() : 0.0f;
+  out9[6] = SE1ModEnt_Armor(pen);
+  out9[7] = (float)SE1ModEnt_Weapon(pen);
+  out9[8] = (float)SE1ModEnt_PlayerBlocked(pen);
   return 1;
+}
+/* hand the controls back to a bot the level holds under auto-actions (its own intro) */
+static void bot_release(int id)
+{
+  if (is_bot(id)) SE1ModEnt_EndAutoActions(player_entity(id));
+}
+/* put a bot at a position (feet), facing `heading`: next to the player when it joins, or back to
+   the player when it's stuck far away. No telefrag: it shares space with nobody on purpose. */
+static void bot_teleport(int id, const float *pos3, float heading)
+{
+  if (!is_bot(id)) return;
+  CEntity *pen = player_entity(id);
+  if (pen == NULL) return;
+  CPlacement3D pl(FLOAT3D(pos3[0], pos3[1], pos3[2]), ANGLE3D(heading, 0, 0));
+  pen->Teleport(pl, FALSE);
 }
 static void bot_action(int id, const float *move3, const float *rot3, uint32_t buttons)
 {
@@ -189,5 +206,7 @@ void SE1ModBots_Register(SE1ModHost &host)
   host.humans = host_humans;
   host.world_bounds = host_world_bounds;
   host.is_server = host_is_server;
+  host.bot_release = bot_release;
+  host.bot_teleport = bot_teleport;
   _pSE1ServerTickHook = server_tick;
 }

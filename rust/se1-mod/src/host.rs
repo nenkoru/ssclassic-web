@@ -4,7 +4,7 @@ use std::ffi::{c_char, c_int, CStr, CString};
 
 use crate::config::CvarValue;
 
-pub const API_VERSION: u32 = 8;
+pub const API_VERSION: u32 = 9;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -66,6 +66,8 @@ pub struct SE1ModHost {
     pub humans: Option<extern "C" fn(*mut f32, c_int) -> c_int>,
     pub world_bounds: Option<extern "C" fn(*mut f32, *mut f32) -> c_int>,
     pub is_server: Option<extern "C" fn() -> c_int>,
+    pub bot_release: Option<extern "C" fn(c_int)>,
+    pub bot_teleport: Option<extern "C" fn(c_int, *const f32, f32)>,
 }
 
 /// What a bot's player entity looks like right now (`Host::bot_state`).
@@ -78,6 +80,9 @@ pub struct BotState {
     pub health: f32,
     pub armor: f32,
     pub weapon: i32,
+    /// v9: what holds its controls: 1 a camera sequence (a new FIRE or USE press ends it),
+    /// 2 auto-actions (the level moves it along markers), 0 nothing.
+    pub blocked: i32,
 }
 
 /// TFE player action buttons (src/SamTFE/Sources/Entities/Player.es).
@@ -411,7 +416,7 @@ impl Host {
     /// The bot's player entity, None once it's gone.
     pub fn bot_state(&self, id: i32) -> Option<BotState> {
         let f = self.raw.bot_state?;
-        let mut o = [0f32; 8];
+        let mut o = [0f32; 9];
         (f(id, o.as_mut_ptr()) != 0).then(|| BotState {
             eye: [o[0], o[1], o[2]],
             heading: o[3],
@@ -419,6 +424,7 @@ impl Host {
             health: o[5],
             armor: o[6],
             weapon: o[7] as i32,
+            blocked: o[8] as i32,
         })
     }
     /// The bot's action for this tick. `mv` = strafe (+right), up (+jump), forward (NEGATIVE is
@@ -462,6 +468,19 @@ impl Host {
         let f = self.raw.world_bounds?;
         let (mut a, mut b) = ([0f32; 3], [0f32; 3]);
         (f(a.as_mut_ptr(), b.as_mut_ptr()) != 0).then_some((a, b))
+    }
+    /// v9: end the auto-actions holding a bot (`BotState::blocked` 2): bots that join after a
+    /// level's intro run that intro alone and never finish it.
+    pub fn bot_release(&self, id: i32) {
+        if let Some(f) = self.raw.bot_release {
+            f(id)
+        }
+    }
+    /// v9: put a bot at `pos` (feet), facing `heading` (degrees, +left).
+    pub fn bot_teleport(&self, id: i32, pos: [f32; 3], heading: f32) {
+        if let Some(f) = self.raw.bot_teleport {
+            f(id, pos.as_ptr(), heading)
+        }
     }
     pub fn is_server(&self) -> bool {
         self.raw.is_server.map_or(false, |f| f() != 0)

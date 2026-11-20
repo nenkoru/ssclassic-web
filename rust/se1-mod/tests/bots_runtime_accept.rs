@@ -16,6 +16,8 @@ struct Fake {
     next: Cell<i32>,
     actions: RefCell<Vec<(i32, [f32; 3], [f32; 3], u32)>>,
     rays: Cell<usize>,
+    released: RefCell<Vec<i32>>,
+    teleports: RefCell<Vec<(i32, [f32; 3])>>,
     vis_rays: Cell<usize>,
 }
 impl Fake {
@@ -39,7 +41,7 @@ impl BotHost for Fake {
         let id = self.next.get();
         self.next.set(id + 1);
         self.names.borrow_mut().push(name.into());
-        self.bots.borrow_mut().insert(id, BotState { eye: [0.0, 1.7, 0.0], heading: 0.0, pitch: 0.0, health: 100.0, armor: 0.0, weapon: 2 });
+        self.bots.borrow_mut().insert(id, BotState { eye: [0.0, 1.7, 0.0], heading: 0.0, pitch: 0.0, health: 100.0, armor: 0.0, weapon: 2, blocked: 0 });
         Some(id)
     }
     fn bot_remove(&self, id: i32) {
@@ -48,6 +50,11 @@ impl BotHost for Fake {
     }
     fn bot_state(&self, id: i32) -> Option<BotState> { self.bots.borrow().get(&id).copied() }
     fn bot_action(&self, id: i32, mv: [f32; 3], rot: [f32; 3], b: u32) { self.actions.borrow_mut().push((id, mv, rot, b)); }
+    fn bot_release(&self, id: i32) { self.released.borrow_mut().push(id); }
+    fn bot_teleport(&self, id: i32, pos: [f32; 3], _heading: f32) {
+        self.teleports.borrow_mut().push((id, pos));
+        if let Some(b) = self.bots.borrow_mut().get_mut(&id) { b.eye = [pos[0], pos[1] + 1.7, pos[2]]; }
+    }
     fn ray(&self, a: [f32; 3], b: [f32; 3], _m: bool) -> Option<f32> {
         self.rays.set(self.rays.get() + 1);
         if self.enemies.borrow().iter().any(|e| (e.1[0] - b[0]).abs() < 1e-3 && (e.1[1] + 1.0 - b[1]).abs() < 1e-3 && (e.1[2] - b[2]).abs() < 1e-3) {
@@ -125,9 +132,14 @@ fn removes_the_newest_and_forgets_gone_bots() {
 fn walks_forward_with_negative_z_toward_a_far_leader() {
     let h = Fake::new();
     h.opt("se1Bots", 1.0);
-    h.humans.borrow_mut().push([0.0, 0.0, -40.0]); // straight ahead (heading 0 looks along -Z)
+    h.humans.borrow_mut().push([0.0, 0.0, 0.0]);
     let mut rt = Runtime::new();
-    ticks(&mut rt, &h, 10);
+    ticks(&mut rt, &h, 3); // joins and is put next to the human
+    // the human walks off, straight ahead (heading 0 looks along -Z), 2 m a tick: walking, not a teleport
+    for k in 1..=20 {
+        h.humans.borrow_mut()[0] = [0.0, 0.0, -2.0 * k as f32];
+        rt.tick(&h);
+    }
     let (mv, _, _) = h.last_action(1).expect("acts");
     assert!(mv[2] < -5.0, "forward is negative in the engine: {mv:?}");
     assert!(mv[0].abs() < 3.0, "no big strafe: {mv:?}");
@@ -212,4 +224,104 @@ fn off_by_default() {
     let mut rt = Runtime::new();
     ticks(&mut rt, &h, 20);
     assert!(h.names.borrow().is_empty());
+}
+
+#[test]
+fn camera_sequences_are_skipped_with_use() {
+    // a level's intro camera holds the player until a NEW fire/use press; turning is ignored meanwhile
+    let h = Fake::new();
+    h.opt("se1Bots", 1.0);
+    h.humans.borrow_mut().push([0.0, 0.0, 0.0]);
+    h.enemies.borrow_mut().push((77, [20.0, 0.0, 0.0], 100.0));
+    let mut rt = Runtime::new();
+    ticks(&mut rt, &h, 3);
+    h.bots.borrow_mut().get_mut(&1).unwrap().blocked = 1;
+    let before = h.actions.borrow().len();
+    ticks(&mut rt, &h, 30);
+    let acts: Vec<_> = h.actions.borrow()[before..].iter().filter(|a| a.0 == 1).cloned().collect();
+    assert!(acts.iter().any(|a| a.3 & buttons::USE != 0) && acts.iter().any(|a| a.3 & buttons::USE == 0), "taps USE (press and release)");
+    assert!(acts.iter().all(|a| a.3 & buttons::FIRE == 0), "doesn't shoot to skip it");
+    // auto-actions: the level drives; the bot sends nothing that moves it
+    h.bots.borrow_mut().get_mut(&1).unwrap().blocked = 2;
+    let before = h.actions.borrow().len();
+    ticks(&mut rt, &h, 10);
+    assert!(h.actions.borrow()[before..].iter().filter(|a| a.0 == 1).all(|a| a.1 == [0.0, 0.0, 0.0] && a.3 == 0), "stands still under auto-actions");
+    ticks(&mut rt, &h, 20);
+    assert!(h.released.borrow().contains(&1), "and asks the engine to release it");
+}
+
+#[test]
+fn bots_are_put_next_to_the_human_each_on_its_own_spot() {
+    let h = Fake::new();
+    h.opt("se1Bots", 3.0);
+    h.humans.borrow_mut().push([10.0, 0.0, 10.0]);
+    let mut rt = Runtime::new();
+    ticks(&mut rt, &h, 8);
+    let t = h.teleports.borrow().clone();
+    assert_eq!(t.len(), 3, "each bot placed once: {t:?}");
+    for (_, p) in &t {
+        let d = ((p[0] - 10.0).powi(2) + (p[2] - 10.0).powi(2)).sqrt();
+        assert!((1.0..=4.0).contains(&d), "next to the human, not on top: {d} m");
+        assert!(p[1].abs() < 0.05, "on the floor: y {}", p[1]);
+    }
+    for i in 0..3 {
+        for j in i + 1..3 {
+            let (a, b) = (t[i].1, t[j].1);
+            assert!(((a[0] - b[0]).powi(2) + (a[2] - b[2]).powi(2)).sqrt() > 1.5, "own spots");
+        }
+    }
+}
+
+#[test]
+fn a_bot_lost_far_away_is_brought_back() {
+    let h = Fake::new();
+    h.opt("se1Bots", 1.0);
+    h.humans.borrow_mut().push([0.0, 0.0, 0.0]);
+    let mut rt = Runtime::new();
+    ticks(&mut rt, &h, 5);
+    let n = h.teleports.borrow().len();
+    h.bots.borrow_mut().get_mut(&1).unwrap().eye = [100.0, 1.7, 0.0]; // stuck behind a door, 100 m off
+    ticks(&mut rt, &h, 150);
+    assert_eq!(h.teleports.borrow().len(), n, "not at once: it may be on its way");
+    ticks(&mut rt, &h, 80);
+    let t = h.teleports.borrow();
+    assert_eq!(t.len(), n + 1, "brought back after 10 s");
+    let p = t.last().unwrap().1;
+    assert!((p[0].powi(2) + p[2].powi(2)).sqrt() < 4.0, "next to the human: {p:?}");
+}
+
+#[test]
+fn bots_follow_a_teleported_human_at_once() {
+    let h = Fake::new();
+    h.opt("se1Bots", 2.0);
+    h.humans.borrow_mut().push([0.0, 0.0, 0.0]);
+    let mut rt = Runtime::new();
+    ticks(&mut rt, &h, 5);
+    let n = h.teleports.borrow().len();
+    h.humans.borrow_mut()[0] = [500.0, 0.0, 500.0]; // moved into an arena by the game
+    ticks(&mut rt, &h, 2);
+    let t = h.teleports.borrow();
+    assert_eq!(t.len(), n + 2, "both bots follow within a tick or two");
+    for (_, p) in &t[n..] {
+        assert!(((p[0] - 500.0).powi(2) + (p[2] - 500.0).powi(2)).sqrt() < 4.0, "next to the human again: {p:?}");
+    }
+}
+
+#[test]
+fn time_runs_in_seconds_so_a_stuck_bot_jumps_rarely() {
+    // the brain's timers are in seconds (a tick is 0.05 s): a bot that can't move gets one stuck
+    // window per 1.5 s, so a jump at most that often, and a fresh path about once a second
+    let h = Fake::new();
+    h.opt("se1Bots", 1.0);
+    h.humans.borrow_mut().push([0.0, 0.0, 0.0]);
+    let mut rt = Runtime::new();
+    ticks(&mut rt, &h, 3);
+    for k in 1..=20 {
+        h.humans.borrow_mut()[0] = [0.0, 0.0, -2.0 * k as f32]; // walks off; the fake bot can't move
+        rt.tick(&h);
+    }
+    let before = h.actions.borrow().len();
+    ticks(&mut rt, &h, 100); // 5 s
+    let jumps = h.actions.borrow()[before..].iter().filter(|a| a.0 == 1 && a.1[1] > 0.0).count();
+    assert!((1..=4).contains(&jumps), "a stuck bot jumps about once per 1.5 s, got {jumps} in 5 s");
 }
