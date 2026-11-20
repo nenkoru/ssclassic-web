@@ -92,18 +92,36 @@ How the graph is built (`nav.rs`):
   out to the mountains, 3.7 km², with nothing in it.
 - **Seeds**: the humans, all items, and the monsters present at level start, except spawner
   templates (`m_bTemplate`, parked in hidden rooms; also no longer foes for the bots).
-- Result on Hatshepsut (2026-11-20): 16 105 nodes, 12 doors, 215 000 rays, baked in 6.4 s, 218 KB
+- **No floor inside a solid.** The engine's rays see no face of a solid they start inside. After
+  hitting a ramp's top, the next ray down started inside the ramp and found the ground under it,
+  and the 1.8 m clearance ray, all inside the ramp, saw nothing: 1600 nodes on Hatshepsut were
+  inside its ramps and steps, and bots walked into them. A floor under an earlier surface now
+  needs a ceiling: a ray up from it must hit the underside of that surface.
+- **A tall step isn't a slope.** Rises of up to 45° between neighbours count as slopes, and the
+  knee and chest rays can pass just over the corner of a step: the side of Hatshepsut's ramp,
+  2.5 m, was linked as walkable. A rise of more than a step now needs the floor halfway between
+  to be about halfway up (one more ray down).
+- **Statues and pillars** (model holders that don't move: what blocks a player for good) stop the
+  bake's walk rays; monsters and items don't. Live builds skip that: with Survivors' hundred
+  monsters about, such a ray cost about 60 µs and a live build no longer finished in time.
+- Result on Hatshepsut (2026-11-20): 14 002 nodes, 11 doors, 204 000 rays, baked in 9.3 s, 187 KB
   (format 3: a node is its height and one byte per edge, x/z come from its grid column). The
   first versions: 1024 nodes (the intro box), then 1.06 M nodes and 107 MB (the desert).
   A few small islands remain (the intro box and two closed rooms seeded by something in them).
 - **While playing**, the runtime casts 8 door probes a tick, round-robin, and the bots' paths skip
   the doors that are closed right now (`NavGraph::path_gated`).
 
-Open (2026-11-20): `tools/bottest.mjs` on the demo build (live graph, KarnakDemo Survivors) failed
-"bots move" twice: the graph is ready (13 759 nodes, 9 doors) and the bots fight, but neither moved
-5 m within the window. Likely timing: the live graph is now ready about 100 s sooner, and a bot
-near a human who stands still only moves by strafing in a fight. Not yet compared with the old
-code on the same build. On Hatshepsut with the baked graph every check passed.
+**Testing navigation:** `tools/navroamtest.mjs <url> [level] [seconds]` (full game data). With
+`?botroam=N` the bots ignore the players and the monsters and roam to random points of the graph
+up to N m away; each bot's status line counts `goals reached/given up` (a goal is given up after
+max(15 s, N/2 s) or after being stuck three times). Hatshepsut, 4 bots, 60 m goals, 150 s: from
+37% of goals reached to 93-95%, every bot over 100 m from its start, after these fixes:
+- Paths were asked from the bot's eye, so the nearest node could be a ledge above its floor (a
+  terrace edge 2.6 m up beat the floor under the bot). The runtime asks from the feet.
+- Roam goals were any node in range, often on a roof or a floor below that can't be walked to.
+  They are now in the bot's own strongly connected part of the graph (`NavGraph::comp`).
+- A bot back from a fight threw its roam goal away and never got anywhere; it carries on now.
+  A teleport (`keep_near_humans`) clears the route.
 
 Limits:
 - A door that opens when someone walks up to it looks closed until a human opens it, so bots won't

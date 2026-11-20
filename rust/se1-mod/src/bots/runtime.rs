@@ -23,10 +23,10 @@ pub trait BotHost {
     /// Put a bot at a position (feet), facing `heading`.
     fn bot_teleport(&self, id: i32, pos: [f32; 3], heading: f32);
     fn ray(&self, from: [f32; 3], to: [f32; 3], hit_models: bool) -> Option<f32>;
-    /// `nav::World::ray_door` (level only, no models), plus whether the polygon hit is too steep
-    /// to stand on (`nav::World::ray_floor`).
-    fn ray_door(&self, from: [f32; 3], to: [f32; 3], pass_doors: bool) -> (Option<f32>, u32, bool) {
-        let _ = pass_doors;
+    /// `nav::World::ray_door` (the level, and with `obstacles` the models that block players for
+    /// good), plus whether the polygon hit is too steep to stand on (`nav::World::ray_floor`).
+    fn ray_door(&self, from: [f32; 3], to: [f32; 3], pass_doors: bool, obstacles: bool) -> (Option<f32>, u32, bool) {
+        let _ = (pass_doors, obstacles);
         (self.ray(from, to, false), 0, false)
     }
     fn enemies(&self, max: usize) -> Vec<(i32, [f32; 3], f32)>;
@@ -64,8 +64,8 @@ impl BotHost for crate::host::Host {
     fn ray(&self, from: [f32; 3], to: [f32; 3], hit_models: bool) -> Option<f32> {
         crate::host::Host::ray(self, from, to, hit_models)
     }
-    fn ray_door(&self, from: [f32; 3], to: [f32; 3], pass_doors: bool) -> (Option<f32>, u32, bool) {
-        crate::host::Host::ray_door(self, from, to, pass_doors)
+    fn ray_door(&self, from: [f32; 3], to: [f32; 3], pass_doors: bool, obstacles: bool) -> (Option<f32>, u32, bool) {
+        crate::host::Host::ray_door(self, from, to, pass_doors, obstacles)
     }
     fn enemies(&self, max: usize) -> Vec<(i32, [f32; 3], f32)> {
         crate::host::Host::enemies(self, max)
@@ -160,6 +160,10 @@ struct Bot {
 /// One world ray cast through the host (the nav builder's [`World`]).
 struct RayWorld<'a> {
     h: &'a dyn BotHost,
+    /// walk rays also hit statues and pillars: bakes only. Such a ray tests the collision box of
+    /// every model on its way, and with Survivors' hundred monsters around it cost about 60 µs:
+    /// a live build no longer finished inside its 4 ms a tick
+    obstacles: bool,
 }
 
 impl World for RayWorld<'_> {
@@ -167,11 +171,12 @@ impl World for RayWorld<'_> {
         self.h.ray(from, to, false)
     }
     fn ray_door(&self, from: [f32; 3], to: [f32; 3], pass_doors: bool) -> (Option<f32>, u32) {
-        let (hit, door, _) = self.h.ray_door(from, to, pass_doors);
+        // walking: statues and pillars are in the way too (floors stay the level's own)
+        let (hit, door, _) = self.h.ray_door(from, to, pass_doors, self.obstacles);
         (hit, door)
     }
     fn ray_floor(&self, from: [f32; 3], to: [f32; 3]) -> (Option<f32>, u32, bool) {
-        self.h.ray_door(from, to, false)
+        self.h.ray_door(from, to, false, false)
     }
 }
 
@@ -180,12 +185,19 @@ struct GatedNav<'a> {
     nav: &'a NavGraph,
     closed: &'a [bool],
 }
+/// The brain's position is the bot's eye; the graph's nodes are floor points. Asked from the eye,
+/// the nearest node can be a ledge above the floor the bot stands on (a terrace edge 2.6 m up and
+/// 2 m away beat the bot's own floor on Hatshepsut), and every path then starts into that wall.
+const EYE_HEIGHT: f32 = 1.7;
+fn feet(eye: [f32; 3]) -> [f32; 3] {
+    [eye[0], eye[1] - EYE_HEIGHT, eye[2]]
+}
 impl Paths for GatedNav<'_> {
     fn path(&self, from: [f32; 3], to: [f32; 3]) -> Option<Vec<[f32; 3]>> {
-        self.nav.path_gated(from, to, self.closed)
+        self.nav.path_gated(feet(from), to, self.closed)
     }
     fn random_near(&self, p: [f32; 3], r: f32, seed: u64) -> Option<[f32; 3]> {
-        self.nav.random_node_near(p, r, seed)
+        self.nav.random_node_near(feet(p), r, seed)
     }
 }
 
@@ -392,7 +404,7 @@ impl Runtime {
         let Some(build) = self.build.as_mut() else {
             return;
         };
-        let w = RayWorld { h };
+        let w = RayWorld { h, obstacles: false };
         // slices of NAV_SLICE rays until the tick's ray budget or NAV_TIME_BUDGET is spent: a ray in
         // a big level costs much more than in a small one, and this runs inside the server's tick
         let start = std::time::Instant::now();
@@ -437,7 +449,7 @@ impl Runtime {
         let seeds = nav_seeds(h);
         let p = NavParams { doors: true, max_reach: BAKE_REACH, ..NavParams::default() };
         let mut b = NavBuilder::flood(min, max, p, &seeds);
-        let w = RayWorld { h };
+        let w = RayWorld { h, obstacles: true };
         let mut last_log = start;
         while !b.step(&w, 20_000) {
             if last_log.elapsed() > BAKE_LOG_EVERY {
@@ -502,14 +514,18 @@ impl Runtime {
             None => &direct,
         };
         let paths = BudgetPaths { inner, left: std::cell::Cell::new(PATHS_PER_TICK) };
+        // ?botroam=N (tools/navroamtest.mjs): the bots ignore the humans and roam on their own,
+        // walking to random points up to N m away
+        let roam = h.page_option("se1BotRoam") as f32;
         for i in 0..self.bots.len() {
             self.bots[i].jumped = false;
-            Self::act_one(self.ticks, h, &paths, &mut self.bots[i], &humans, &enemies, &items);
+            Self::act_one(self.ticks, h, &paths, &mut self.bots[i], &humans, &enemies, &items, roam);
         }
         self.jumps += self.bots.iter().filter(|b| b.jumped).count() as u32;
     }
 
-    fn act_one(ticks: u32, h: &dyn BotHost, paths: &dyn Paths, b: &mut Bot, humans: &[[f32; 3]], enemies: &[(i32, [f32; 3], f32)], items: &[(i32, [f32; 3])]) {
+    #[allow(clippy::too_many_arguments)]
+    fn act_one(ticks: u32, h: &dyn BotHost, paths: &dyn Paths, b: &mut Bot, humans: &[[f32; 3]], enemies: &[(i32, [f32; 3], f32)], items: &[(i32, [f32; 3])], roam: f32) {
         let Some(st) = h.bot_state(b.id) else {
             return;
         };
@@ -543,11 +559,17 @@ impl Runtime {
             h.bot_action(b.id, [0.0, 0.0, 0.0], [b.heading_acc, b.pitch_acc, 0.0], 0);
             return;
         }
-        if Self::keep_near_humans(h, b, &st, humans) {
+        if (roam <= 0.0 || !b.placed) && Self::keep_near_humans(h, b, &st, humans) {
             return;
         }
         let check = (ticks + b.num as u32) % 2 == 0;
         let mut sense = sense(h, st, humans, enemies, items, ticks as f64 * TICK as f64, &mut b.sight, check);
+        if roam > 0.0 {
+            // a navigation test: no leader, and no fights to interrupt the walk
+            sense.leader = None;
+            sense.foes.clear();
+            b.brain.set_roam_radius(roam);
+        }
         let (yaw, pitch) = *b.view.get_or_insert((st.heading, st.pitch));
         sense.yaw = yaw;
         sense.pitch = pitch;
@@ -578,6 +600,7 @@ impl Runtime {
         let spot = spot_near(h, near, b.num);
         h.bot_teleport(b.id, spot, b.view.map_or(st.heading, |v| v.0));
         b.view = None;
+        b.brain.reset_route();
         true
     }
 
@@ -594,8 +617,11 @@ impl Runtime {
                 BotState::Follow => "Follow",
                 BotState::Roam => "Roam",
             };
+            let (reached, missed) = b.brain.roam_stats();
+            let (wps, goal) = b.brain.route();
+            let goal = goal.map_or("-".to_string(), |g| format!("{:.0},{:.0},{:.0}", g[0], g[1], g[2]));
             parts.push(format!(
-                "[{} {} hp {} at {} {} heading {} pitch {} weapon {} blocked {}]",
+                "[{} {} hp {} at {} {} heading {} pitch {} weapon {} blocked {} goals {reached}/{missed} wp {wps} to {goal} eye {:.1}]",
                 b.id,
                 state,
                 st.health.round() as i32,
@@ -604,7 +630,8 @@ impl Runtime {
                 st.heading.round() as i32,
                 st.pitch.round() as i32,
                 st.weapon,
-                st.blocked
+                st.blocked,
+                st.eye[1]
             ));
         }
         let nav = match (&self.nav, &self.build) {

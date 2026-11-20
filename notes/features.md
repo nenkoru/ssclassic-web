@@ -65,7 +65,7 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
 | Bots: navigation graph | ✅ | rust/se1-mod/src/bots/nav.rs (pure Rust, behind the `World` trait); `impl Paths for NavGraph` in bots/mod.rs | — | tests/bots_nav_accept.rs | — |
 | Bots: brain | ✅ | rust/se1-mod/src/bots/brain.rs (pure Rust, behind the `Paths` trait) | — | tests/bots_brain_accept.rs, bots_brain_accept2.rs | — |
 | Bots: engine wiring + runtime | ✅ | engine: `CServer::AddVirtualPlayer`/`SetVirtualAction`, `_pSE1ServerTickHook`; glue: port/common/Se1ModBots.cpp (host API v8+); runtime: rust/se1-mod/src/bots/runtime.rs (behind the `BotHost` trait) | `?bots=N`, `?botskill=` | bottest, tests/bots_runtime_accept.rs | nav, brain, mod |
-| Bots: baked nav graphs + doors | 🧪 | tools/navbake.mjs bakes data/<pack>/Nav/Levels/*.nav; runtime.rs `bake`, `use_baked`, `check_doors`; lib.rs `load_baked_nav`; door-aware ray `ray_door` (host API v10, Se1ModBots.cpp) | `?navbake=1` (the tool only) | tests/bots_runtime_accept.rs, nav.rs `doors_closed_at_build_still_connect` | bots runtime |
+| Bots: baked nav graphs + doors | 🧪 | tools/navbake.mjs bakes data/<pack>/Nav/Levels/*.nav; runtime.rs `bake`, `use_baked`, `check_doors`; lib.rs `load_baked_nav`; door-aware ray `ray_door` (host API v10, Se1ModBots.cpp) | `?navbake=1` (the tool only), `?botroam=N` (tests) | tests/bots_runtime_accept.rs, nav.rs unit tests; tools/navroamtest.mjs (full data, `?botroam=N`) | bots runtime |
 | More than 16 players | 📝 | Network.h limits, wire format | — | mptest at 32+ | LAN |
 | War mode (lines, side missions, game master, roles, building) | 📝 | rust/se1-mod/src/war/, port/web/war.js | `?mode=war` | — | bots, >16 players |
 | War map (persistent front) | 📝 | rust/se1-server | — | — | war mode |

@@ -45,7 +45,7 @@ try {
   // one `se1mod: bots: <n> [<id> <state> hp <hp> at <x> <z>; ...]` line
   const botsLine = (msgs) => msgs.filter((m) => m.startsWith('se1mod: bots: ')).at(-1) || '';
   const botAt = (msgs, bid) => {
-    const m = botsLine(msgs).match(new RegExp(`\\[${bid}\\s+\\w+\\s+hp\\s+\\S+\\s+at\\s+(-?[\\d.]+)\\s+(-?[\\d.]+)`));
+    const m = (typeof msgs === 'string' ? msgs : botsLine(msgs)).match(new RegExp(`\\[${bid}\\s+\\w+\\s+hp\\s+\\S+\\s+at\\s+(-?[\\d.]+)\\s+(-?[\\d.]+)`));
     return m ? [parseFloat(m[1]), parseFloat(m[2])] : null;
   };
   await send('Runtime.enable'); await send('Page.enable');
@@ -74,18 +74,16 @@ try {
   const navN = nav ? parseInt(nav.match(/^se1mod: bots nav ready: (\d+)/)[1], 10) : 0;
   check('nav built', navN > 100, nav || `no nav-ready line (saw ${navN} nodes)`);
 
-  // each bot moved more than 5 m between two log lines
+  // each bot got more than 5 m from where it joined, in any log line since: they follow a player
+  // who stands still, so most of their walking can happen while the nav is still being built
   const ids = [...new Set([...botsLine(consoleMsgs).matchAll(/\[(\d+)\s/g)].map((m) => +m[1]))];
   const moved = [];
   for (const bid of ids) {
-    let first = null, dist = 0;
-    for (let t = 0; t < 120 * TIMEOUT_SCALE && !moved.includes(bid); t++) {
-      await sleep(500);
-      const p = botAt(consoleMsgs, bid);
-      if (!p) continue;
-      if (!first) first = p;
-      dist = Math.hypot(p[0] - first[0], p[1] - first[1]);
-      if (dist > 5) moved.push(bid);
+    const first = joined && botAt(joined, bid);
+    for (let t = 0; t < 120 * TIMEOUT_SCALE && first && !moved.includes(bid); t++) {
+      const far = consoleMsgs.filter((m) => m.startsWith('se1mod: bots: ')).map((l) => botAt(l, bid))
+        .some((p) => p && Math.hypot(p[0] - first[0], p[1] - first[1]) > 5);
+      if (far) moved.push(bid); else await sleep(500);
     }
   }
   check('bots move', ids.length > 0 && moved.length === ids.length, moved.length ? `bots ${moved.join(', ')} moved > 5 m` : 'no bot moved > 5 m');

@@ -163,6 +163,11 @@ pub struct Brain {
     jump_tick: bool,
     strafe_dir: f32,
     strafe_until: f64,
+    /// Roam goals are picked within this radius (30 m; `?botroam=N` tests use longer walks).
+    roam_radius: f32,
+    /// Roam goals reached (within 2 m) and given up (timed out, or stuck three times).
+    goals_reached: u32,
+    goals_missed: u32,
 }
 
 impl Brain {
@@ -185,11 +190,39 @@ impl Brain {
             jump_tick: false,
             strafe_dir: 1.0,
             strafe_until: 0.0,
+            roam_radius: 30.0,
+            goals_reached: 0,
+            goals_missed: 0,
         }
     }
 
     pub fn state(&self) -> BotState {
         self.state
+    }
+
+    /// Pick roam goals within `r` metres.
+    pub fn set_roam_radius(&mut self, r: f32) {
+        self.roam_radius = r;
+    }
+
+    /// Forget where it was going (it was teleported): the next tick picks a new route, uncounted.
+    pub fn reset_route(&mut self) {
+        self.goal = None;
+        self.goal_time = f64::NEG_INFINITY;
+        self.waypoints.clear();
+        self.path_time = f64::NEG_INFINITY;
+        self.path_from = None;
+        self.stuck_count = 0;
+    }
+
+    /// Waypoints left on its path, and the roam goal (for the status line).
+    pub fn route(&self) -> (usize, Option<[f32; 3]>) {
+        (self.waypoints.len(), self.goal)
+    }
+
+    /// Roam goals (reached, given up) so far.
+    pub fn roam_stats(&self) -> (u32, u32) {
+        (self.goals_reached, self.goals_missed)
     }
 
     /// How many times the brain asked `nav.path` because it was stuck.
@@ -285,11 +318,8 @@ impl Brain {
             self.path_time = f64::NEG_INFINITY;
             self.path_from = None;
             self.stuck_count = 0;
-            // A new roam goal gets a fresh random point.
-            if next == BotState::Roam {
-                self.goal = None;
-                self.goal_time = f64::NEG_INFINITY;
-            }
+            // Back to roaming (after a fight, say): carry on to the roam goal it had, on the same
+            // clock. A fresh goal each time meant a bot in and out of fights never got anywhere.
         }
         (heal_goal, fight)
     }
@@ -308,11 +338,16 @@ impl Brain {
             }
             BotState::Follow => s.leader,
             BotState::Roam => {
-                if self.goal.is_none()
-                    || hdist(s.pos, self.goal.unwrap()) < 2.0
-                    || s.time - self.goal_time > 15.0
-                {
-                    self.goal = nav.random_near(s.pos, 30.0, self.rng.next_u64());
+                let reached = self.goal.is_some_and(|g| hdist(s.pos, g) < 2.0);
+                if self.goal.is_none() || reached || s.time - self.goal_time > 15.0f64.max(self.roam_radius as f64 / 2.0) {
+                    if self.goal.is_some() {
+                        if reached {
+                            self.goals_reached += 1;
+                        } else {
+                            self.goals_missed += 1;
+                        }
+                    }
+                    self.goal = nav.random_near(s.pos, self.roam_radius, self.rng.next_u64());
                     self.goal_time = s.time;
                 }
                 self.goal
@@ -505,7 +540,8 @@ impl Brain {
                 self.repaths += 1;
                 self.stuck_count += 1;
                 if self.state == BotState::Roam && self.stuck_count >= 3 {
-                    self.goal = nav.random_near(s.pos, 30.0, self.rng.next_u64());
+                    self.goals_missed += 1;
+                    self.goal = nav.random_near(s.pos, self.roam_radius, self.rng.next_u64());
                     self.goal_time = s.time;
                     self.stuck_count = 0;
                 }

@@ -16,6 +16,8 @@
   if (q.get('botskill')) Module['se1BotSkill'] = Math.min(1, Math.max(0, +q.get('botskill')));
   // ?navbake=1 (tools/navbake.mjs): bake the level's bot nav graph once a player is in it
   if (q.get('navbake')) Module['se1NavBake'] = 1;
+  // ?botroam=N (tools/navroamtest.mjs): bots ignore the players and roam to random points up to N m away
+  if (q.get('botroam')) Module['se1BotRoam'] = Math.max(0, +q.get('botroam') || 0);
   // ?vrange=0: gl1shim copies the whole client array [0, maxIndex] for indexed draws instead of
   // just the range the indices use (A/B switch for tools/vrangetest.mjs; 1 is the default)
   if (q.get('vrange') === '0') Module['se1VRange'] = 0;

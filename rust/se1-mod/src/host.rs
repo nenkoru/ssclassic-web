@@ -447,10 +447,13 @@ impl Host {
     /// `ray` that knows doors (moving brushes): with `pass_doors` the hit is the first solid that isn't
     /// a door, and the id is the first door passed; without, the id is the door hit. 0: no door.
     /// The third value: the polygon hit is too steep to stand on (its surface's climb slope).
-    pub fn ray_door(&self, from: [f32; 3], to: [f32; 3], pass_doors: bool) -> (Option<f32>, u32, bool) {
+    /// `obstacles`: also hit models that block players for good (statues, pillars), not monsters
+    /// or items.
+    pub fn ray_door(&self, from: [f32; 3], to: [f32; 3], pass_doors: bool, obstacles: bool) -> (Option<f32>, u32, bool) {
         let Some(f) = self.raw.ray_door else { return (self.ray(from, to, false), 0, false) };
         let (mut door, mut steep) = (0u32, 0 as c_int);
-        let d = f(from.as_ptr(), to.as_ptr(), if pass_doors { 2 } else { 0 }, &mut door, &mut steep);
+        let flags = if pass_doors { 2 } else { 0 } | if obstacles { 4 } else { 0 };
+        let d = f(from.as_ptr(), to.as_ptr(), flags, &mut door, &mut steep);
         ((d >= 0.0).then_some(d), door, steep != 0)
     }
     /// Live enemies: (entity id, position, health).

@@ -104,7 +104,8 @@ typedef struct SE1ModHost {
   void  (*bot_release)(int id);              /* v9: end the auto-actions holding a bot (bot_state blocked 2) */
   void  (*bot_teleport)(int id, const float *pos3, float heading);   /* v9: put a bot there (feet position) */
   /* v10: ray for the bots' nav graph, aware of doors (moving brushes: doors, lifts, bridges).
-     flags: 1 hit models, 2 pass doors (the hit is the first solid that isn't a door).
+     flags: 1 hit models, 2 pass doors (the hit is the first solid that isn't a door), 4 hit the
+     models that block players for good (model holders that don't move), not monsters or items.
      *door: the first door passed (flag 2) or the door hit (no flag 2), its entity id; 0 if none.
      *steep: 1 if the polygon hit is too steep to stand on (steeper than its surface type's climb
      slope: designers keep players in with slopes they slide down), else 0. */

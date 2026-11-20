@@ -147,6 +147,8 @@ pub struct NavBuilder {
     col: Vec<[f32; 3]>,
     col_door: Vec<u32>,
     col_y: f32,
+    /// The surface the column's last ray hit (the layer above the next one).
+    col_prev: f32,
     col_layers: usize,
     col_started: bool,
     /// Doubled move-down size while a column start is inside solid.
@@ -194,6 +196,7 @@ impl NavBuilder {
             col: Vec::new(),
             col_door: Vec::new(),
             col_y: 0.0,
+            col_prev: 0.0,
             col_layers: 0,
             col_started: false,
             move_d: 0.25,
@@ -414,6 +417,7 @@ impl NavBuilder {
                     self.move_d = 0.25;
                     self.col_layers += 1;
                     self.col_y = y - d - 0.05;
+                    self.col_prev = y - d;
                     if self.col_layers >= self.p.max_layers || self.col_y <= self.min[1] {
                         break;
                     }
@@ -425,7 +429,12 @@ impl NavBuilder {
                     // clearance: the player needs `height` above the floor
                     let (a, b) = ([x, floor + 0.05, z], [x, floor + self.p.height, z]);
                     let (c, cdoor) = self.cast_walk(w, a, b);
-                    if c.is_none() {
+                    // under an earlier surface the floor needs a ceiling: the engine's rays see no
+                    // face of a solid they start inside, so the ray down from a ramp's top passes
+                    // through the ramp to the ground under it, and the clearance ray inside the
+                    // ramp sees nothing. A ray up from a real floor hits the underside above it.
+                    let roofed = self.col_layers == 1 || c.is_some() || self.cast(w, a, [x, self.col_prev - 0.02, z]).is_some();
+                    if c.is_none() && roofed {
                         let door = if door != 0 { door } else { cdoor };
                         if door != 0 {
                             self.probe(door, a, b);
@@ -434,6 +443,7 @@ impl NavBuilder {
                         self.col_door.push(door);
                     }
                     self.col_y = floor - 0.05;
+                    self.col_prev = floor;
                     if self.col_layers >= self.p.max_layers || self.col_y <= self.min[1] {
                         break;
                     }
@@ -481,6 +491,9 @@ impl NavBuilder {
         let run = ((b[0] - a[0]).powi(2) + (b[2] - a[2]).powi(2)).sqrt();
         let nd = if self.node_door[fa] != 0 { self.node_door[fa] } else { self.node_door[fb] };
         if dy.abs() <= self.p.step.max(run * self.p.max_slope) {
+            if dy.abs() > self.p.step && !self.slope_between(w, a, b) {
+                return false;
+            }
             if let Some(d) = self.clear(w, a, b, false) {
                 let door = if nd != 0 { nd } else { d };
                 self.add_edge(fa, fb, door);
@@ -496,6 +509,19 @@ impl NavBuilder {
             }
         }
         false
+    }
+
+    /// Whether the rise from a to b (more than a step) is a slope or stairs, not one tall step:
+    /// halfway between them the floor is about halfway up. The clear-line rays can pass just over
+    /// the corner of a step (Hatshepsut's ramp has a 2.5 m side the bots kept walking into).
+    fn slope_between(&mut self, w: &dyn World, a: [f32; 3], b: [f32; 3]) -> bool {
+        let (x, z) = ((a[0] + b[0]) / 2.0, (a[2] + b[2]) / 2.0);
+        let (lo, hi) = (a[1].min(b[1]), a[1].max(b[1]));
+        let top = hi + 0.5;
+        match self.cast(w, [x, top, z], [x, lo - 1.0, z]) {
+            Some(d) => (top - d - (lo + hi) / 2.0).abs() <= self.p.step,
+            None => false,
+        }
     }
 
     /// Clear-line test: knee and chest rays above each end's own floor; for a drop, both ends use
@@ -659,7 +685,9 @@ impl NavBuilder {
             min_x,
             min_z,
             col_start: if gx * gz > 0 { col_start } else { Vec::new() },
+            comp: Vec::new(),
         }
+        .with_components()
     }
 }
 
@@ -672,6 +700,8 @@ pub struct NavGraph {
     door: Vec<u16>,
     /// Per door: a ray (from, to) that the door blocks while it's closed.
     probes: Vec<([f32; 3], [f32; 3])>,
+    /// Per node: its connected part (`with_components`), for `random_node_near`.
+    comp: Vec<u32>,
     nx: usize,
     nz: usize,
     cell: f32,
@@ -869,33 +899,97 @@ impl NavGraph {
         true
     }
 
-    /// A random node within radius r (horizontal) of p, deterministic for a given seed.
+    /// A random node within radius r (horizontal) of p, connected to the node nearest p (a goal on
+    /// a roof or a floor below that can't be walked to would leave a bot standing until it gives
+    /// up), deterministic for a given seed.
     pub fn random_node_near(&self, p: [f32; 3], r: f32, seed: u64) -> Option<[f32; 3]> {
-        if self.pos.is_empty() {
-            return None;
-        }
+        let home = self.comp[self.nearest(p)?];
         let mut rng = Rng(seed);
         let r2 = r * r;
-        // Bounded random probes; a deterministic sweep guarantees a hit when one exists.
-        for _ in 0..(self.pos.len() * 2) {
-            let i = rng.below(self.pos.len());
-            let n = self.pos[i];
-            let dx = n[0] - p[0];
-            let dz = n[2] - p[2];
-            if dx * dx + dz * dz <= r2 {
-                return Some(n);
+        let near = |n: [f32; 3]| (n[0] - p[0]).powi(2) + (n[2] - p[2]).powi(2) <= r2;
+        // random columns in the disk: a few hundred probes find one on any but a sparse graph
+        if self.nx > 0 {
+            let unit = |rng: &mut Rng| (rng.next() >> 11) as f32 / (1u64 << 53) as f32 * 2.0 - 1.0;
+            for _ in 0..256 {
+                let (dx, dz) = (unit(&mut rng) * r, unit(&mut rng) * r);
+                if dx * dx + dz * dz > r2 {
+                    continue;
+                }
+                let cx = ((p[0] + dx - self.min_x) / self.cell).floor();
+                let cz = ((p[2] + dz - self.min_z) / self.cell).floor();
+                if cx < 0.0 || cz < 0.0 || cx >= self.nx as f32 || cz >= self.nz as f32 {
+                    continue;
+                }
+                let c = cz as usize * self.nx + cx as usize;
+                let nodes: Vec<usize> = (self.col_start[c]..self.col_start[c + 1]).filter(|&i| self.comp[i] == home && near(self.pos[i])).collect();
+                if !nodes.is_empty() {
+                    return Some(self.pos[nodes[rng.below(nodes.len())]]);
+                }
             }
         }
-        let mut best: Option<(f32, [f32; 3])> = None;
-        for &n in &self.pos {
-            let dx = n[0] - p[0];
-            let dz = n[2] - p[2];
-            let d = dx * dx + dz * dz;
-            if d <= r2 && best.map_or(true, |(bd, _)| d < bd) {
-                best = Some((d, n));
+        // a sweep: the connected node within r nearest to p
+        (0..self.pos.len())
+            .filter(|&i| self.comp[i] == home && near(self.pos[i]))
+            .min_by(|&i, &j| {
+                let d = |k: usize| (self.pos[k][0] - p[0]).powi(2) + (self.pos[k][2] - p[2]).powi(2);
+                d(i).total_cmp(&d(j))
+            })
+            .map(|i| self.pos[i])
+    }
+
+    /// Label the parts whose nodes can all walk to each other (strongly connected components,
+    /// doors open; a drop leads out of a part): `comp`. Iterative Tarjan.
+    fn with_components(mut self) -> Self {
+        let n = self.pos.len();
+        const NONE: u32 = u32::MAX;
+        let (mut index, mut low, mut comp) = (vec![NONE; n], vec![0u32; n], vec![NONE; n]);
+        let mut on_stack = vec![false; n];
+        let (mut stack, mut work): (Vec<u32>, Vec<(u32, usize)>) = (Vec::new(), Vec::new());
+        let mut next = 0u32;
+        for root in 0..n {
+            if index[root] != NONE {
+                continue;
+            }
+            work.push((root as u32, self.head[root]));
+            index[root] = next;
+            low[root] = next;
+            next += 1;
+            stack.push(root as u32);
+            on_stack[root] = true;
+            while let Some(&mut (v, ref mut k)) = work.last_mut() {
+                let v = v as usize;
+                if *k < self.head[v + 1] {
+                    let w = self.dst[*k];
+                    *k += 1;
+                    if index[w] == NONE {
+                        index[w] = next;
+                        low[w] = next;
+                        next += 1;
+                        stack.push(w as u32);
+                        on_stack[w] = true;
+                        work.push((w as u32, self.head[w]));
+                    } else if on_stack[w] {
+                        low[v] = low[v].min(index[w]);
+                    }
+                    continue;
+                }
+                work.pop();
+                if let Some(&(u, _)) = work.last() {
+                    low[u as usize] = low[u as usize].min(low[v]);
+                }
+                if low[v] == index[v] {
+                    while let Some(w) = stack.pop() {
+                        on_stack[w as usize] = false;
+                        comp[w as usize] = v as u32;
+                        if w as usize == v {
+                            break;
+                        }
+                    }
+                }
             }
         }
-        best.map(|(_, n)| n)
+        self.comp = comp;
+        self
     }
 
     /// The graph as bytes (little-endian, compact: a level's graph has a million edges):
@@ -1047,7 +1141,8 @@ impl NavGraph {
         if r.o != b.len() {
             return None;
         }
-        Some(NavGraph { pos, head, dst, wgt, door, probes, nx, nz, cell, min_x, min_z, col_start: if cols > 0 { col_start } else { Vec::new() } })
+        let col_start = if cols > 0 { col_start } else { Vec::new() };
+        Some(NavGraph { pos, head, dst, wgt, door, probes, nx, nz, cell, min_x, min_z, col_start, comp: Vec::new() }.with_components())
     }
 }
 
@@ -1267,6 +1362,20 @@ mod tests {
         assert!(far <= 5.0 + 2.0 * 2.0f32.sqrt() + 1e-3, "spread to {far} m");
     }
 
+    #[test]
+    fn random_goals_stay_connected() {
+        // the slab (y 3) is a separate part: goals from the ground never land on it
+        let w = Boxes(vec![floor(), ([-1.0, 0.0, -1.0], [21.0, 3.0, 10.0])]);
+        let g = build(&w, 6.0, NavParams::default(), usize::MAX, &[]);
+        assert!((0..g.node_count()).any(|i| g.node_pos(i)[1] > 2.0), "the slab has nodes");
+        for seed in 0..200 {
+            let q = g.random_node_near([10.0, 0.0, 15.0], 30.0, seed).unwrap();
+            assert!(q[1] < 1.0, "seed {seed}: goal on the slab {q:?}");
+        }
+        let top = g.random_node_near([10.0, 3.0, 5.0], 30.0, 7).unwrap();
+        assert!(top[1] > 2.0, "from the slab, a slab goal: {top:?}");
+    }
+
     /// A flat floor whose part x > 10 is a surface too steep to stand on.
     struct Slide(Boxes);
     impl World for Slide {
@@ -1287,6 +1396,50 @@ mod tests {
         let s = b.finish(&[]);
         assert_eq!(s.node_count(), g.node_count() / 2);
         assert!((0..s.node_count()).all(|i| s.node_pos(i)[0] < 10.0));
+    }
+
+    #[test]
+    fn tall_step_is_not_a_slope() {
+        // a 2.4 m platform beside the floor: within 45° of a diagonal neighbour, but a wall
+        let w = Boxes(vec![floor(), ([10.9, 0.0, -1.0], [21.0, 2.4, 21.0])]); // edge next to a cell centre
+        let g = build(&w, 5.0, NavParams::default(), usize::MAX, &[]);
+        let up = g.path([3.0, 0.0, 10.0], [15.0, 2.4, 10.0]).map(|p| *p.last().unwrap());
+        assert!(up.map_or(true, |e| e[1] < 1.0), "no walk up the platform's side: {up:?}");
+        let down = g.path([15.0, 2.4, 10.0], [3.0, 0.0, 10.0]).expect("drop off it");
+        assert!(down.last().unwrap()[1] < 0.5);
+    }
+
+    /// Solid boxes the way the engine's rays see them: a box's faces stop only rays that start
+    /// outside it (from inside a solid a ray sees nothing).
+    struct OneSided(Vec<([f32; 3], [f32; 3])>);
+    impl World for OneSided {
+        fn ray(&self, a: [f32; 3], b: [f32; 3]) -> Option<f32> {
+            let inside = |lo: &[f32; 3], hi: &[f32; 3]| (0..3).all(|i| a[i] > lo[i] && a[i] < hi[i]);
+            let outside: Vec<_> = self.0.iter().filter(|(lo, hi)| !inside(lo, hi)).copied().collect();
+            Boxes(outside).ray(a, b)
+        }
+    }
+
+    #[test]
+    fn no_floor_inside_a_solid() {
+        // a 2.5 m solid block on the floor (a ramp's body): its top is a floor, the ground inside
+        // it isn't
+        let w = OneSided(vec![floor(), ([5.0, 0.0, 5.0], [15.0, 2.5, 15.0])]);
+        let g = build_one_sided(&w);
+        let inside = (0..g.node_count()).map(|i| g.node_pos(i)).filter(|q| (5.0..15.0).contains(&q[0]) && (5.0..15.0).contains(&q[2]));
+        assert!(inside.clone().count() > 0, "the block's top has nodes");
+        assert!(inside.clone().all(|q| q[1] > 2.0), "no node on the ground inside the block: {:?}", inside.filter(|q| q[1] < 2.0).next());
+        // a hollow bridge is still walked under
+        let w = OneSided(vec![floor(), ([-1.0, 2.2, 5.0], [21.0, 2.5, 15.0])]);
+        let g = build_one_sided(&w);
+        let under = (0..g.node_count()).map(|i| g.node_pos(i)).filter(|q| (5.0..15.0).contains(&q[2]) && q[1] < 1.0).count();
+        assert!(under > 0, "the ground under the bridge has nodes");
+    }
+
+    fn build_one_sided(w: &OneSided) -> NavGraph {
+        let mut b = NavBuilder::new([0.0, -2.0, 0.0], [20.0, 5.0, 20.0], NavParams::default());
+        while !b.step(w, usize::MAX) {}
+        b.finish(&[])
     }
 
     /// Node positions and edge count, comparable across builds.

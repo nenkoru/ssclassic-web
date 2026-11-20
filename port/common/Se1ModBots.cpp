@@ -116,6 +116,16 @@ static bool is_door(CEntity *pen)
 {
   return pen != NULL && pen->GetRenderType() == CEntity::RT_BRUSH && (pen->en_ulPhysicsFlags & EPF_MOVABLE);
 }
+static bool is_model(CEntity *pen)
+{
+  return pen->GetRenderType() == CEntity::RT_MODEL || pen->GetRenderType() == CEntity::RT_SKAMODEL;
+}
+/* a model that blocks players for good: a model holder (statues, pillars, crates) that doesn't
+   move. Players collide with model holders and pass through items (Common/Flags.h). */
+static bool is_obstacle(CEntity *pen)
+{
+  return (((pen->en_ulCollisionFlags & ECF_ISMASK) >> ECB_IS) & ECBI_MODEL_HOLDER) && !(pen->en_ulPhysicsFlags & EPF_MOVABLE);
+}
 /* host_ray, door-aware (se1mod.h). Passing doors hides each door hit for the rest of this call and
    casts again: the cast skips hidden brushes (CCastRay::TestBrushSector), so only the ray sees it. */
 static float host_ray_door(const float *from3, const float *to3, int flags, uint32_t *door, int *steep)
@@ -127,14 +137,20 @@ static float host_ray_door(const float *from3, const float *to3, int flags, uint
   *steep = 0;
   float d = -1.0f;
   for (;;) {
-    CCastRay cr(NULL, FLOAT3D(from3[0], from3[1], from3[2]), FLOAT3D(to3[0], to3[1], to3[2]));
-    cr.cr_ttHitModels = (flags & 1) ? CCastRay::TT_SIMPLE : CCastRay::TT_NONE;
+    const FLOAT3D vFrom(from3[0], from3[1], from3[2]);
+    CCastRay cr(NULL, vFrom, FLOAT3D(to3[0], to3[1], to3[2]));
+    cr.cr_ttHitModels = (flags & 1) ? CCastRay::TT_SIMPLE : (flags & 4) ? CCastRay::TT_COLLISIONBOX : CCastRay::TT_NONE;
     cr.cr_bHitPortals = FALSE;
     cr.cr_bHitTranslucentPortals = FALSE;
     cr.cr_bPhysical = TRUE;
     _pNetwork->ga_World.CastRay(cr);
+    /* flag 4: only static obstacles count among models; step past the rest (monsters, players,
+       items, a few at most on one ray) */
+    for (int ct = 0; (flags & 4) && !(flags & 1) && cr.cr_penHit != NULL && ct < 16 && is_model(cr.cr_penHit) && !is_obstacle(cr.cr_penHit); ct++) {
+      _pNetwork->ga_World.ContinueCast(cr);
+    }
     CEntity *pen = cr.cr_penHit;
-    d = pen != NULL ? cr.cr_fHitDistance : -1.0f;
+    d = pen != NULL ? (cr.cr_vHit - vFrom).Length() : -1.0f;
     CBrushPolygon *pbpo = pen != NULL ? cr.cr_pbpoBrushPolygon : NULL;
     if (pbpo != NULL) {
       /* the player stands on a floor whose normal is within the surface's climb slope of up
