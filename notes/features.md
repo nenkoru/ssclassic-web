@@ -63,7 +63,7 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
 | Benchmarks, visual regression | ✅ | port/web/bench.js, tools/{bench.mjs,shotdiff.py} | `?timedemo`, `?shots=` | test.sh | — |
 | Bots: navigation graph | ✅ | rust/se1-mod/src/bots/nav.rs (pure Rust, behind the `World` trait); `impl Paths for NavGraph` in bots/mod.rs | — | tests/bots_nav_accept.rs | — |
 | Bots: brain | ✅ | rust/se1-mod/src/bots/brain.rs (pure Rust, behind the `Paths` trait) | — | tests/bots_brain_accept.rs, bots_brain_accept2.rs | — |
-| Bots: engine wiring (virtual players) | 🚧 | engine: `CServer::AddVirtualPlayer`/`SetVirtualAction`, `_pSE1ServerTickHook` (landed); glue: port/common/Se1ModBots.cpp, host API v8 (landed); runtime: rust/se1-mod/src/bots/runtime.rs (omp) | `?bots=N`, `?botskill=` | bottest, tests/bots_runtime_accept.rs | nav, brain, mod |
+| Bots: engine wiring + runtime | ✅ | engine: `CServer::AddVirtualPlayer`/`SetVirtualAction`, `_pSE1ServerTickHook`; glue: port/common/Se1ModBots.cpp (host API v8); runtime: rust/se1-mod/src/bots/runtime.rs (behind the `BotHost` trait) | `?bots=N`, `?botskill=` | bottest, tests/bots_runtime_accept.rs | nav, brain, mod |
 | More than 16 players | 📝 | Network.h limits, wire format | — | mptest at 32+ | LAN |
 | War mode (lines, side missions, game master, roles, building) | 📝 | rust/se1-mod/src/war/, port/web/war.js | `?mode=war` | — | bots, >16 players |
 | War map (persistent front) | 📝 | rust/se1-server | — | — | war mode |

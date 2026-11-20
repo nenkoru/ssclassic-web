@@ -62,6 +62,15 @@ once a human is in the level, build a nav graph around the player (logged as
 `se1mod: bots nav ready`), fight nearby monsters and follow the nearest human.
 Test: `tools/bottest.mjs <url> [outdir]` (wired into `tools/test.sh` as the "bots" step).
 
+Known limits (2026-11-20):
+- The graph covers 150 m around the player at the time it's built, and isn't refreshed. Doors are
+  solid to the rays, so the graph depends on which doors are open: on the KarnakDemo Survivors
+  arena it came out at 116 or 2593 nodes in different runs. Phase 3 refreshes it.
+- In single player all players start on the same marker, so the bots spawn on the player's spot
+  and spread out once they move.
+- Sight checks hit level geometry only (not monsters or players), so a bot can shoot through
+  another monster at its target.
+
 ## Phases
 
 1. **Brain and navigation in pure Rust** (omp, done): behind traits, tested against
