@@ -89,6 +89,11 @@ Background:
 | XL2 Laser | Chain Lightning | Sirian Storm Cannon |
 | SBC Cannon (full game) | Serious Bomb | Cannon of Mass Destruction |
 
+- **Auto-fire:** the twin Schofields fire by themselves at the nearest visible enemy (within 35 m,
+  line of sight). One shot every `autofire_interval(rank)` seconds (0.45 s at rank I, −0.04 s per
+  rank, floor 0.20 s). Alternates left and right gun. Damage and crits scale like a manual revolver
+  hit. Off with `?svautofire=0`. Manual aiming and shooting work as before.
+
 ## Meta progression (page side)
 
 - **Characters,** unlocked by achievements:
@@ -136,6 +141,7 @@ Background:
   | `svstress=N` with `svkind=K` | monster stress test (`tools/stress.mjs`) |
   | `svbehind=N` | spawn one enemy of kind N-1 behind the player at run start |
   | `svthreats=0` | hide the threat markers and hit glow |
+  | `svautofire=0` | disable the auto-fire (on by default) |
 
 ## Threat warnings
 

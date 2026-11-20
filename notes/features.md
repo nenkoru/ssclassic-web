@@ -59,6 +59,7 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
 | Damage hook + projectile attribution | ✅ | Entity.cpp hooks (3 call sites), Se1ModHost.cpp | used by Survivors | damagetest, projtest¹ | mod |
 | Serious Survivors mode (a minigame; war is the main mode) | ✅ | rust/se1-mod/src/survivors/, port/web/survivors.js | `?mode=survivors` | svtest, cargo test | mod, damage hook |
 | Threat warnings + hit direction | ✅ | survivors (mod + page) for now; move to a shared HUD module when war mode needs it. Host `player_hurt` (API v7) | `?svthreats=0` | threattest | Survivors |
+| Survivors auto-fire (Schofields shoot the nearest enemy) | ✅ | survivors mod (`auto_fire`), port/web/survivors.js | `?svautofire=0` | autofiretest | Survivors |
 | Playtest recording + report | ✅ | port/web/playtest.js, lib.rs `post_telemetry`, tools/devserver.py, tools/playtest-report.py | `?rec=1` | playtesttest, test_playtest_report.py | mod |
 | Benchmarks, visual regression | ✅ | port/web/bench.js, tools/{bench.mjs,shotdiff.py} | `?timedemo`, `?shots=` | test.sh | — |
 | Bots: navigation graph | ✅ | rust/se1-mod/src/bots/nav.rs (pure Rust, behind the `World` trait); `impl Paths for NavGraph` in bots/mod.rs | — | tests/bots_nav_accept.rs | — |

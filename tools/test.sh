@@ -200,6 +200,10 @@ for b in $NAMES; do
   if logged "sv-$b" node tools/svtest.mjs "$url" "$OUT/sv-$b"; then result PASS "$b survivors" "level-up offer, pause, upgrade, spawns"
   else result FAIL "$b survivors" "see $OUT/sv-$b.log"; fi
 
+  step "$b: autofire"
+  if logged "autofire-$b" node tools/autofiretest.mjs "$url"; then result PASS "$b autofire" "kills on its own, off by option"
+  else result FAIL "$b autofire" "see $OUT/autofire-$b.log"; fi
+
   step "$b: touch"
   if logged "touch-$b" node tools/touchtest.mjs "$url"; then result PASS "$b touch" "stick, look, buttons, two fingers, menu"
   else result FAIL "$b touch" "see $OUT/touch-$b.log"; fi

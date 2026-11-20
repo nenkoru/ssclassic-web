@@ -280,6 +280,7 @@ pub struct Survivors {
     hook_log_t: f64,
     weapons_t: f64,   // last check that every ranked gun is really owned (ensure_weapons)
     hold_colts: u8,   // switching to the dual Schofields: 1 wanted, 2 key pressed (hold_colts)
+    autofire_side: u8, // auto-fire: 0 = left gun, 1 = right gun
     // debug / test
     stress: usize,
     stress_kind: usize,
@@ -310,7 +311,7 @@ impl Survivors {
             weapon: 0, ammo: [0; 6], ammo_acc: [0.0; 6], shots: [0; 17], firing_until: -1.0,
             revolver_hits: 0, typewriter_kills: 0, hurricane_t: 0.0,
             hits: Vec::new(), flash: false, stats: Vec::new(), powers: Vec::new(), speed_set: 1.0,
-            hud_t: 0.0, sound_t: 0.0, procs: Vec::new(), achieved: Vec::new(), dead_posted: false, debug_chest: 0, started_at: 0.0, hook_log_t: 0.0, weapons_t: 0.0, hold_colts: 0,
+            hud_t: 0.0, sound_t: 0.0, procs: Vec::new(), achieved: Vec::new(), dead_posted: false, debug_chest: 0, started_at: 0.0, hook_log_t: 0.0, weapons_t: 0.0, hold_colts: 0, autofire_side: 0,
             stress: host.page_option("se1SurvivorsStress").max(0.0) as usize,
             stress_kind: match host.page_option("se1SurvivorsStressKind") as i32 {
                 1 => K_KLEER, 2 => K_GNAAR, 3 => K_ARACH, 4 => K_BULL, _ => K_FIRE,
@@ -1369,7 +1370,37 @@ impl Survivors {
     }
 
     // ------------------------------------------------------------------ abilities
+    /// The twin Schofields fire at the nearest visible enemy on their own (Vampire Survivors style).
+    fn auto_fire(&mut self, host: &Host) {
+        let r = self.rank(Up::Revolver);
+        if r < 1 || host.page_option("se1SurvivorsAutofire") < 0.5 {
+            return;
+        }
+        // sight rays only when a shot is due (this runs every frame)
+        if self.cooldowns.iter().any(|(u, next)| *u == Up::Revolver && self.time < *next) {
+            return;
+        }
+        // nearest visible enemy within 35 m (check at most 6, nearest first)
+        let cands: Vec<usize> = self.near(self.eye, 35.0).into_iter().take(6).map(|(i, _)| i).collect();
+        let target = cands.into_iter().find(|&i| host.ray(self.eye, [self.enemies[i].pos[0], self.enemies[i].pos[1] + 1.0, self.enemies[i].pos[2]], false).is_none());
+        let Some(i) = target else { return }; // no target: no shot, no cooldown spent
+        if !self.ready(Up::Revolver, data::autofire_interval(r)) {
+            return;
+        }
+        let chest = [self.enemies[i].pos[0], self.enemies[i].pos[1] + 1.0, self.enemies[i].pos[2]];
+        // alternate left/right muzzle
+        let side = self.autofire_side as f32 * 2.0 - 1.0; // -1 left, +1 right
+        self.autofire_side = (self.autofire_side + 1) % 2;
+        let muzzle = [self.eye[0] + 0.25 * side, self.eye[1] - 0.2, self.eye[2]];
+        host.lightning(muzzle, chest, 0.25, 0.06);
+        host.sound("Models\\Weapons\\Colt\\Sounds\\Fire.wav", 0.6);
+        // same scaling as the manual revolver hit: base 10 × gun multiplier, crit ×2
+        let dmg = 10.0 * self.might() * (1.0 + 0.20 * (r - 1) as f32);
+        let crit = (self.rand() as f32) < self.luck() * 0.5 + 0.05 * r as f32;
+        self.hit(host, i, dmg * if crit { 2.0 } else { 1.0 }, Src::Gun(Up::Revolver), crit);
+    }
     fn abilities(&mut self, host: &Host) {
+        self.auto_fire(host);
         let p = self.pos;
         let might = self.might();
         let area = self.area();

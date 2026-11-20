@@ -339,6 +339,11 @@ pub fn xp_for_level(level: u32) -> f32 {
     }
 }
 
+/// Seconds between auto-fire shots for a revolver at the given rank.
+pub fn autofire_interval(rank: u32) -> f64 {
+    (0.45 - 0.04 * (rank.saturating_sub(1)) as f64).max(0.20)
+}
+
 // Engine effect types (Entities/BasicEffects.es)
 pub const BET_ROCKET: i32 = 1;
 pub const BET_SHOCKWAVE: i32 = 6;
@@ -663,5 +668,17 @@ mod tests {
             let expect = !melee.contains(&k.name);
             assert_eq!(ranged(i), expect, "kind {} ({})", i, k.name);
         }
+    }
+
+    #[test]
+    fn autofire_interval_values() {
+        assert!((autofire_interval(1) - 0.45).abs() < 1e-9);
+        assert!((autofire_interval(2) - 0.41).abs() < 1e-9);
+        assert!((autofire_interval(3) - 0.37).abs() < 1e-9);
+        assert!((autofire_interval(4) - 0.33).abs() < 1e-9);
+        assert!((autofire_interval(5) - 0.29).abs() < 1e-9);
+        // never below 0.20
+        assert!((autofire_interval(10) - 0.20).abs() < 1e-9);
+        assert!((autofire_interval(100) - 0.20).abs() < 1e-9);
     }
 }
