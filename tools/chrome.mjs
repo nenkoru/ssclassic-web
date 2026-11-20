@@ -8,7 +8,7 @@
 //   SE1_CHROME_FLAGS   extra Chrome flags, space separated (e.g. "--no-sandbox" in containers/CI)
 //   SE1_TIMEOUT_SCALE  multiply the tools' timeouts and measuring windows (slow machines, SwiftShader)
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const LINUX_CHROMES = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/opt/google/chrome/chrome',
@@ -62,6 +62,45 @@ export async function closeChrome(proc) {
   if (proc.exitCode === null) proc.kill('SIGKILL');
   if (profile) rmProfile(profile);
 }
+
+// A tool killed with SIGKILL (a timeout, a killed agent shell) runs none of the handlers below, and
+// its headless Chrome lives on with the parent gone: one stray burned CPU for hours and kept a
+// ~400 MB profile. So every tool, on load, reaps those strays first: a headless Chrome whose parent
+// is gone (ppid 1) and whose profile is one of ours (tmpdir/se1*), then the profiles no Chrome uses
+// that are over 10 minutes old (younger ones may belong to a run that is just starting).
+function reapStrays() {
+  if (process.platform === 'win32') return;
+  const prefix = join(tmpdir(), 'se1');
+  let ps;
+  try { ps = execFileSync('ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8' }); } catch { return; }
+  const procs = [];   // [pid, ppid, profile dir] of our headless Chromes and their helpers
+  for (const line of ps.split('\n')) {
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
+    const dir = m && m[3].match(/--user-data-dir=(\S+)/)?.[1];
+    if (dir && dir.startsWith(prefix)) procs.push([Number(m[1]), Number(m[2]), dir]);
+  }
+  // a profile is stray when its headless main process has lost its parent; kill the whole family
+  // (renderer and GPU helpers would keep writing to the profile)
+  const strayDirs = new Set(procs.filter(([, ppid]) => ppid === 1).map(([, , dir]) => dir));
+  const killed = procs.filter(([, , dir]) => strayDirs.has(dir)).map(([pid]) => pid);
+  const inUse = new Set(procs.filter(([, , dir]) => !strayDirs.has(dir)).map(([, , dir]) => dir));
+  for (const pid of killed) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+  // wait (up to 2 s) for them to go, so their profiles can be deleted now
+  const gone = (pid) => { try { process.kill(pid, 0); return false; } catch { return true; } };
+  const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  for (let i = 0; i < 40 && !killed.every(gone); i++) sleep(50);
+  let names = [];
+  try { names = readdirSync(tmpdir()).filter((n) => n.startsWith('se1')); } catch {}
+  for (const n of names) {
+    const dir = join(tmpdir(), n);
+    try {
+      const st = statSync(dir);
+      const stale = strayDirs.has(dir) || Date.now() - st.mtimeMs > 10 * 60e3;
+      if (st.isDirectory() && !inUse.has(dir) && stale) rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    } catch {}
+  }
+}
+reapStrays();
 
 process.on('exit', () => { for (const dir of profiles) rmProfile(dir); });
 for (const [sig, code] of [['SIGINT', 130], ['SIGTERM', 143]]) {
