@@ -4,7 +4,7 @@
 
 pub mod brain;
 pub mod nav;
-
+pub mod runtime;
 /// The brain finds its way on the nav graph.
 impl brain::Paths for nav::NavGraph {
     fn path(&self, from: [f32; 3], to: [f32; 3]) -> Option<Vec<[f32; 3]>> {

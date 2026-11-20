@@ -150,7 +150,12 @@ static int host_world_bounds(float *min3, float *max3)
     if ((pen->GetFlags() & ENF_DELETED) || pen->GetRenderType() != CEntity::RT_BRUSH) continue;
     FLOATaabbox3D b;
     pen->GetBoundingBox(b);
-    box |= b;
+    /* some brush entities (empty or editor-only ones) report infinite or absurd boxes: skip them */
+    bool sane = true;
+    for (int k = 1; k <= 3; k++) {
+      if (!(Abs(b.Min()(k)) < 1e5f) || !(Abs(b.Max()(k)) < 1e5f)) sane = false;
+    }
+    if (sane) box |= b;
   }
   if (box.IsEmpty()) return 0;
   min3[0] = box.Min()(1); min3[1] = box.Min()(2); min3[2] = box.Min()(3);

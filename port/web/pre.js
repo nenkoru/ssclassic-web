@@ -11,6 +11,9 @@
   if (q.get('spin') === '0' || q.get('spin') === '1') Module['se1Spin'] = +q.get('spin');   // threaded vsync wait (WebFrame.cpp)   // timedemo: no vsync wait (port/common/WebFrame.cpp)
   // ?quality=auto: the Rust mod layer lowers rendering cvars while frames keep missing
   if (q.get('quality') === 'auto') Module['se1QualityAuto'] = 1;
+  // ?bots=N: N AI co-op bots on the host (rust/se1-mod/src/bots); ?botskill=0..1 their skill
+  if (q.get('bots')) Module['se1Bots'] = Math.min(15, Math.max(0, +q.get('bots') || 0));
+  if (q.get('botskill')) Module['se1BotSkill'] = Math.min(1, Math.max(0, +q.get('botskill')));
   // ?vrange=0: gl1shim copies the whole client array [0, maxIndex] for indexed draws instead of
   // just the range the indices use (A/B switch for tools/vrangetest.mjs; 1 is the default)
   if (q.get('vrange') === '0') Module['se1VRange'] = 0;

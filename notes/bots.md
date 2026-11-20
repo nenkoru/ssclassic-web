@@ -55,16 +55,23 @@ engine (C++)                         Rust mod (rust/se1-mod/src/bots/)
 - **Hosting.** Bots exist only on the host of a network game. A solo player hosts a game on the
   virtual LAN as today (`?room=X&host=1`) and adds bots with `?bots=N`.
 
+## How to use
+
+`?bots=N` (0..15) puts N co-op bots on the host; `?botskill=0..1` sets their skill. Bots join
+once a human is in the level, build a nav graph around the player (logged as
+`se1mod: bots nav ready`), fight nearby monsters and follow the nearest human.
+Test: `tools/bottest.mjs <url> [outdir]` (wired into `tools/test.sh` as the "bots" step).
+
 ## Phases
 
-1. **Brain and navigation in pure Rust** (omp, in progress): behind traits, tested against
+1. **Brain and navigation in pure Rust** (omp, done): behind traits, tested against
    synthetic worlds; acceptance tests in `rust/se1-mod/tests/bots_*_accept.rs`.
-2. **Engine wiring** (after the threat-warning host API v7 lands, since both extend the host table):
+2. **Engine wiring** (landed):
    - host API v8: `bot_add(name)`, `bot_remove(id)`, a per-tick callback with senses and actions,
      `ray`, `world_bounds`, an enemy and item list;
-   - `AddVirtualPlayer` and the `ServerLoop` hook.
-   - Test: host a game with `?bots=2`. A second browser that joins sees two extra players that move,
-     shoot monsters and follow the host.
+   - `AddVirtualPlayer` and the `ServerLoop` hook;
+   - the runtime (`rust/se1-mod/src/bots/runtime.rs`) driving the bots on the server tick,
+     tested by `tools/bottest.mjs` (`?bots=2`: join, move, fight, nav graph, human unaffected).
 3. **Navigation in real levels:**
    - build the graph in the background on level start, then cache it;
    - a debug overlay that draws the nodes and the current paths (`?botdebug=1`);

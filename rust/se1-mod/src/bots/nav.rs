@@ -21,11 +21,14 @@ pub struct NavParams {
     pub step: f32,       // max height difference walked up/down between neighbours, default 0.6
     pub max_drop: f32,   // max height a bot drops down (one-way edge), default 4.0
     pub max_layers: usize, // floors found per column, default 8
+    /// steepest slope walked (rise over run), default 1.0 = 45°: stairs and ramps between columns
+    /// that rise more than `step`; the clear-line test still stops walls
+    pub max_slope: f32,
 }
 
 impl Default for NavParams {
     fn default() -> Self {
-        Self { cell: 2.0, height: 1.8, step: 0.6, max_drop: 4.0, max_layers: 8 }
+        Self { cell: 2.0, height: 1.8, step: 0.6, max_drop: 4.0, max_layers: 8, max_slope: 1.0 }
     }
 }
 
@@ -219,7 +222,8 @@ impl NavBuilder {
                     let (a, b) = (self.nodes[c][ka], self.nodes[j][kb]);
                     let (fa, fb) = (self.col_start[c] + ka, self.col_start[j] + kb);
                     let dy = b[1] - a[1];
-                    if dy.abs() <= self.p.step {
+                    let run = ((b[0] - a[0]).powi(2) + (b[2] - a[2]).powi(2)).sqrt();
+                    if dy.abs() <= self.p.step.max(run * self.p.max_slope) {
                         if self.clear(w, a, b, false) {
                             let cost = dist3(a, b);
                             self.add_edge(fa, fb, cost);

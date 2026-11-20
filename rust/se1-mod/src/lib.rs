@@ -20,6 +20,7 @@ use host::{Host, SE1ModHost};
 
 struct ModState {
     host: Host,
+    bots: bots::runtime::Runtime,
     config: ModConfig,
     frames: u64,
     survivors: Option<survivors::Survivors>,
@@ -181,7 +182,7 @@ pub extern "C" fn se1mod_init(raw: *const SE1ModHost) -> c_int {
     apply_cvars(&host, &config.cvars);
     run_commands(&host, &config.startup.commands);
 
-    unsafe { STATE = Some(ModState { host, config, frames: 0, survivors: None, quality: None, quality_last_tm: None, quality_checked: false, playtest: None, tel_t: 0.0, world: String::new() }) };
+    unsafe { STATE = Some(ModState { host, bots: bots::runtime::Runtime::new(), config, frames: 0, survivors: None, quality: None, quality_last_tm: None, quality_checked: false, playtest: None, tel_t: 0.0, world: String::new() }) };
     0
 }
 
@@ -248,8 +249,8 @@ pub extern "C" fn se1mod_damage(target: c_int, source: c_int, dmt: c_int, amount
 /// The bots set their actions here.
 #[no_mangle]
 pub extern "C" fn se1mod_bot_tick() {
-    let Some(_st) = state() else { return };
-    // bots::runtime comes here (notes/bots.md, phase 2)
+    let Some(st) = state() else { return };
+    st.bots.tick(&st.host);
 }
 
 /// Called when a session (level) has started.
@@ -269,6 +270,7 @@ pub extern "C" fn se1mod_level_started(world_file: *const c_char) {
     run_commands(&st.host, &st.config.level.commands);
     // ?mode=survivors (port/web/survivors.js): run Serious Survivors in this level
     st.survivors = (st.host.page_option("se1Survivors") > 0.0).then(|| survivors::Survivors::new(&st.host));
+    st.bots.level_started();
     if let Some(cmds) = st.config.level.per_world.get(&world) {
         run_commands(&st.host, cmds);
     }

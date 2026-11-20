@@ -220,6 +220,10 @@ for b in $NAMES; do
   if logged "damage-$b" node tools/damagetest.mjs "$url"; then result PASS "$b damage hook" "player hits reach the mod and get the rank bonus"
   else result FAIL "$b damage hook" "see $OUT/damage-$b.log"; fi
 
+  step "$b: bots"
+  if logged "bots-$b" node tools/bottest.mjs "$url" "$OUT/bots-$b"; then result PASS "$b bots" "?bots=2: join, move, fight, nav graph, human unaffected"
+  else result FAIL "$b bots" "see $OUT/bots-$b.log"; fi
+
   step "$b: threat warnings"
   if logged "threat-$b" node tools/threattest.mjs "$url"; then result PASS "$b threat warnings" "edge markers for enemies behind, hit-direction glow"
   else result FAIL "$b threat warnings" "see $OUT/threat-$b.log"; fi
