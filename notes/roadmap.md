@@ -3,6 +3,35 @@
 What's next, in rough priority order. Details and measurements live in notes/render-plan.md
 (rendering, threads, phone results) and notes/plan.md (port phases, mods, requirements).
 
+## Plan (2026-11-24)
+
+### Now: finish what's open
+1. **`navroamtest` in `tools/test.sh`**, skipped when the full data is missing.
+2. **Platform items below:** lazy data loading with an OPFS cache, public hosting of what the demo
+   data's license allows, checks on real phones and pads.
+3. **CI** (branch `ci-workflow`): when the user says so; it needs a token with the `workflow` scope.
+
+### Later: bot nav maps
+- **Bot nav for every level** (on hold, the user said not yet).
+   - Bake the 14 other TFE levels and the demo's KarnakDemo, one Chrome at a time (`navbake.mjs --jobs 1`).
+   - Relink the builds, then run `navroamtest` on a few levels.
+   - A baked demo level also cuts `bottest`'s 95 s wait for a live nav build.
+- **Fix what the bakes and roam tests show** (leaks in deserts, water, ice), then the known limits in
+   notes/bots.md: doors that open on approach, lifts, teleporters, small islands.
+
+### Next: the multiverse (notes/multiverse-games.md)
+1. **SS1 as an Archipelago game.** A client in the Rust mod; level secrets, kills and pickups as
+   "locations", weapons, keys and level unlocks as "items". It joins the existing multiworld
+   (about 80 games, including Doom via APDOOM and an existing Fusion integration) before we build
+   anything of our own.
+2. **TFE↔TSE live portal:** two same-origin iframes on one hub page. It answers the open questions:
+   the per-frame canvas copy, memory with two heaps, joining mid-game.
+3. **War server** in `rust/se1-server`: fronts, heartbeats, distress calls, portal tickets; protocol
+   modelled on Archipelago's.
+4. **Rescue portal SS1→SS1**, then a **Doom front** (Odamex client ported to the browser, Freedoom data).
+5. **Handoff fronts** for third-party ports (nfsu2-web, iw4L, Halo) and the official games (Fusion
+   via Lua, SS4 via files), through a published adapter spec.
+
 ## Where we are (2026-11-19)
 
 - **Default build:** threaded (engine in a worker) with WASMFS, the Rust mod layer, a double-buffered

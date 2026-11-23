@@ -4,8 +4,25 @@
     {
       "name": "web-tfe",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "8090", "--directory", "build-web-tfe"],
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8090",
+        "--directory",
+        "build-web-tfe"
+      ],
       "port": 8090
+    },
+    {
+      "name": "web-tfe-full",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": [
+        "tools/devserver.py",
+        "--port",
+        "8096",
+        "build-web-tfe-full"
+      ],
+      "port": 8096
     }
   ]
 }
