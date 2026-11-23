@@ -1,0 +1,9 @@
+# Console lines tools/playtriage.py never raises: harmless in the web port. One regex per line,
+# case-insensitive, matched anywhere in the line. Lines that are only noise for now (not known to
+# be harmless) belong in the learned baseline (data/playtests/.baseline.json), not here.
+amp11lib
+Gamma, brightness and contrast are not adjustable
+^Cannot load variable from 'DefaultMod\.txt'
+^Cannot open file `/DefaultMod\.txt'
+^Cannot load variable from 'Data/Var/ModName\.var'
+^Cannot open file `/Data/Var/ModName\.var'

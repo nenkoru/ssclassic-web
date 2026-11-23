@@ -96,6 +96,29 @@ try {
   check('survey.json', !!(sv && sv.answers && sv.answers.fun === '4' && sv.answers.best === 'test run'), sv ? JSON.stringify(sv.answers) : 'missing');
   check('no exceptions', errors.length === 0, errors.slice(0, 3).join(' | '));
   if (existsSync(sdir)) console.log('info  session size  ' + readdirSync(sdir).map((f) => `${f} ${statSync(join(sdir, f)).size} B`).join(', '));
+
+  // quiet mode (the default on dev hosts; headless Chrome needs it asked for): console capture and
+  // the screenshot flight recorder, flushed by a trigger
+  await send('Page.navigate', { url: url + (url.includes('?') ? '&' : '?') + 'mute=1&rec=quiet' });
+  let qs = null;
+  for (let t = 0; t < 360 * TIMEOUT_SCALE; t++) {
+    qs = await ev('Module.se1Playtest && Module._SE1_WantPointer ? Module.se1Playtest.session : null');
+    if (qs && qs !== session && (await ev('Module.se1Perf ? Module.se1Perf.n : 0')) > 60) break;
+    await sleep(250);
+  }
+  check('quiet recorder started', !!qs && qs !== session, `session ${qs}`);
+  await sleep(7000);                                // a few flight-recorder frames
+  await ev(`Module.se1PlaytestTrigger && Module.se1PlaytestTrigger('test'); 1`);
+  await sleep(9000);                                // the ring, then the next 2 shots, then a flush
+  const qdir = join(dir, qs || 'none');
+  const qmeta = existsSync(join(qdir, 'meta.json')) ? JSON.parse(readFileSync(join(qdir, 'meta.json'), 'utf8')) : null;
+  check('quiet meta.json', !!(qmeta && qmeta.mode === 'quiet'), qmeta ? `mode ${qmeta.mode}` : 'missing');
+  const con = existsSync(join(qdir, 'console.txt')) ? readFileSync(join(qdir, 'console.txt'), 'utf8') : '';
+  check('quiet console.txt has engine lines', con.split('\n').filter((l) => l.split('\t').length >= 3).length >= 5, `${con.length} B`);
+  const shots = existsSync(qdir) ? readdirSync(qdir).filter((f) => /^shot-\d+\.jpg$/.test(f)) : [];
+  check('quiet flight-recorder shots', shots.length >= 3 && shots.every((f) => statSync(join(qdir, f)).size > 1000), `${shots.length}: ${shots.slice(0, 6).join(' ')}`);
+  const qtel = existsSync(join(qdir, 'telemetry.jsonl')) ? readFileSync(join(qdir, 'telemetry.jsonl'), 'utf8') : '';
+  check('quiet telemetry has start and build', /"type":"start"/.test(qtel) && /"type":"build"/.test(qtel), `${qtel.length} B`);
 } catch (e) {
   console.log('FAIL  harness  ' + e.message); failed++;
 } finally {

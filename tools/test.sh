@@ -146,6 +146,9 @@ if [ $UNIT = 1 ]; then
   if ! command -v cargo >/dev/null 2>&1; then result SKIP "rust tests" "no cargo"
   elif logged rust bash -c 'cd rust && cargo test --workspace'; then result PASS "rust tests" "mod config, Survivors tables, LAN switch"
   else result FAIL "rust tests" "see $OUT/rust.log"; fi
+  step "python tool tests"
+  if logged pytools bash -c 'python3 tools/test_playtriage.py && python3 tools/test_playtest_report.py'; then result PASS "python tool tests" "play triage, playtest report"
+  else result FAIL "python tool tests" "see $OUT/pytools.log"; fi
 fi
 
 # ---------------------------------------------------------------- dev servers
