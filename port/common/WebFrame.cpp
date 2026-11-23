@@ -39,6 +39,48 @@ static void se1_maybe_store_settings(void)
     SE1_StoreSettings();
   }
 }
+
+/* engine console -> page console (port/web/pre.js drains it): CConsole::PutString copies its text
+   into this ring under the console lock (one writer); the page reads [its tail, head) a few times
+   a second and logs whole lines with console.log. The engine never waits for the page, so a slow
+   main thread can only lose text (the page reports how much), not stall a frame. */
+static char se1_conRing[1 << 16];
+static volatile uint32_t se1_conHead;   // bytes written so far (wraps)
+void SE1_WebConsolePut(const char *str)
+{
+  uint32_t h = se1_conHead;
+  for (const char *p = str; *p; p++) se1_conRing[h++ & (sizeof(se1_conRing) - 1)] = *p;
+  emscripten_atomic_store_u32((void *)&se1_conHead, h);
+}
+extern "C" EMSCRIPTEN_KEEPALIVE char *SE1_ConsoleRing(void) { return se1_conRing; }
+extern "C" EMSCRIPTEN_KEEPALIVE int SE1_ConsoleRingSize(void) { return sizeof(se1_conRing); }
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t SE1_ConsoleHead(void) { return emscripten_atomic_load_u32((void *)&se1_conHead); }
+
+/* console command slot (dev tools: tools/se1d.mjs, Module.se1Cmd in port/web/pre.js): the page
+   writes a UTF-8 console line into se1_cmd and commits it; the engine runs it through the shell on
+   its own thread at the next frame and echoes it as "web: > ...", so the result lands in the log. */
+static char se1_cmd[4096];
+static volatile int32_t se1_cmdReady;
+extern "C" EMSCRIPTEN_KEEPALIVE char *SE1_CommandBuffer(void) { return se1_cmd; }
+extern "C" EMSCRIPTEN_KEEPALIVE int SE1_CommandBusy(void) { return emscripten_atomic_load_u32((void *)&se1_cmdReady) != 0; }
+/* returns 0 while the previous command is still waiting for a frame (the caller retries) */
+extern "C" EMSCRIPTEN_KEEPALIVE int SE1_CommandCommit(int len)
+{
+  if (emscripten_atomic_load_u32((void *)&se1_cmdReady)) return 0;
+  if (len < 0) len = 0;
+  if (len > (int)sizeof(se1_cmd) - 1) len = sizeof(se1_cmd) - 1;
+  se1_cmd[len] = 0;
+  emscripten_atomic_store_u32((void *)&se1_cmdReady, 1);
+  return 1;
+}
+static void se1_maybe_run_command(void)
+{
+  if (!emscripten_atomic_load_u32((void *)&se1_cmdReady)) return;
+  CTString strCmd = se1_cmd;
+  emscripten_atomic_store_u32((void *)&se1_cmdReady, 0);
+  CPrintF("web: > %s\n", (const char *)strCmd);
+  _pShell->Execute(strCmd);
+}
 #endif
 
 /* page options that must be in place before the first video mode (SeriousSam.cpp calls this
@@ -151,6 +193,7 @@ extern "C" void SE1_YieldToBrowser(void)
 #endif
 #ifdef __EMSCRIPTEN__
   se1_maybe_store_settings();
+  se1_maybe_run_command();
 #endif
   se1_wait_frame();
 }
@@ -191,6 +234,7 @@ extern "C" void SE1_YieldToBrowser(void)
 #endif
 #ifdef __EMSCRIPTEN__
   se1_maybe_store_settings();
+  se1_maybe_run_command();
 #endif
   start_main_thread_loop();
   if (_uncapped < 0) _uncapped = MAIN_THREAD_EM_ASM_INT({ return Module.se1Uncapped ? 1 : 0; });

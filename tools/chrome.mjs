@@ -7,8 +7,10 @@
 //                      GL, no GPU needed), vulkan, gl, ...
 //   SE1_CHROME_FLAGS   extra Chrome flags, space separated (e.g. "--no-sandbox" in containers/CI)
 //   SE1_TIMEOUT_SCALE  multiply the tools' timeouts and measuring windows (slow machines, SwiftShader)
+//   SE1_CHROME_LOCK    0 = skip the one-tool-at-a-time Chrome lock (see chromeLock below)
+//   SE1_CHROME_LOCK_WAIT  seconds to wait for the lock before giving up (default 900)
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const LINUX_CHROMES = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/opt/google/chrome/chrome',
@@ -37,7 +39,43 @@ export const EXTRA_FLAGS = (process.env.SE1_CHROME_FLAGS || '').split(/\s+/).fil
 // and os.tmpdir() fills up).
 const profiles = [];   // remembered profile dirs, in creation order
 
+// One tool with Chrome at a time: two or three test tools each running a headless Chrome with a
+// game heap (1-2 GB each, plus GPU memory) took a 36 GB Mac down. Every tool gets its Chrome
+// profile from tempProfile(), so the lock is taken there, on the first profile, and held until the
+// process exits; a tool may still start several Chromes of its own (host and joiner). The lock file
+// holds the owner's pid and command; a lock whose pid is gone is stale and taken over.
+export const CHROME_LOCK = join(tmpdir(), 'se1-chrome.lock');
+let lockHeld = false;
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+export function chromeLock() {
+  if (lockHeld || process.env.SE1_CHROME_LOCK === '0') return;
+  const me = `${process.pid}\n${process.argv.slice(1).join(' ')}\n`;
+  const limit = Date.now() + (Number(process.env.SE1_CHROME_LOCK_WAIT) || 900) * 1000;
+  let said = 0;
+  for (;;) {
+    try {
+      const fd = openSync(CHROME_LOCK, 'wx');
+      writeSync(fd, me); closeSync(fd);
+      lockHeld = true;
+      return;
+    } catch (e) { if (e.code !== 'EEXIST') throw e; }
+    let pid = 0, cmd = '';
+    try { [pid, cmd] = readFileSync(CHROME_LOCK, 'utf8').split('\n'); pid = Number(pid); } catch { continue; }
+    if (pid === process.pid) { lockHeld = true; return; }
+    if (!pid || !alive(pid)) { try { rmSync(CHROME_LOCK, { force: true }); } catch {} continue; }
+    if (Date.now() > limit) throw new Error(`Chrome lock held by pid ${pid} (${cmd}); gave up waiting. SE1_CHROME_LOCK=0 skips the lock`);
+    if (Date.now() - said > 30e3) { said = Date.now(); console.error(`[chrome] waiting for pid ${pid} to finish with Chrome: ${cmd}`); }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+  }
+}
+function chromeUnlock() {
+  if (!lockHeld) return;
+  lockHeld = false;
+  try { if (Number(readFileSync(CHROME_LOCK, 'utf8').split('\n')[0]) === process.pid) rmSync(CHROME_LOCK, { force: true }); } catch {}
+}
+
 export function tempProfile(prefix) {
+  chromeLock();
   const dir = mkdtempSync(join(tmpdir(), prefix));
   profiles.push(dir);
   return dir;
@@ -111,7 +149,7 @@ function reapStrays() {
 }
 reapStrays();
 
-process.on('exit', () => { for (const dir of profiles) rmProfile(dir); });
+process.on('exit', () => { for (const dir of profiles) rmProfile(dir); chromeUnlock(); });
 for (const [sig, code] of [['SIGINT', 130], ['SIGTERM', 143]]) {
   process.on(sig, () => {
     // kill any Chrome still using a remembered profile (matches --user-data-dir=<dir> in its

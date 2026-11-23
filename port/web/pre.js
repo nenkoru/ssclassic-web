@@ -73,6 +73,58 @@ Module['preRun'] = (Module['preRun'] || []).concat([function () {
   };
 }]);
 
+// Engine console -> page console: drain the engine's console ring (port/common/WebFrame.cpp) four
+// times a second and console.log each whole line. The mod's own lines ("se1mod...") are skipped:
+// the mod host already logs those as "[se1mod] ...", right away.
+(function () {
+  if (typeof window === 'undefined') return;   // pthread workers load this script too
+  var tail = -1, part = '', dec = new TextDecoder();
+  setInterval(function () {
+    if (!Module['_SE1_ConsoleHead'] || !Module.HEAPU8) return;
+    var head = Module['_SE1_ConsoleHead']() >>> 0, size = Module['_SE1_ConsoleRingSize']();
+    if (tail < 0) tail = head > size ? (head - size) >>> 0 : 0;
+    var n = (head - tail) >>> 0;
+    if (!n) return;
+    if (n > size) { console.warn('[engine] console ring overran, ' + (n - size) + ' bytes lost'); tail = (head - size) >>> 0; n = size; }
+    var ring = Module['_SE1_ConsoleRing'](), bytes = new Uint8Array(n), start = tail % size;
+    var first = Math.min(n, size - start);
+    bytes.set(Module.HEAPU8.subarray(ring + start, ring + start + first), 0);
+    if (first < n) bytes.set(Module.HEAPU8.subarray(ring, ring + n - first), first);
+    tail = head;
+    var lines = (part + dec.decode(bytes)).split('\n');
+    part = lines.pop();
+    for (var i = 0; i < lines.length; i++) {
+      var l = lines[i].replace(/\r$/, '');
+      if (l && l.lastIndexOf('se1mod', 0) !== 0) console.log(l);
+    }
+  }, 250);
+})();
+
+// Console command (dev tools: tools/se1d.mjs): Module.se1Cmd('sam_bShowAllLevels=1') queues one
+// console line; the engine runs it on its own thread at the next frame (port/common/WebFrame.cpp)
+// and logs "web: > <line>". Lines queue here while the engine's one-line slot is busy.
+Module['se1Cmd'] = function (line) {
+  var q = Module.se1CmdQueue || (Module.se1CmdQueue = []);
+  line = String(line).trim();
+  if (!/;$/.test(line)) line += ';';   // shell statements end with ';'
+  q.push(line);
+  if (q.length === 1) setTimeout(Module.se1CmdPump, 0);
+  return q.length;
+};
+Module.se1CmdPump = function () {
+  var q = Module.se1CmdQueue;
+  if (!q || !q.length) return;
+  if (!Module['_SE1_CommandBuffer']) { setTimeout(Module.se1CmdPump, 100); return; }
+  var bytes = new TextEncoder().encode(q[0]).subarray(0, 4095);
+  var ptr = Module['_SE1_CommandBuffer']();
+  // the slot is only written while the engine isn't reading it: CommandCommit refuses while busy
+  if (Module['_SE1_CommandBusy']()) { setTimeout(Module.se1CmdPump, 16); return; }
+  Module.HEAPU8.set(bytes, ptr);
+  if (!Module['_SE1_CommandCommit'](bytes.length)) { setTimeout(Module.se1CmdPump, 16); return; }
+  q.shift();
+  if (q.length) setTimeout(Module.se1CmdPump, 16);
+};
+
 // Visual regression capture (?shots=): called once per frame right before the swap, after the
 // frame's commands were replayed. Grabs frames at fixed demo times via the active replayer.
 Module['se1CaptureFrame'] = function (tDemo) {

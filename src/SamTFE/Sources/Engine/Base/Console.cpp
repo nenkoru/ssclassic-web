@@ -206,6 +206,11 @@ void CConsole::PutString(const char *strString)
   if (con_bCapture) {
     con_strCapture+=strString;
   }
+#ifdef __EMSCRIPTEN__
+  // web port: also to the page's console, through a ring the page drains (port/common/WebFrame.cpp)
+  extern void SE1_WebConsolePut(const char *strString);
+  SE1_WebConsolePut(strString);
+#endif
 
   // if dedicated server
   extern BOOL _bDedicatedServer;
