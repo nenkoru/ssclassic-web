@@ -366,6 +366,12 @@ def inbox_lines(root):
     return lines
 
 
+def short(path):
+    """A path relative to the repo when it is inside it, else absolute."""
+    rel = os.path.relpath(os.path.abspath(path), ROOT)
+    return os.path.abspath(path) if rel.startswith("..") else rel
+
+
 def main(argv):
     root = DEFAULT_DIR
     if "--dir" in argv:
@@ -376,7 +382,7 @@ def main(argv):
         lines = inbox_lines(root)
         if not lines:
             return 0
-        rel = os.path.relpath(root, ROOT)
+        rel = short(root)
         text = f"{len(lines)} play session(s) recorded and not triaged yet ({rel}):\n" + "\n".join(l for _, l in lines)
         if "--hook" in argv:
             text += ("\nThe user plays without reporting problems: run `python3 tools/playtriage.py --new`, read the "
@@ -389,6 +395,10 @@ def main(argv):
     if "--new" in argv:
         targets += [s for s in sessions(root) if needs_triage(s) == "new"]
     if not targets:
+        if "--new" in argv:
+            waiting = [s for s in sessions(root) if needs_triage(s) == "recording"]
+            print("no new play sessions" + (f" ({len(waiting)} still recording)" if waiting else ""))
+            return 0
         print(__doc__.strip())
         return 2
     bpath = os.path.join(root, ".baseline.json")
@@ -403,7 +413,7 @@ def main(argv):
         counts = {}
         for f in findings:
             counts[f["severity"]] = counts.get(f["severity"], 0) + 1
-        print(f"{os.path.relpath(os.path.join(sdir, 'triage.md'), ROOT)}: {fmt_t(summ['duration_s'])}, "
+        print(f"{short(os.path.join(sdir, 'triage.md'))}: {fmt_t(summ['duration_s'])}, "
               + (", ".join(f"{counts[s]} {s}" for s in SEV if s in counts) or "nothing found"))
     os.makedirs(root, exist_ok=True)
     with open(bpath, "w", encoding="utf-8") as f:

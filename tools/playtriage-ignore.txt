@@ -7,3 +7,4 @@ Gamma, brightness and contrast are not adjustable
 ^Cannot open file `/DefaultMod\.txt'
 ^Cannot load variable from 'Data/Var/ModName\.var'
 ^Cannot open file `/Data/Var/ModName\.var'
+didn't shut down properly last time
