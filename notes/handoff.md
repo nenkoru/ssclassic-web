@@ -103,6 +103,7 @@ Emscripten builds (CMake + ninja, Release, `SE1_THREADS`, `SE1_RUSTMOD`). Rebuil
    - interest management and STUN/TURN for the 128-player goal;
    - engine visibility code performance.
 5. **Bevy rewrite question:** see notes/bevy-rewrite.md. It's a research report, not a decision.
+6. **Multiverse idea:** see notes/multiverse-games.md (war server, rescue portals, Doom/Odamex front). Research only, nothing built.
 
 ## Gotchas
 
