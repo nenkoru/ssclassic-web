@@ -36,6 +36,10 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <Engine/Base/Statistics_Internal.h>
 #include <Engine/Templates/StaticStackArray.cpp>
 
+#include <algorithm>
+#include <unordered_map>
+#include <vector>
+
 #define EPSILON (0.1f)
 
 class CActiveSector {
@@ -46,6 +50,154 @@ public:
 
 static CStaticStackArray<CActiveSector> _aas;
 CListHead _lhTestedTerrains; // list of tested terrains
+
+/////////////////////////////////////////////////////////////////////
+// Web port (perf). In Survivors with hundreds of monsters most casts are the enemies' IsVisible()
+// rays (TT_NONE: brushes only). Every cast walked every entity linked to every sector it visits,
+// and the world brush, linked into its own sectors, makes every cast visit every sector of the
+// world: ~450 entities and ~270 polygons per cast with 500 monsters, O(monsters^2) per tick.
+// Two exact shortcuts, each keeping every result (hit entity, polygon, distance, tie order):
+//  1. TT_NONE casts read a cached per-sector list of the sector's brush and terrain entities, in
+//     list order, instead of walking all its entities; for any other entity that loop does
+//     nothing. The cache is valid while the sector's entity list is unchanged (its relation
+//     generation, Base/Relations.h) and no entity became a brush or terrain (_ulRayCastTypeChanges,
+//     bumped in CEntity::InitAsBrush/InitAsTerrain/Copy).
+//  2. TestBrushSector() skips a sector whose bounding box the ray can't reach before the current
+//     hit distance (SectorMayBeHit below).
+
+// counts entities becoming brushes or terrains (Entity.cpp, EntityCopying.cpp)
+ULONG _ulRayCastTypeChanges = 0;
+
+struct RaySectorBrushes {
+  __uint64 rsb_uqStamp;          // bsc_rsEntities.rs_ullGeneration the list was made from (0: never)
+  ULONG rsb_ulTypeChanges;       // _ulRayCastTypeChanges then
+  std::vector<CEntity *> rsb_apen;  // the sector's RT_BRUSH and RT_TERRAIN entities, in list order
+};
+static std::unordered_map<CBrushSector *, RaySectorBrushes> _mapSectorBrushes;
+
+static const std::vector<CEntity *> &SectorBrushesAndTerrains(CBrushSector *pbsc)
+{
+  // sectors of worlds left behind stay in the map until it is cleared; their stamps never match
+  if (_mapSectorBrushes.size()>65536 && _mapSectorBrushes.find(pbsc)==_mapSectorBrushes.end()) {
+    _mapSectorBrushes.clear();
+  }
+  RaySectorBrushes &rsb = _mapSectorBrushes[pbsc];  // node-based: the reference stays valid
+  if (rsb.rsb_uqStamp!=pbsc->bsc_rsEntities.rs_ullGeneration || rsb.rsb_ulTypeChanges!=_ulRayCastTypeChanges) {
+    rsb.rsb_apen.clear();
+    {FOREACHDSTOFSRC(pbsc->bsc_rsEntities, CEntity, en_rdSectors, pen)
+      if (pen->en_RenderType==CEntity::RT_BRUSH || pen->en_RenderType==CEntity::RT_TERRAIN) {
+        rsb.rsb_apen.push_back(pen);
+      }
+    ENDFOR}
+    rsb.rsb_uqStamp = pbsc->bsc_rsEntities.rs_ullGeneration;
+    rsb.rsb_ulTypeChanges = _ulRayCastTypeChanges;
+  }
+  return rsb.rsb_apen;
+}
+
+// The ray of the current Cast() for the sector cull, in double precision.
+static BOOL _bRayCull = FALSE;
+static DOUBLE _adRayOrigin[3], _adRayDir[3], _dRayOriginMax;
+
+static void PrepareSectorCull(const FLOAT3D &vOrigin, const FLOAT3D &vTarget)
+{
+  const FLOAT3D vDelta = vTarget-vOrigin;
+  const DOUBLE dLen = sqrt(DOUBLE(vDelta(1))*vDelta(1)+DOUBLE(vDelta(2))*vDelta(2)+DOUBLE(vDelta(3))*vDelta(3));
+  _dRayOriginMax = Max(Max(Abs(DOUBLE(vOrigin(1))), Abs(DOUBLE(vOrigin(2)))), Abs(DOUBLE(vOrigin(3))));
+  // degenerate or non-finite rays are tested in full (a zero-length ray tests the origin point
+  // against every polygon in front of it, see TestBrushSector)
+  _bRayCull = dLen>1e-3 && dLen<1e6 && _dRayOriginMax<1e6;
+  if (!_bRayCull) return;
+  for (INDEX i=0; i<3; i++) {
+    _adRayOrigin[i] = vOrigin(i+1);
+    _adRayDir[i] = vDelta(i+1)/dLen;
+  }
+}
+
+// Do all polygons of the sector have closed edge loops: every vertex an even number of times among
+// each polygon's edges? Then CIntersector's crossing count for a point left of all of a polygon's
+// vertices (first major axis) is even: every edge that spans the point's second coordinate counts,
+// and in a graph where every vertex has even degree every cut has an even number of edges. So a
+// polygon can be hit only within its vertices' range in both major axes. Brushes are built that
+// way, but it is checked rather than assumed; computed once per sector and box recalculation.
+static BOOL SectorHasClosedLoops(CBrushSector *pbsc)
+{
+  if (pbsc->bsc_ulTempFlags&BSCTF_RAYLOOPSCHECKED) {
+    return (pbsc->bsc_ulTempFlags&BSCTF_RAYLOOPSCLOSED)!=0;
+  }
+  BOOL bClosed = TRUE;
+  static std::vector<CBrushVertex *> apbvx;
+  for (INDEX ipo=0; ipo<pbsc->bsc_abpoPolygons.sa_Count && bClosed; ipo++) {
+    CBrushPolygon &bpo = pbsc->bsc_abpoPolygons.sa_Array[ipo];
+    apbvx.clear();
+    FOREACHINSTATICARRAY(bpo.bpo_abpePolygonEdges, CBrushPolygonEdge, itbpe) {
+      apbvx.push_back(itbpe->bpe_pbedEdge->bed_pbvxVertex0);
+      apbvx.push_back(itbpe->bpe_pbedEdge->bed_pbvxVertex1);
+    }
+    std::sort(apbvx.begin(), apbvx.end());
+    for (size_t i=0; i<apbvx.size(); ) {
+      size_t j = i;
+      while (j<apbvx.size() && apbvx[j]==apbvx[i]) j++;
+      if ((j-i)&1) { bClosed = FALSE; break; }
+      i = j;
+    }
+  }
+  pbsc->bsc_ulTempFlags |= BSCTF_RAYLOOPSCHECKED | (bClosed ? BSCTF_RAYLOOPSCLOSED : 0);
+  return bClosed;
+}
+
+// Can a polygon of a sector with this bounding box pass the hit test in TestBrushSector, with the
+// hit distance at most fHitDistance? (bClosed: SectorHasClosedLoops)
+//  - The hit point there is vOrigin+(vTarget-vOrigin)*fFraction with fFraction>=0 (fDistance0>=0
+//    and fDistance0>=fDistance1), and it counts only if its distance from the origin is at most
+//    fHitDistance: it lies on the ray within fHitDistance, up to float rounding.
+//  - CIntersector counts an edge only if one end is above the point and the other is not in the
+//    second major axis, and one end is right of it in the first one: the point's second major
+//    coordinate is within the polygon's vertices, its first one below their maximum. (No closed
+//    edge loops or planar polygons assumed.) The sector's box holds all its polygons' vertices
+//    (CBrushSector::CalculateBoundingBoxes, recomputed with them when a brush moves).
+//    With closed loops (bClosed) the first major coordinate is also at least their minimum.
+// So if for each of the three planes' major-axis pairs (GetMajorAxesForPlane: x dropped -> (y,z),
+// y dropped -> (z,x), z dropped -> (x,y)) the ray segment misses that region of the box, no polygon
+// in the sector can be hit. The margins are far larger than the rounding of the float hit point.
+static BOOL SectorMayBeHit(const FLOATaabbox3D &box, FLOAT fHitDistance, BOOL bClosed)
+{
+  if (!_bRayCull || !(fHitDistance<1e5f)) return TRUE;   // (also catches NaN)
+  const DOUBLE dMargin = 0.01+1e-4*(_dRayOriginMax+fHitDistance);
+  const DOUBLE dTMax = DOUBLE(fHitDistance)*1.001+dMargin;
+  const DOUBLE dInf = 1e30;
+  DOUBLE adFullLo[3], adFullHi[3], adUpLo[3], adUpHi[3];
+  for (INDEX i=0; i<3; i++) {
+    const DOUBLE dLo = DOUBLE(box.Min()(i+1))-dMargin;
+    const DOUBLE dHi = DOUBLE(box.Max()(i+1))+dMargin;
+    const DOUBLE dO = _adRayOrigin[i], dD = _adRayDir[i];
+    if (dD==0) {
+      // parallel to the slab: all or nothing
+      const BOOL bInFull = dO>=dLo && dO<=dHi;
+      const BOOL bInUp = dO<=dHi;
+      adFullLo[i] = bInFull ? -dInf : dInf;  adFullHi[i] = bInFull ? dInf : -dInf;
+      adUpLo[i]   = bInUp   ? -dInf : dInf;  adUpHi[i]   = bInUp   ? dInf : -dInf;
+      if (bClosed) { adUpLo[i] = adFullLo[i]; adUpHi[i] = adFullHi[i]; }
+    } else {
+      const DOUBLE dT0 = (dLo-dO)/dD, dT1 = (dHi-dO)/dD;
+      adFullLo[i] = Min(dT0, dT1);  adFullHi[i] = Max(dT0, dT1);
+      // coordinate <= dHi
+      if (bClosed)   { adUpLo[i] = adFullLo[i]; adUpHi[i] = adFullHi[i]; }
+      else if (dD>0) { adUpLo[i] = -dInf; adUpHi[i] = dT1; }
+      else           { adUpLo[i] = dT1;   adUpHi[i] = dInf; }
+    }
+  }
+  // (first major axis, second major axis) for each dropped axis
+  static const INDEX aiFirst[3]  = { 1, 2, 0 };
+  static const INDEX aiSecond[3] = { 2, 0, 1 };
+  for (INDEX ip=0; ip<3; ip++) {
+    const INDEX i1 = aiFirst[ip], i2 = aiSecond[ip];
+    const DOUBLE dLo = Max(Max(0.0, adUpLo[i1]), adFullLo[i2]);
+    const DOUBLE dHi = Min(Min(dTMax, adUpHi[i1]), adFullHi[i2]);
+    if (dLo<=dHi) return TRUE;
+  }
+  return FALSE;
+}
 
 // calculate origin position from ray placement
 static inline FLOAT3D CalculateRayOrigin(const CPlacement3D &plRay)
@@ -471,6 +623,12 @@ void CCastRay::TestBrushSector(CBrushSector *pbscSector)
     return;
   }
 
+  // web port: skip a sector the ray can't hit (SectorMayBeHit above)
+  const BOOL bClosedLoops = SectorHasClosedLoops(pbscSector);
+  if (!SectorMayBeHit(pbscSector->bsc_boxBoundingBox, cr_fHitDistance, bClosedLoops)) {
+    return;
+  }
+
   const CEntity *l_cr_penOrigin = cr_penOrigin;
 
   // for each polygon in the sector
@@ -554,6 +712,23 @@ void CCastRay::TestBrushSector(CBrushSector *pbscSector)
       // find major axes of the polygon plane
       INDEX iMajorAxis1, iMajorAxis2;
       GetMajorAxesForPlane(itpoPolygon->bpo_pbplPlane->bpl_plAbsolute, iMajorAxis1, iMajorAxis2);
+
+      // web port (perf): the intersector below counts an edge only if one of its vertices is
+      // above the hit point and the other is not (second major axis), and one is right of it
+      // (first major axis). The polygon's box is the exact min/max of those same vertices
+      // (CBrushPolygon::CalculateBoundingBox), so outside these bounds the count is 0 and the
+      // polygon can't be hit; skip the walk over its edges. With closed edge loops the count is
+      // also even left of all vertices (SectorHasClosedLoops). (A NaN hit point fails no test here
+      // and goes on to the intersector as before.) ~28 edge walks per cast -> ~1 hit.
+      {
+        const FLOATaabbox3D &boxPolygon = bpoPolygon.bpo_boxBoundingBox;
+        const FLOAT fHit1 = vHitPoint(iMajorAxis1), fHit2 = vHitPoint(iMajorAxis2);
+        if (fHit2<boxPolygon.Min()(iMajorAxis2) || fHit2>=boxPolygon.Max()(iMajorAxis2)
+          || fHit1>=boxPolygon.Max()(iMajorAxis1)
+          || (bClosedLoops && fHit1<boxPolygon.Min()(iMajorAxis1))) {
+          continue;
+        }
+      }
 
       // create an intersector
       CIntersector isIntersector(vHitPoint(iMajorAxis1), vHitPoint(iMajorAxis2));
@@ -731,6 +906,38 @@ void CCastRay::TestThroughSectors(void)
     CBrushSector *pbsc = _aas[ias].as_pbsc;
     // test the ray against the sector
     TestBrushSector(pbsc);
+
+    // web port: a brushes-only cast does something only for brush and terrain entities, the same
+    // as the loop below does for them, in the same order (see the top of the file)
+    if (cr_ttHitModels==TT_NONE) {
+      const std::vector<CEntity *> &apen = SectorBrushesAndTerrains(pbsc);
+      for (size_t ien=0; ien<apen.size(); ien++) {
+        CEntity *pen = apen[ien];
+        // if it is the origin of the ray
+        if (pen==cr_penOrigin || pen==cr_penIgnore) {
+          // skip it
+          continue;
+        }
+        // if it is a terrain
+        if( pen->en_RenderType == CEntity::RT_TERRAIN) {
+          CTerrain *ptrTerrain = pen->GetTerrain();
+          ASSERT(ptrTerrain!=NULL);
+          // if terrain hasn't allready been tested
+          if(!ptrTerrain->tr_lnInActiveTerrains.IsLinked()) {
+            // test it now and add it to list of tested terrains
+            TestTerrain(pen);
+            _lhTestedTerrains.AddTail(ptrTerrain->tr_lnInActiveTerrains);
+          }
+        // if it is a non-hidden brush
+        } else if ( (pen->en_RenderType == CEntity::RT_BRUSH) &&
+                    !(pen->en_ulFlags&ENF_HIDDEN) ) {
+          // add all sectors in the brush
+          AddAllSectorsOfBrush(pen->en_pbrBrush);
+        }
+      }
+      continue;
+    }
+
     // for each entity in the sector
     {FOREACHDSTOFSRC(pbsc->bsc_rsEntities, CEntity, en_rdSectors, pen)
       // if it is the origin of the ray
@@ -808,6 +1015,8 @@ void CCastRay::Cast(CWorld *pwoWorld)
   } else {
     cr_ulPassablePolygons = BPOF_PORTAL|BPOF_OCCLUDER;
   }
+  // web port: the ray for the sector cull
+  PrepareSectorCull(cr_vOrigin, cr_vTarget);
 
   // if origin entity is given
   if (cr_penOrigin!=NULL) {

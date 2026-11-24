@@ -2237,9 +2237,14 @@ void CEntity::InitAsSkaModel(void)
 /*
  * Initialize for beeing a terrain object.
  */
+// web port (perf): counts entities becoming brushes or terrains; the ray caster's per-sector cache
+// of brush/terrain entities is valid only while it doesn't change (World/WorldRayCasting.cpp)
+extern ULONG _ulRayCastTypeChanges;
+
 void CEntity::InitAsTerrain(void)
 {
   en_RenderType = RT_TERRAIN;
+  _ulRayCastTypeChanges++;
   // if there is no existing terrain
   if(en_ptrTerrain == NULL) {
     // create a new empty terrain in the brush archive of current world
@@ -2287,6 +2292,7 @@ void CEntity::InitAsBrush(void)
 
   // set render type to brush
   en_RenderType = RT_BRUSH;
+  _ulRayCastTypeChanges++;   // web port: see InitAsTerrain()
   // if there is no existing brush
   if (en_pbrBrush == NULL) {
     // create a new empty brush in the brush archive of current world
@@ -3326,6 +3332,10 @@ void CEntity::Read_t( CTStream *istr) // throw char *
            >>en_ulCollisionFlags
            >>en_ulFlags;
   }
+
+  // web port (perf): the render type came from the stream; it may have become a brush or terrain
+  // (the ray caster's per-sector cache, World/WorldRayCasting.cpp)
+  { extern ULONG _ulRayCastTypeChanges; _ulRayCastTypeChanges++; }
 
   // clear flags for selection and caching info
   en_ulFlags &= ~(ENF_SELECTED|ENF_INRENDERING|ENF_VALIDSHADINGINFO);
