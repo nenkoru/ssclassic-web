@@ -76,6 +76,11 @@ public:
   FLOAT3D cm_vBToAbsolute; FLOATmatrix3D cm_mBToAbsolute;
 
   FLOATaabbox3D cm_boxMovementPathAbsoluteA; // movement box in absolute space for A entity
+#ifdef __EMSCRIPTEN__
+  // web port perf: set when the brush sector being clipped still needs
+  // PrepareProjectionsAndSpheres(); ClipMoveToBrushPolygon() runs it on first use
+  BOOL cm_bBrushProjectionsPending;
+#endif
 
   // get start and end positions of an entity in this tick
   inline void GetPositionsOfEntity(

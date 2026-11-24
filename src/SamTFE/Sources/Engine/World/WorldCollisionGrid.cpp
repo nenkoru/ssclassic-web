@@ -105,6 +105,16 @@ static inline INDEX MakeKeyFromCode(ULONG ulCode)
   return MakeKey(iX, iZ);
 }
 
+#ifdef __EMSCRIPTEN__
+// web port perf: bumped on every change to any grid's cell lists. FindEntitiesNearBox()'s result
+// depends only on the cell range it scans and on those lists, so while neither changes it can
+// return its previous result again (see there).
+static ULONG _ulGridChanges = 0;
+#define GRID_CHANGED() (_ulGridChanges++)
+#else
+#define GRID_CHANGED()
+#endif
+
 // collision grid classes
 class CGridCell {
 public:
@@ -154,6 +164,7 @@ CCollisionGrid::~CCollisionGrid(void)
 
 void CCollisionGrid::Clear(void)
 {
+  GRID_CHANGED();
   cg_aiFirstCells.Clear();
   cg_agcCells.Clear();
   cg_ageEntries.Clear();
@@ -256,6 +267,7 @@ void CCollisionGrid::AddEntry(INDEX igc, CEntity *pen)
   CGridEntry &ge = cg_ageEntries[ige];
 
   // init the entry and link it in its cell
+  GRID_CHANGED();
   ge.ge_penEntity = pen;
   CGridCell &gc = cg_agcCells[igc];
   ge.ge_iNextEntry = gc.gc_iFirstEntry;
@@ -273,6 +285,7 @@ void CCollisionGrid::RemoveEntry(INDEX igc, CEntity *pen)
   while(*pige>=0) {
     CGridEntry &ge = cg_ageEntries[*pige];
     if (ge.ge_penEntity==pen) {
+      GRID_CHANGED();
       // remove the entry from the list
       cg_ageEntries.Free(*pige);
       *pige = ge.ge_iNextEntry;
@@ -423,6 +436,27 @@ void CWorld::FindEntitiesNearBox(const FLOATaabbox3D &boxNear,
   BoxToGrid(boxNear, iMinX, iMaxX, iMinZ, iMaxZ);
   apenNearEntities.PopAll();
 
+#ifdef __EMSCRIPTEN__
+  // web port perf: a mover whose move is clipped retries (sliding, stairs) from the same place,
+  // so ~60% of the searches in a stress500 crowd scan the same cells as the search before, with
+  // no grid change in between. The scan order (cells by x then z, each cell's list, first
+  // occurrence wins) gives the same entities in the same order then, so copy the last result.
+  static CStaticStackArray<CEntity*> apenLast;
+  static CCollisionGrid *pcgLast = NULL;
+  static ULONG ulLastChanges = 0;
+  static INDEX iLastMinX, iLastMaxX, iLastMinZ, iLastMaxZ;
+  if (pcgLast==wo_pcgCollisionGrid && ulLastChanges==_ulGridChanges
+    && iLastMinX==iMinX && iLastMaxX==iMaxX && iLastMinZ==iMinZ && iLastMaxZ==iMaxZ) {
+    const INDEX ct = apenLast.Count();
+    if (ct>0) {
+      CEntity **ppen = apenNearEntities.Push(ct);
+      memcpy(ppen, &apenLast[0], ct*sizeof(CEntity*));
+    }
+    _pfPhysicsProfile.StopTimer(CPhysicsProfile::PTI_FINDENTITIESNEARBOX);
+    return;
+  }
+#endif
+
   // for each cell spanned by the box
   {for(INDEX iX=iMinX; iX<=iMaxX; iX++) {
     for(INDEX iZ=iMinZ; iZ<=iMaxZ; iZ++) {
@@ -459,6 +493,18 @@ void CWorld::FindEntitiesNearBox(const FLOATaabbox3D &boxNear,
     // clear found flag
     apenNearEntities[ienFound]->en_ulFlags&=~ENF_FOUNDINGRIDSEARCH;
   }
+#ifdef __EMSCRIPTEN__
+  // remember this result for the next search (see above)
+  apenLast.PopAll();
+  {const INDEX ct = apenNearEntities.Count();
+  if (ct>0) {
+    CEntity **ppen = apenLast.Push(ct);
+    memcpy(ppen, &apenNearEntities[0], ct*sizeof(CEntity*));
+  }}
+  pcgLast = wo_pcgCollisionGrid;
+  ulLastChanges = _ulGridChanges;
+  iLastMinX = iMinX; iLastMaxX = iMaxX; iLastMinZ = iMinZ; iLastMaxZ = iMaxZ;
+#endif
   _pfPhysicsProfile.StopTimer(CPhysicsProfile::PTI_FINDENTITIESNEARBOX);
 }
 

@@ -107,6 +107,9 @@ CClipMove::CClipMove(CMovableEntity *penEntity)
   cm_penHit = NULL;
   cm_pbpoHit = NULL;
   cm_fMovementFraction = 2.0f;
+#ifdef __EMSCRIPTEN__
+  cm_bBrushProjectionsPending = FALSE;
+#endif
 
   cm_penMoving = penEntity;
   // if the entity is deleted, or couldn't possible collide with anything
@@ -333,6 +336,27 @@ void CClipMove::ClipMovingSphereToBrushPolygon(const CMovingSphere &msMoving,
   FLOAT fDistance0 = plPolygon.PointDistance(msMoving.ms_vRelativeCenter0)-msMoving.ms_fR;
   FLOAT fDistance1 = plPolygon.PointDistance(msMoving.ms_vRelativeCenter1)-msMoving.ms_fR;
 
+#ifdef __EMSCRIPTEN__
+  // web port perf: a sphere whose path stays more than its radius (plus a margin) away from the
+  // polygon's plane can't hit the polygon (that needs fDistance0>=0 && fDistance1<0), nor an edge
+  // cylinder or a vertex sphere below: edges and vertices lie in the plane, so every point of
+  // those shapes is within ms_fR of it. Those two accept hits at a fraction up to
+  // cm_fMovementFraction, which starts at 2, so the path checked runs to twice the movement
+  // (fDistance2 at fraction 2; the distance is linear along the path). The margin is orders of
+  // magnitude above both the vertices' distance from the float plane (<0.0003 in the demo
+  // levels) and the rounding of the quadratic solves. Over a floor or next to a wall, a crowd's
+  // upper spheres skip their edge loops this way.
+  {
+    const FLOAT fMargin = 0.1f;
+    const FLOAT fBehind = -2*msMoving.ms_fR-fMargin;
+    const FLOAT fDistance2 = 2*fDistance1-fDistance0;
+    if ((fDistance0>fMargin && fDistance1>fMargin && fDistance2>fMargin)
+      ||(fDistance0<fBehind && fDistance1<fBehind && fDistance2<fBehind)) {
+      return;
+    }
+  }
+#endif
+
   // if first point is in front and second point is behind
   if (fDistance0>=0 && fDistance1<0) {
     // calculate fraction of line before intersection
@@ -534,6 +558,13 @@ void CClipMove::ClipMoveToTerrainPolygon(const FLOAT3D &v0, const FLOAT3D &v1, c
  */
 void CClipMove::ClipMoveToBrushPolygon(CBrushPolygon *pbpoPolygon)
 {
+#ifdef __EMSCRIPTEN__
+  // the deferred projections of ClipMoveToBrushes() (same inputs, so same results)
+  if (cm_bBrushProjectionsPending) {
+    cm_bBrushProjectionsPending = FALSE;
+    PrepareProjectionsAndSpheres();
+  }
+#endif
   _pfPhysicsProfile.StartTimer(CPhysicsProfile::PTI_CLIPMOVETOBRUSHPOLYGON);
   // for each sphere of entity A
   //FOREACHINSTATICARRAY(*cm_pamsA, CMovingSphere, itmsMoving) {
@@ -885,6 +916,16 @@ void CClipMove::ClipToNonZoningSector(CBrushSector *pbsc)
   _pfPhysicsProfile.IncrementTimerAveragingCounter(
     CPhysicsProfile::PTI_CLIPTONONZONINGSECTOR, pbsc->bsc_abpoPolygons.Count());
 
+#ifdef __EMSCRIPTEN__
+  // web port perf: the sector's box is the union of its polygons' boxes (CBrushSector::
+  // CalculateBoundingBoxes), so when it misses the movement path every polygon below misses it
+  // too and the loop does nothing; skip the loop
+  if (!pbsc->bsc_boxBoundingBox.HasContactWith(cm_boxMovementPath)) {
+    _pfPhysicsProfile.StopTimer(CPhysicsProfile::PTI_CLIPTONONZONINGSECTOR);
+    return;
+  }
+#endif
+
 #ifdef PLATFORM_WIN32
   // for each polygon in the sector
   FOREACHINSTATICARRAY(pbsc->bsc_abpoPolygons, CBrushPolygon, itbpo) {
@@ -977,6 +1018,16 @@ void CClipMove::ClipToZoningSector(CBrushSector *pbsc)
   _pfPhysicsProfile.IncrementTimerAveragingCounter(
     CPhysicsProfile::PTI_CLIPTOZONINGSECTOR, apbpo.Count());
 
+#ifdef __EMSCRIPTEN__
+  // web port perf: as in ClipToNonZoningSector(), a polygon of this sector can touch the
+  // movement path only if the sector's box (the union of its polygons' boxes) does; when it
+  // doesn't, the loop below neither clips nor activates any sector
+  if (!pbsc->bsc_boxBoundingBox.HasContactWith(cm_boxMovementPath)) {
+    _pfPhysicsProfile.StopTimer(CPhysicsProfile::PTI_CLIPTOZONINGSECTOR);
+    return;
+  }
+#endif
+
   // for each cached polygon
   for(INDEX iPolygon=0; iPolygon<apbpo.Count(); iPolygon++) {
     CBrushPolygon *pbpo = apbpo[iPolygon];
@@ -1063,6 +1114,9 @@ void CClipMove::ClipMoveToBrushes(void)
 
         // prepare new projections and spheres
         PrepareProjectionsAndSpheres();
+#ifdef __EMSCRIPTEN__
+        cm_bBrushProjectionsPending = FALSE;
+#endif
 
         // clip movement to the terrain
         ClipToTerrain(pen);
@@ -1102,8 +1156,16 @@ void CClipMove::ClipMoveToBrushes(void)
     cm_penB = penBrush;
     GetPositionsOfEntity(cm_penB, cm_vB0, cm_mB0, cm_vB1, cm_mB1);
 
+#ifdef __EMSCRIPTEN__
+    // web port perf: defer the projections to the first polygon that passes the box tests
+    // (ClipMoveToBrushPolygon). A mover visits ~16 sectors per ClipMove in a crowd but clips
+    // a polygon in under one, so this saved ~6.5% of the stress500 frame. The inputs (A's and
+    // B's placements) don't change until then, so the results are the same.
+    cm_bBrushProjectionsPending = TRUE;
+#else
     // prepare new projections and spheres
     PrepareProjectionsAndSpheres();
+#endif
 
     // clip movement to the sector
     if (penBrush->en_ulFlags&ENF_ZONING) {
@@ -1114,6 +1176,9 @@ void CClipMove::ClipMoveToBrushes(void)
   }
   _pfPhysicsProfile.StopTimer(CPhysicsProfile::PTI_CLIPMOVETOBRUSHES_MAINLOOP);
 
+#ifdef __EMSCRIPTEN__
+  cm_bBrushProjectionsPending = FALSE;
+#endif
   _pfPhysicsProfile.StartTimer(CPhysicsProfile::PTI_CLIPMOVETOBRUSHES_CLEANUP);
   // clear list of active sectors
   {FORDELETELIST(CBrushSector, bsc_lnInActiveSectors, cm_lhActiveSectors, itbsc) {
