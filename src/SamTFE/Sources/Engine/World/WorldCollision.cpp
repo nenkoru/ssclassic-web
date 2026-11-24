@@ -323,6 +323,33 @@ void CClipMove::ClipMovingSphereToSphere(const CMovingSphere &msMoving,
       msMoving.ms_fR + msStanding.ms_fR   // sphere radius
     );
 }
+#ifdef __EMSCRIPTEN__
+// web port (perf): the plane-distance skip in ClipMovingSphereToBrushPolygon is exact only when
+// the edges and vertices lie (nearly) on the polygon's plane. Brushes are built that way, but it is
+// checked rather than assumed: a sector with any vertex more than 0.01 off one of its polygons'
+// planes (relative space, as used below) never takes the skip. Once per sector and recalculation.
+static BOOL SectorIsFlatForClip(CBrushSector *pbsc)
+{
+  if (pbsc->bsc_ulTempFlags&BSCTF_CLIPFLATCHECKED) {
+    return (pbsc->bsc_ulTempFlags&BSCTF_CLIPFLAT)!=0;
+  }
+  BOOL bFlat = TRUE;
+  for (INDEX ipo=0; ipo<pbsc->bsc_abpoPolygons.sa_Count && bFlat; ipo++) {
+    CBrushPolygon &bpo = pbsc->bsc_abpoPolygons.sa_Array[ipo];
+    const FLOATplane3D &pl = bpo.bpo_pbplPlane->bpl_plRelative;
+    for (INDEX ibpe=0; ibpe<bpo.bpo_abpePolygonEdges.sa_Count; ibpe++) {
+      const CBrushEdge *pbed = bpo.bpo_abpePolygonEdges.sa_Array[ibpe].bpe_pbedEdge;
+      const FLOAT f0 = pl.PointDistance(pbed->bed_pbvxVertex0->bvx_vRelative);
+      const FLOAT f1 = pl.PointDistance(pbed->bed_pbvxVertex1->bvx_vRelative);
+      // (written so that a NaN fails the test)
+      if (!(f0<0.01f && f0>-0.01f && f1<0.01f && f1>-0.01f)) { bFlat = FALSE; break; }
+    }
+  }
+  pbsc->bsc_ulTempFlags |= BSCTF_CLIPFLATCHECKED | (bFlat ? BSCTF_CLIPFLAT : 0);
+  return bFlat;
+}
+#endif
+
 /*
  * Clip a moving sphere to a brush polygon, update collision data.
  */
@@ -344,14 +371,16 @@ void CClipMove::ClipMovingSphereToBrushPolygon(const CMovingSphere &msMoving,
   // cm_fMovementFraction, which starts at 2, so the path checked runs to twice the movement
   // (fDistance2 at fraction 2; the distance is linear along the path). The margin is orders of
   // magnitude above both the vertices' distance from the float plane (<0.0003 in the demo
-  // levels) and the rounding of the quadratic solves. Over a floor or next to a wall, a crowd's
+  // levels; a sector off by more than 0.01 never skips, SectorIsFlatForClip) and the rounding of
+  // the quadratic solves. Over a floor or next to a wall, a crowd's
   // upper spheres skip their edge loops this way.
   {
     const FLOAT fMargin = 0.1f;
     const FLOAT fBehind = -2*msMoving.ms_fR-fMargin;
     const FLOAT fDistance2 = 2*fDistance1-fDistance0;
-    if ((fDistance0>fMargin && fDistance1>fMargin && fDistance2>fMargin)
-      ||(fDistance0<fBehind && fDistance1<fBehind && fDistance2<fBehind)) {
+    if (((fDistance0>fMargin && fDistance1>fMargin && fDistance2>fMargin)
+      ||(fDistance0<fBehind && fDistance1<fBehind && fDistance2<fBehind))
+      && SectorIsFlatForClip(pbpoPolygon->bpo_pbscSector)) {
       return;
     }
   }

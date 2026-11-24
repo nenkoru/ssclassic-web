@@ -161,7 +161,7 @@ void CBrushSector::CalculateBoundingBoxes(CSimpleProjection3D_DOUBLE &prRelative
   bsc_ulTempFlags&=~BSCTF_PRELOADEDBSP;
   bsc_ulTempFlags&=~BSCTF_PRELOADEDLINKS;
   // web port: the ray caster checks the edge loops again when it next needs them
-  bsc_ulTempFlags&=~(BSCTF_RAYLOOPSCHECKED|BSCTF_RAYLOOPSCLOSED);
+  bsc_ulTempFlags&=~(BSCTF_RAYLOOPSCHECKED|BSCTF_RAYLOOPSCLOSED|BSCTF_CLIPFLATCHECKED|BSCTF_CLIPFLAT);
 
 // if in debug version
 #ifndef NDEBUG

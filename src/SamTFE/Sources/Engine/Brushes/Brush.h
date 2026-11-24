@@ -538,6 +538,10 @@ typedef CSelection<CBrushPolygon, BPOF_SELECTEDFORCSG> CBrushPolygonSelectionFor
 // (World/WorldRayCasting.cpp); cleared whenever the sector's boxes are recalculated
 #define BSCTF_RAYLOOPSCHECKED    (1L<<2)   // the check below is done
 #define BSCTF_RAYLOOPSCLOSED     (1L<<3)   // every vertex has an even number of edges in each polygon
+// web port (perf): the collision check that every polygon's vertices lie on its plane
+// (World/WorldCollision.cpp, ClipMovingSphereToBrushPolygon); cleared with the two above
+#define BSCTF_CLIPFLATCHECKED    (1L<<4)   // the check below is done
+#define BSCTF_CLIPFLAT           (1L<<5)   // every vertex is within 0.01 of its polygons' planes
 
 // a sector in brush
 class ENGINE_API CBrushSector {
