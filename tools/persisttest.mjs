@@ -109,7 +109,7 @@ try {
     if (res.exceptionDetails) throw new Error(res.exceptionDetails.exception?.description || res.exceptionDetails.text || 'evaluate failed');
     return res.result?.value;
   };
-  const until = async (expr, pred, ms) => { let v; for (let t = 0; t < ms / 1000; t++) { v = await ev(expr); if (pred(v)) return v; await sleep(1000); } return v; };
+  const until = async (expr, pred, ms) => { let v; for (let t = 0; t < ms / 1000; t++) { v = typeof expr === 'function' ? await expr() : await ev(expr); if (pred(v)) return v; await sleep(1000); } return v; };
   const frames = () => ev(`Module.se1Perf ? Module.se1Perf.n : -1`);
   const list = () => ev(buildKind === 'mt' ? LIST_OPFS : LIST_IDB, true);
 
