@@ -36,6 +36,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <Engine/Base/Statistics_Internal.h>
 #include <Engine/Templates/StaticStackArray.cpp>
 
+#include <algorithm>
 #include <unordered_map>
 #include <vector>
 
@@ -113,8 +114,40 @@ static void PrepareSectorCull(const FLOAT3D &vOrigin, const FLOAT3D &vTarget)
   }
 }
 
+// Do all polygons of the sector have closed edge loops: every vertex an even number of times among
+// each polygon's edges? Then CIntersector's crossing count for a point left of all of a polygon's
+// vertices (first major axis) is even: every edge that spans the point's second coordinate counts,
+// and in a graph where every vertex has even degree every cut has an even number of edges. So a
+// polygon can be hit only within its vertices' range in both major axes. Brushes are built that
+// way, but it is checked rather than assumed; computed once per sector and box recalculation.
+static BOOL SectorHasClosedLoops(CBrushSector *pbsc)
+{
+  if (pbsc->bsc_ulTempFlags&BSCTF_RAYLOOPSCHECKED) {
+    return (pbsc->bsc_ulTempFlags&BSCTF_RAYLOOPSCLOSED)!=0;
+  }
+  BOOL bClosed = TRUE;
+  static std::vector<CBrushVertex *> apbvx;
+  for (INDEX ipo=0; ipo<pbsc->bsc_abpoPolygons.sa_Count && bClosed; ipo++) {
+    CBrushPolygon &bpo = pbsc->bsc_abpoPolygons.sa_Array[ipo];
+    apbvx.clear();
+    FOREACHINSTATICARRAY(bpo.bpo_abpePolygonEdges, CBrushPolygonEdge, itbpe) {
+      apbvx.push_back(itbpe->bpe_pbedEdge->bed_pbvxVertex0);
+      apbvx.push_back(itbpe->bpe_pbedEdge->bed_pbvxVertex1);
+    }
+    std::sort(apbvx.begin(), apbvx.end());
+    for (size_t i=0; i<apbvx.size(); ) {
+      size_t j = i;
+      while (j<apbvx.size() && apbvx[j]==apbvx[i]) j++;
+      if ((j-i)&1) { bClosed = FALSE; break; }
+      i = j;
+    }
+  }
+  pbsc->bsc_ulTempFlags |= BSCTF_RAYLOOPSCHECKED | (bClosed ? BSCTF_RAYLOOPSCLOSED : 0);
+  return bClosed;
+}
+
 // Can a polygon of a sector with this bounding box pass the hit test in TestBrushSector, with the
-// hit distance at most fHitDistance?
+// hit distance at most fHitDistance? (bClosed: SectorHasClosedLoops)
 //  - The hit point there is vOrigin+(vTarget-vOrigin)*fFraction with fFraction>=0 (fDistance0>=0
 //    and fDistance0>=fDistance1), and it counts only if its distance from the origin is at most
 //    fHitDistance: it lies on the ray within fHitDistance, up to float rounding.
@@ -123,10 +156,11 @@ static void PrepareSectorCull(const FLOAT3D &vOrigin, const FLOAT3D &vTarget)
 //    coordinate is within the polygon's vertices, its first one below their maximum. (No closed
 //    edge loops or planar polygons assumed.) The sector's box holds all its polygons' vertices
 //    (CBrushSector::CalculateBoundingBoxes, recomputed with them when a brush moves).
+//    With closed loops (bClosed) the first major coordinate is also at least their minimum.
 // So if for each of the three planes' major-axis pairs (GetMajorAxesForPlane: x dropped -> (y,z),
 // y dropped -> (z,x), z dropped -> (x,y)) the ray segment misses that region of the box, no polygon
 // in the sector can be hit. The margins are far larger than the rounding of the float hit point.
-static BOOL SectorMayBeHit(const FLOATaabbox3D &box, FLOAT fHitDistance)
+static BOOL SectorMayBeHit(const FLOATaabbox3D &box, FLOAT fHitDistance, BOOL bClosed)
 {
   if (!_bRayCull || !(fHitDistance<1e5f)) return TRUE;   // (also catches NaN)
   const DOUBLE dMargin = 0.01+1e-4*(_dRayOriginMax+fHitDistance);
@@ -143,12 +177,14 @@ static BOOL SectorMayBeHit(const FLOATaabbox3D &box, FLOAT fHitDistance)
       const BOOL bInUp = dO<=dHi;
       adFullLo[i] = bInFull ? -dInf : dInf;  adFullHi[i] = bInFull ? dInf : -dInf;
       adUpLo[i]   = bInUp   ? -dInf : dInf;  adUpHi[i]   = bInUp   ? dInf : -dInf;
+      if (bClosed) { adUpLo[i] = adFullLo[i]; adUpHi[i] = adFullHi[i]; }
     } else {
       const DOUBLE dT0 = (dLo-dO)/dD, dT1 = (dHi-dO)/dD;
       adFullLo[i] = Min(dT0, dT1);  adFullHi[i] = Max(dT0, dT1);
       // coordinate <= dHi
-      if (dD>0) { adUpLo[i] = -dInf; adUpHi[i] = dT1; }
-      else      { adUpLo[i] = dT1;   adUpHi[i] = dInf; }
+      if (bClosed)   { adUpLo[i] = adFullLo[i]; adUpHi[i] = adFullHi[i]; }
+      else if (dD>0) { adUpLo[i] = -dInf; adUpHi[i] = dT1; }
+      else           { adUpLo[i] = dT1;   adUpHi[i] = dInf; }
     }
   }
   // (first major axis, second major axis) for each dropped axis
@@ -588,7 +624,8 @@ void CCastRay::TestBrushSector(CBrushSector *pbscSector)
   }
 
   // web port: skip a sector the ray can't hit (SectorMayBeHit above)
-  if (!SectorMayBeHit(pbscSector->bsc_boxBoundingBox, cr_fHitDistance)) {
+  const BOOL bClosedLoops = SectorHasClosedLoops(pbscSector);
+  if (!SectorMayBeHit(pbscSector->bsc_boxBoundingBox, cr_fHitDistance, bClosedLoops)) {
     return;
   }
 
@@ -675,6 +712,23 @@ void CCastRay::TestBrushSector(CBrushSector *pbscSector)
       // find major axes of the polygon plane
       INDEX iMajorAxis1, iMajorAxis2;
       GetMajorAxesForPlane(itpoPolygon->bpo_pbplPlane->bpl_plAbsolute, iMajorAxis1, iMajorAxis2);
+
+      // web port (perf): the intersector below counts an edge only if one of its vertices is
+      // above the hit point and the other is not (second major axis), and one is right of it
+      // (first major axis). The polygon's box is the exact min/max of those same vertices
+      // (CBrushPolygon::CalculateBoundingBox), so outside these bounds the count is 0 and the
+      // polygon can't be hit; skip the walk over its edges. With closed edge loops the count is
+      // also even left of all vertices (SectorHasClosedLoops). (A NaN hit point fails no test here
+      // and goes on to the intersector as before.) ~28 edge walks per cast -> ~1 hit.
+      {
+        const FLOATaabbox3D &boxPolygon = bpoPolygon.bpo_boxBoundingBox;
+        const FLOAT fHit1 = vHitPoint(iMajorAxis1), fHit2 = vHitPoint(iMajorAxis2);
+        if (fHit2<boxPolygon.Min()(iMajorAxis2) || fHit2>=boxPolygon.Max()(iMajorAxis2)
+          || fHit1>=boxPolygon.Max()(iMajorAxis1)
+          || (bClosedLoops && fHit1<boxPolygon.Min()(iMajorAxis1))) {
+          continue;
+        }
+      }
 
       // create an intersector
       CIntersector isIntersector(vHitPoint(iMajorAxis1), vHitPoint(iMajorAxis2));

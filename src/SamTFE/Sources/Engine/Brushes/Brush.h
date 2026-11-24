@@ -534,6 +534,10 @@ typedef CSelection<CBrushPolygon, BPOF_SELECTEDFORCSG> CBrushPolygonSelectionFor
 // temporary flags
 #define BSCTF_PRELOADEDBSP       (1L<<0)   // bsp is loaded, no need to calculate it
 #define BSCTF_PRELOADEDLINKS     (1L<<1)   // portallinks are loaded, no need to calculate them
+// web port (perf): the ray caster's check that every polygon's edges form closed loops
+// (World/WorldRayCasting.cpp); cleared whenever the sector's boxes are recalculated
+#define BSCTF_RAYLOOPSCHECKED    (1L<<2)   // the check below is done
+#define BSCTF_RAYLOOPSCLOSED     (1L<<3)   // every vertex has an even number of edges in each polygon
 
 // a sector in brush
 class ENGINE_API CBrushSector {
