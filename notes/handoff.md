@@ -95,7 +95,7 @@ Emscripten builds (CMake + ninja, Release, `SE1_THREADS`, `SE1_RUSTMOD`). Rebuil
    - lifts count as doors;
    - teleporters aren't followed;
    - Hatshepsut has a few small islands: the intro box and two closed rooms.
-3. **Add `navroamtest` to `tools/test.sh`.** It needs full data, so make it a skip-if-missing step.
+3. ~~**Add `navroamtest` to `tools/test.sh`.**~~ Done: the "nav roam (full data)" step, SKIP without data/tfe-full-web.
 4. **Roadmap items** (notes/roadmap.md):
    - lazy data loading with an OPFS cache;
    - public hosting (what the demo data's license allows);

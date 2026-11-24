@@ -6,7 +6,8 @@ What's next, in rough priority order. Details and measurements live in notes/ren
 ## Plan (2026-11-24)
 
 ### Now: finish what's open
-1. **`navroamtest` in `tools/test.sh`**, skipped when the full data is missing.
+1. ~~**`navroamtest` in `tools/test.sh`**, skipped when the full data is missing.~~ Done (2026-11-24):
+   the "nav roam (full data)" step serves build-web-tfe-full on port +2; SKIP without data/tfe-full-web.
 2. **Platform items below:** lazy data loading with an OPFS cache, public hosting of what the demo
    data's license allows, checks on real phones and pads.
 3. **CI** (branch `ci-workflow`): when the user says so; it needs a token with the `workflow` scope.

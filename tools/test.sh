@@ -25,6 +25,8 @@
 # plus a two-browser co-op test on the threaded build (tools/mptest.mjs, also with --rtc for WebRTC,
 # and tools/lobbytest.mjs; needs cargo for the LAN switch, otherwise skipped), the static hosting
 # bundle on a plain static server (tools/package.sh + tools/packagetest.mjs), the unit tests (tests/run.sh) and the Rust tests (cargo test --workspace).
+# Also tools/navroamtest.mjs (bots roam a level on its baked nav graph) on the full-data build
+# (build-web-tfe-full, rebuilt incrementally unless --no-build); skipped when data/tfe-full-web is missing.
 # Prints a PASS/FAIL/SKIP summary; exit code 1 on any failure.
 #
 # Options:
@@ -43,6 +45,8 @@
 #   SE1_MAX_FRAME_MS   timedemo: worst allowed frame time in ms (default 3000)
 #   SE1_SHOTDIFF_ARGS  determinism tolerance for tools/shotdiff.py (default
 #                      "--max-mean 0.1 --max-changed 0.05"; "--exact" for bit-identical frames)
+#   SE1_FULL_DATA_DIR  full game data whose presence enables the nav roam step (default data/tfe-full-web)
+#   SE1_FULL_BUILD_DIR full-data build for the nav roam step (default build-web-tfe-full)
 #   CHROME, SE1_ANGLE, SE1_CHROME_FLAGS, SE1_TIMEOUT_SCALE: browser settings, see tools/chrome.mjs
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -70,6 +74,8 @@ PORT=${SE1_TEST_PORT:-8190}
 DATA=${SE1_DATA_DIR:-$ROOT/data/tfe-demo}
 MAX_FRAME_MS=${SE1_MAX_FRAME_MS:-3000}
 SHOTDIFF_ARGS=${SE1_SHOTDIFF_ARGS:---max-mean 0.1 --max-changed 0.05}
+FULL_DATA=${SE1_FULL_DATA_DIR:-$ROOT/data/tfe-full-web}
+FULL_DIR=${SE1_FULL_BUILD_DIR:-build-web-tfe-full}
 
 RESULTS=()
 FAILED=0
@@ -307,6 +313,21 @@ if [ -x rust/target/release/se1-server ]; then
   step "multiplayer: lobby"
   if logged lobby node tools/lobbytest.mjs "$(url_of mt)"; then result PASS "multiplayer lobby" "host and join from the page"
   else result FAIL "multiplayer lobby" "see $OUT/lobby.log"; fi
+fi
+
+# ---------------------------------------------------------------- bot navigation (full data)
+step "nav roam (full data)"
+if [ ! -d "$FULL_DATA" ]; then result SKIP "nav roam (full data)" "no $FULL_DATA"
+else
+  ok=1
+  if [ $BUILD = 1 ] && [ -f "$FULL_DIR/build.ninja" ]; then
+    { emsdk_env && logged build-full ninja -C "$FULL_DIR"; } || ok=0
+  fi
+  if [ $ok = 0 ]; then result FAIL "nav roam (full data)" "build failed (see $OUT/build-full.log)"
+  elif [ ! -f "$FULL_DIR/serioussam.html" ]; then result SKIP "nav roam (full data)" "$FULL_DIR not built (node tools/dev.mjs build full)"
+  elif ! serve "$FULL_DIR" $((PORT + 2)); then result FAIL "nav roam (full data)" "dev server on port $((PORT + 2)) did not start"
+  elif logged navroam node tools/navroamtest.mjs "http://127.0.0.1:$((PORT + 2))/serioussam.html"; then result PASS "nav roam (full data)" "bots roam Hatshepsut on its baked graph"
+  else result FAIL "nav roam (full data)" "see $OUT/navroam.log"; fi
 fi
 
 # ---------------------------------------------------------------- static hosting bundle
