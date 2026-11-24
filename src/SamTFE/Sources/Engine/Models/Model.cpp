@@ -321,10 +321,14 @@ CModelData::CModelData()
 /*
  * Clear all model data arrays
  */
+// bumped whenever frame vertices or mip infos may change: invalidates the unpack cache (RenderModel_View.cpp)
+extern ULONG _ulModelUnpackCacheGen;
+
 void CModelData::Clear(void)
 {
   INDEX i;
   md_bPreparedForRendering = FALSE;
+  _ulModelUnpackCacheGen++;
 
   CAnimData::Clear();
 
@@ -378,6 +382,7 @@ BOOL CModelData::IsAutoFreed(void)
 
 void CModelData::ClearAnimations(void)
 {
+  _ulModelUnpackCacheGen++;
   CAnimData::Clear();
 
   md_FrameVertices16.Clear();
