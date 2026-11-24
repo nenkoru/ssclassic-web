@@ -591,8 +591,38 @@ void CRenderer::RenderModels( BOOL bBackground)
   _pfRenderProfile.StartTimer(CRenderProfile::PTI_RENDERMODELS);
 
   // sort all the delayed models by distance
+#ifdef __EMSCRIPTEN__
+  // web port perf (~3% of the timedemo frame went to this sort): the same introsort as the qsort
+  // linked in (port/common/FastSort.h) with the comparator inlined, over a packed copy of the sort
+  // keys so a comparison doesn't chase two pointers into the models. The comparator gives the same
+  // result for every pair as CompareDelayedModels(), so the sort makes the same swaps and leaves the
+  // pointers in the same order as qsort() did.
+  {
+    struct DelayedModelKey { INDEX iAlpha; FLOAT fDistance; CDelayedModel *pdm; };
+    static CStaticStackArray<DelayedModelKey> _admkKeys;
+    CDelayedModel **apdm = (CDelayedModel **)re_admDelayedModels.GetArrayOfPointers();
+    const INDEX ctdm = re_admDelayedModels.Count();
+    if (ctdm>1) {
+      _admkKeys.PopAll();
+      DelayedModelKey *admk = _admkKeys.Push(ctdm);
+      for (INDEX idm=0; idm<ctdm; idm++) {
+        admk[idm].iAlpha = (apdm[idm]->dm_ulFlags&DMF_HASALPHA) ? 1 : 0;
+        admk[idm].fDistance = apdm[idm]->dm_fDistance;
+        admk[idm].pdm = apdm[idm];
+      }
+      se1_qsort(admk, ctdm, [](const DelayedModelKey &k0, const DelayedModelKey &k1) {
+        if (k0.iAlpha!=k1.iAlpha) return k0.iAlpha<k1.iAlpha ? -1 : +1;
+        if (k0.fDistance<k1.fDistance) return -1;
+        if (k0.fDistance>k1.fDistance) return +1;
+        return 0;
+      });
+      for (INDEX idm=0; idm<ctdm; idm++) apdm[idm] = admk[idm].pdm;
+    }
+  }
+#else
   qsort(re_admDelayedModels.GetArrayOfPointers(), re_admDelayedModels.Count(),
       sizeof(CDelayedModel *), qsort_CompareDelayedModels);
+#endif
 
   CAnyProjection3D *papr;
   if( bBackground) {

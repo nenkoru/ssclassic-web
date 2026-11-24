@@ -143,6 +143,15 @@ void CRenderer::PreClipPlanes(void)
     }
   }
 
+#ifdef __EMSCRIPTEN__
+  // web port perf: the depth gradient and view-space mapping vectors are only read by
+  // MakeScreenPolygon(), for the planes of the polygons that get a screen polygon (about half of the
+  // planes face away). They are made there on first use, in PrepareViewPlane(), with the same
+  // arithmetic and the same projection (still within this AddActiveSector()).
+  {for(INDEX ipl=0; ipl<ctpl; ipl++){
+    re_pbscCurrent->bsc_awplPlanes[ipl].wpl_bViewMappingReady = FALSE;
+  }}
+#else
   // for each plane
   {for(INDEX ipl=0; ipl<ctpl; ipl++){
     CWorkingPlane &wpl = re_pbscCurrent->bsc_awplPlanes[ipl];
@@ -169,11 +178,46 @@ void CRenderer::PreClipPlanes(void)
     wpl.wpl_mvView.mv_vV(3) = fxV*m(3, 1)+fyV*m(3, 2)+fzV*m(3, 3);
   }}
 
+#endif
   _pfRenderProfile.IncrementCounter(CRenderProfile::PCI_TRANSFORMEDPLANES, ctpl);
   _pfRenderProfile.IncrementTimerAveragingCounter(CRenderProfile::PTI_TRANSFORMPLANES, ctpl);
 
   _pfRenderProfile.StopTimer(CRenderProfile::PTI_TRANSFORMPLANES);
 }
+
+#ifdef __EMSCRIPTEN__
+// make the depth gradient and the view-space mapping vectors of one plane of the current sector
+// (the second loop of PreClipPlanes() in the original, done on first use)
+__forceinline void CRenderer::PrepareViewPlane(CWorkingPlane &wpl)
+{
+  if (wpl.wpl_bViewMappingReady) return;
+  wpl.wpl_bViewMappingReady = TRUE;
+  CProjection3D *ppr = &*re_pbrCurrent->br_prProjection;
+  const FLOATmatrix3D &m = ppr->pr_RotationMatrix;
+  const FLOAT3D       &v = ppr->pr_TranslationVector;
+  // make gradients without fog
+  ppr->MakeOoKGradient(wpl.wpl_plView, wpl.wpl_pgOoK);
+  // transform it to view space
+  const FLOAT fxO = wpl.wpl_mvRelative.mv_vO(1);
+  const FLOAT fyO = wpl.wpl_mvRelative.mv_vO(2);
+  const FLOAT fzO = wpl.wpl_mvRelative.mv_vO(3);
+  const FLOAT fxU = wpl.wpl_mvRelative.mv_vU(1);
+  const FLOAT fyU = wpl.wpl_mvRelative.mv_vU(2);
+  const FLOAT fzU = wpl.wpl_mvRelative.mv_vU(3);
+  const FLOAT fxV = wpl.wpl_mvRelative.mv_vV(1);
+  const FLOAT fyV = wpl.wpl_mvRelative.mv_vV(2);
+  const FLOAT fzV = wpl.wpl_mvRelative.mv_vV(3);
+  wpl.wpl_mvView.mv_vO(1) = fxO*m(1, 1)+fyO*m(1, 2)+fzO*m(1, 3)+v(1);
+  wpl.wpl_mvView.mv_vO(2) = fxO*m(2, 1)+fyO*m(2, 2)+fzO*m(2, 3)+v(2);
+  wpl.wpl_mvView.mv_vO(3) = fxO*m(3, 1)+fyO*m(3, 2)+fzO*m(3, 3)+v(3);
+  wpl.wpl_mvView.mv_vU(1) = fxU*m(1, 1)+fyU*m(1, 2)+fzU*m(1, 3);
+  wpl.wpl_mvView.mv_vU(2) = fxU*m(2, 1)+fyU*m(2, 2)+fzU*m(2, 3);
+  wpl.wpl_mvView.mv_vU(3) = fxU*m(3, 1)+fyU*m(3, 2)+fzU*m(3, 3);
+  wpl.wpl_mvView.mv_vV(1) = fxV*m(1, 1)+fyV*m(1, 2)+fzV*m(1, 3);
+  wpl.wpl_mvView.mv_vV(2) = fxV*m(2, 1)+fyV*m(2, 2)+fzV*m(2, 3);
+  wpl.wpl_mvView.mv_vV(3) = fxV*m(3, 1)+fyV*m(3, 2)+fzV*m(3, 3);
+}
+#endif
 
 // project vertices in current sector after clipping
 void CRenderer::PostClipVertices(void)
@@ -616,6 +660,9 @@ CScreenPolygon *CRenderer::MakeScreenPolygon(CBrushPolygon &bpo)
 
   // just copy depth gradient from plane
   CWorkingPlane &wpl  = *bpo.bpo_pbplPlane->bpl_pwplWorking;
+#ifdef __EMSCRIPTEN__
+  PrepareViewPlane(wpl);
+#endif
   spo.spo_pgOoK = wpl.wpl_pgOoK;
   spo.spo_spoScenePolygon.spo_cColor = ColorForPolygons(bpo.bpo_colColor, bsc.bsc_colColor);
 
@@ -837,7 +884,14 @@ void CRenderer::MakeSpan(CScreenPolygon &spo, CScreenEdge *psed0, CScreenEdge *p
   else {
     // if no span added to this polygon yet
     if( !spo.spo_ubSpanAdded) {
+#ifdef __EMSCRIPTEN__
+      // web port: 2 marks a polygon that AddMirror() may put in a mirror; only those need the
+      // screen box and area below kept up to date (see MakeSpanInline())
+      spo.spo_ubSpanAdded = (spo.spo_pbpoBrushPolygon!=NULL
+        && spo.spo_pbpoBrushPolygon->bpo_bppProperties.bpp_ubMirrorType!=0) ? 2 : 1;
+#else
       spo.spo_ubSpanAdded = 1;
+#endif
       // add mirror if needed
       AddMirror(spo);
       // add polygon to scene polygons
@@ -858,6 +912,26 @@ void CRenderer::MakeSpan(CScreenPolygon &spo, CScreenEdge *psed0, CScreenEdge *p
       spo.spo_pixMaxJ = Max(spo.spo_pixMaxJ, re_pixCurrentScanJ);
       spo.spo_pixTotalArea += pixI1-pixI0;
     }
+  }
+}
+
+__forceinline void CRenderer::MakeSpanInline(CScreenPolygon &spo, CScreenEdge *psed0, CScreenEdge *psed1)
+{
+  if( !re_bRenderingShadows && spo.spo_ubSpanAdded) {
+    // The screen box and area (spo_pix*) are only read by CMirror::FinishAdding(), for polygons that
+    // AddMirror() put in a mirror; MakeSpan() marks the polygons that can be (spo_ubSpanAdded==2).
+    // For every other polygon this was dead work on each of the ~5k spans of a timedemo frame.
+    if (spo.spo_ubSpanAdded!=2) return;
+    // the "else" branch of MakeSpan() above, unchanged
+    const PIX pixI0 = PIXCoord(psed0->sed_xI);
+    const PIX pixI1 = PIXCoord(psed1->sed_xI);
+    spo.spo_pixMinI = Min(spo.spo_pixMinI, pixI0);
+    spo.spo_pixMaxI = Max(spo.spo_pixMaxI, pixI1);
+    spo.spo_pixMinJ = Min(spo.spo_pixMinJ, re_pixCurrentScanJ);
+    spo.spo_pixMaxJ = Max(spo.spo_pixMaxJ, re_pixCurrentScanJ);
+    spo.spo_pixTotalArea += pixI1-pixI0;
+  } else {
+    MakeSpan(spo, psed0, psed1);
   }
 }
 

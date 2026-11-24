@@ -380,6 +380,77 @@ void CRenderer::ClipOnePolygon(CScreenPolygon &spo)
 // it can cause access violation, because pushing can move array in memory.
 // Therefore, it is important to take the references _after_ the Push() call.
   
+#ifdef __EMSCRIPTEN__
+  INDEX iEdgeVx0New = re_aiEdgeVxClipDst.Count();
+  // web port perf: every edge gives at most two edge vertices, so reserve the worst case once and
+  // write through a pointer instead of a checked Push() per index; trimmed to the real count below.
+  // Same contents and order as the Push() version (#else).
+  INDEX *const piDst0 = re_aiEdgeVxClipDst.Push(spo.spo_ctEdgeVx);
+  INDEX *piDst = piDst0;
+
+  // for each edge
+  INDEX ivxTop = spo.spo_iEdgeVx0+spo.spo_ctEdgeVx;
+  for(INDEX ivx=spo.spo_iEdgeVx0; ivx<ivxTop; ivx+=2) {
+    INDEX ivx0 = re_aiEdgeVxClipSrc[ivx+0];
+    INDEX ivx1 = re_aiEdgeVxClipSrc[ivx+1];
+
+    // get vertices
+    FLOAT fD0 = re_avvxViewVertices[ivx0].vvx_fD;
+    FLOAT fD1 = re_avvxViewVertices[ivx1].vvx_fD;
+    if (fD0<=0) {
+      // if both are back
+      if (fD1<=0) {
+        // no screen edge remains
+        continue;
+      // if first is back, second front
+      } else {
+        // make new vertex
+        INDEX ivxNew = re_avvxViewVertices.Count();
+        CViewVertex &vvxNew = re_avvxViewVertices.Push();
+        CViewVertex &vvx0 = re_avvxViewVertices[ivx0];  // must do this after push, see note above!
+        CViewVertex &vvx1 = re_avvxViewVertices[ivx1];  // must do this after push, see note above!
+        // clip first
+        FLOAT fDivisor = 1.0f/(fD0-fD1);
+        FLOAT fFactor = fD0*fDivisor;
+        vvxNew.vvx_vView(1) = vvx0.vvx_vView(1)-(vvx0.vvx_vView(1)-vvx1.vvx_vView(1))*fFactor;
+        vvxNew.vvx_vView(2) = vvx0.vvx_vView(2)-(vvx0.vvx_vView(2)-vvx1.vvx_vView(2))*fFactor;
+        vvxNew.vvx_vView(3) = vvx0.vvx_vView(3)-(vvx0.vvx_vView(3)-vvx1.vvx_vView(3))*fFactor;
+        // remember new edge
+        *piDst++ = ivxNew;
+        *piDst++ = ivx1;
+        // add new vertex to clip buffer
+        re_aiClipBuffer.Push() = ivxNew;
+      }
+    } else {
+      // if first is front, second back
+      if ((SLONG&)fD1<=0) {
+        // make new vertex
+        INDEX ivxNew = re_avvxViewVertices.Count();
+        CViewVertex &vvxNew = re_avvxViewVertices.Push();
+        CViewVertex &vvx0 = re_avvxViewVertices[ivx0];  // must do this after push, see note above!
+        CViewVertex &vvx1 = re_avvxViewVertices[ivx1];  // must do this after push, see note above!
+        // clip second
+        FLOAT fDivisor = 1.0f/(fD0-fD1);
+        FLOAT fFactor = fD1*fDivisor;
+        vvxNew.vvx_vView(1) = vvx1.vvx_vView(1)-(vvx0.vvx_vView(1)-vvx1.vvx_vView(1))*fFactor;
+        vvxNew.vvx_vView(2) = vvx1.vvx_vView(2)-(vvx0.vvx_vView(2)-vvx1.vvx_vView(2))*fFactor;
+        vvxNew.vvx_vView(3) = vvx1.vvx_vView(3)-(vvx0.vvx_vView(3)-vvx1.vvx_vView(3))*fFactor;
+        // remember new edge
+        *piDst++ = ivx0;
+        *piDst++ = ivxNew;
+        // add new vertex to clip buffer
+        re_aiClipBuffer.Push() = ivxNew;
+      // if both are front
+      } else {
+        // just copy the edge
+        *piDst++ = ivx0;
+        *piDst++ = ivx1;
+      }
+    }
+  }
+  re_aiEdgeVxClipDst.sa_UsedCount = iEdgeVx0New+INDEX(piDst-piDst0);
+
+#else
   INDEX iEdgeVx0New = re_aiEdgeVxClipDst.Count();
 
   // for each edge
@@ -443,6 +514,7 @@ void CRenderer::ClipOnePolygon(CScreenPolygon &spo)
     }
   }
 
+#endif
   // if there is anything in clip buffer
   if (re_aiClipBuffer.Count()>0) {
     // generate clip edges
@@ -509,6 +581,21 @@ void CRenderer::GenerateClipEdges(CScreenPolygon &spo)
   // there must be even number of vertices in the buffer
   ASSERT(ctIndices%2 == 0);
 
+#ifdef __EMSCRIPTEN__
+  // web port perf: same algorithm as the linked qsort, comparators inlined (port/common/FastSort.h)
+  const UBYTE *aVertices = _aVertices;
+  if (vClipDir(iMaxAxis)<0) {
+    se1_qsort(aIndices, ctIndices, [aVertices](INDEX ivx0, INDEX ivx1) {
+      FLOAT f0 = *(const FLOAT*)(aVertices+ivx0*sizeof(CViewVertex));
+      FLOAT f1 = *(const FLOAT*)(aVertices+ivx1*sizeof(CViewVertex));
+      return (f0<f1) ? +1 : (f0>f1) ? -1 : 0; });
+  } else {
+    se1_qsort(aIndices, ctIndices, [aVertices](INDEX ivx0, INDEX ivx1) {
+      FLOAT f0 = *(const FLOAT*)(aVertices+ivx0*sizeof(CViewVertex));
+      FLOAT f1 = *(const FLOAT*)(aVertices+ivx1*sizeof(CViewVertex));
+      return (f0<f1) ? -1 : (f0>f1) ? +1 : 0; });
+  }
+#else
   // if the sign of axis is negative
   if (vClipDir(iMaxAxis)<0) {
     // sort them inversely
@@ -518,6 +605,7 @@ void CRenderer::GenerateClipEdges(CScreenPolygon &spo)
     // sort them normally
     qsort(aIndices, ctIndices, sizeof(INDEX), qsort_CompareVertices_plus);
   }
+#endif
 
   // for each two vertices
   for(INDEX iClippedVertex=0; iClippedVertex<ctIndices; iClippedVertex+=2) {

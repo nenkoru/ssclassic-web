@@ -19,6 +19,9 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <Engine/Brushes/BrushTransformed.h>
 #include <Engine/Rendering/Render.h>
 #include <Engine/Rendering/Render_internal.h>
+#ifdef __EMSCRIPTEN__
+#include <FastSort.h>   // web port: se1_qsort, the linked qsort's introsort with inlined comparators
+#endif
 #include <Engine/Base/Console.h>
 #include <Engine/Templates/DynamicContainer.h>
 #include <Engine/Templates/DynamicContainer.cpp>

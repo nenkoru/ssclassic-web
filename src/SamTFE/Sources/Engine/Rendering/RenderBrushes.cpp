@@ -368,8 +368,14 @@ ScenePolygon *CRenderer::SortTranslucentPolygons(ScenePolygon *pspoFirst)
   }
 
   // sort the container
+#ifdef __EMSCRIPTEN__
+  // web port perf: same algorithm as the linked qsort, comparator inlined (port/common/FastSort.h)
+  se1_qsort((CTranslucentPolygon **)re_atcTranslucentPolygons.GetArrayOfPointers(), re_atcTranslucentPolygons.Count(),
+    [](CTranslucentPolygon *ptp0, CTranslucentPolygon *ptp1) { return CompareTranslucentPolygons(*ptp0, *ptp1); });
+#else
   qsort(re_atcTranslucentPolygons.GetArrayOfPointers(), re_atcTranslucentPolygons.Count(),
       sizeof(CTranslucentPolygon *), qsort_CompareTranslucentPolygons);
+#endif
 
   // make empty new list of polygons
   ScenePolygon *pspoNewFirst = NULL;
