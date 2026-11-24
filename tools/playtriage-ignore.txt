@@ -8,3 +8,6 @@ Gamma, brightness and contrast are not adjustable
 ^Cannot load variable from 'Data/Var/ModName\.var'
 ^Cannot open file `/Data/Var/ModName\.var'
 didn't shut down properly last time
+# upstream dropped gfx_fProbeRatio; the retail Scripts/GLSettings/Initial.ini still sets it
+Identifier 'gfx_fProbeRatio' is not declared
+Initial\.ini\(88\): Cannot assign: different types
