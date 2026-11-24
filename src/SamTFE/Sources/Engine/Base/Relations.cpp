@@ -24,8 +24,11 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 // CRelationSrc
 
 // Construction/destruction.
+__uint64 _uqRelationStamp = 0;
+
 CRelationSrc::CRelationSrc(void)
 {
+  Touch();
 }
 
 CRelationSrc::~CRelationSrc(void)
@@ -73,6 +76,7 @@ CRelationLnk::CRelationLnk(void)
 CRelationLnk::~CRelationLnk(void)
 {
   // unlink from both domain and codomain members
+  rl_prsSrc->Touch();   // web port: the domain member's list changes (Relations.h)
   rl_lnSrc.Remove();
   rl_lnDst.Remove();
 }
@@ -98,6 +102,7 @@ void AddRelationPair(CRelationSrc &rsSrc, CRelationDst &rdDst)
   lnk.rl_prdDst = &rdDst;
   // add the link to the domain and codomain members
   rsSrc.AddTail(lnk.rl_lnSrc);
+  rsSrc.Touch();
   rdDst.AddTail(lnk.rl_lnDst);
 }
 void AddRelationPairTailTail(CRelationSrc &rsSrc, CRelationDst &rdDst)
@@ -108,6 +113,7 @@ void AddRelationPairTailTail(CRelationSrc &rsSrc, CRelationDst &rdDst)
   lnk.rl_prdDst = &rdDst;
   // add the link to the domain and codomain members
   rsSrc.AddTail(lnk.rl_lnSrc);
+  rsSrc.Touch();
   rdDst.AddTail(lnk.rl_lnDst);
 }
 void  AddRelationPairHeadHead(CRelationSrc &rsSrc, CRelationDst &rdDst)
@@ -118,5 +124,6 @@ void  AddRelationPairHeadHead(CRelationSrc &rsSrc, CRelationDst &rdDst)
   lnk.rl_prdDst = &rdDst;
   // add the link to the domain and codomain members
   rsSrc.AddHead(lnk.rl_lnSrc);
+  rsSrc.Touch();
   rdDst.AddHead(lnk.rl_lnDst);
 }

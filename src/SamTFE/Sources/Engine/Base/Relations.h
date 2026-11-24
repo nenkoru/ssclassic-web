@@ -21,10 +21,18 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include <Engine/Base/Lists.h>
 
+// web port (perf): every change to a domain member's link list (a link added or removed) gives the
+// member a new stamp from one global counter, so a cache derived from the list (the ray caster's
+// per-sector entity lists, World/WorldRayCasting.cpp) can tell in O(1) that it is still exact.
+// Stamps are never reused, so a stale cache can't match a new list at the same address.
+extern ENGINE_API __uint64 _uqRelationStamp;
+
 // Object representing a link at the member of relation domain.
 class CRelationSrc : public CListHead {
 public:
 // implementation:
+  __uint64 rs_uqStamp;   // changes whenever a link is added or removed (see above)
+  inline void Touch(void) { rs_uqStamp = ++_uqRelationStamp; };
 // interface:
   // Construction/destruction.
   ENGINE_API CRelationSrc(void);

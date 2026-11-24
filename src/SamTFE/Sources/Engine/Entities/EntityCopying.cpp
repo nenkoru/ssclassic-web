@@ -133,6 +133,8 @@ void CEntity::Copy(CEntity &enOther, ULONG ulFlags)
 
   // copy base class data
   en_RenderType     = enOther.en_RenderType;
+  extern ULONG _ulRayCastTypeChanges;   // web port: the render type may change (Entity.cpp)
+  _ulRayCastTypeChanges++;
   en_ulPhysicsFlags = enOther.en_ulPhysicsFlags;
   en_ulCollisionFlags = enOther.en_ulCollisionFlags;
   en_ulFlags        = enOther.en_ulFlags &
