@@ -336,6 +336,27 @@ void CClipMove::ClipMovingSphereToBrushPolygon(const CMovingSphere &msMoving,
   FLOAT fDistance0 = plPolygon.PointDistance(msMoving.ms_vRelativeCenter0)-msMoving.ms_fR;
   FLOAT fDistance1 = plPolygon.PointDistance(msMoving.ms_vRelativeCenter1)-msMoving.ms_fR;
 
+#ifdef __EMSCRIPTEN__
+  // web port perf: a sphere whose path stays more than its radius (plus a margin) away from the
+  // polygon's plane can't hit the polygon (that needs fDistance0>=0 && fDistance1<0), nor an edge
+  // cylinder or a vertex sphere below: edges and vertices lie in the plane, so every point of
+  // those shapes is within ms_fR of it. Those two accept hits at a fraction up to
+  // cm_fMovementFraction, which starts at 2, so the path checked runs to twice the movement
+  // (fDistance2 at fraction 2; the distance is linear along the path). The margin is orders of
+  // magnitude above both the vertices' distance from the float plane (<0.0003 in the demo
+  // levels) and the rounding of the quadratic solves. Over a floor or next to a wall, a crowd's
+  // upper spheres skip their edge loops this way.
+  {
+    const FLOAT fMargin = 0.1f;
+    const FLOAT fBehind = -2*msMoving.ms_fR-fMargin;
+    const FLOAT fDistance2 = 2*fDistance1-fDistance0;
+    if ((fDistance0>fMargin && fDistance1>fMargin && fDistance2>fMargin)
+      ||(fDistance0<fBehind && fDistance1<fBehind && fDistance2<fBehind)) {
+      return;
+    }
+  }
+#endif
+
   // if first point is in front and second point is behind
   if (fDistance0>=0 && fDistance1<0) {
     // calculate fraction of line before intersection
