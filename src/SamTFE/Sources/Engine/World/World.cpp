@@ -374,6 +374,30 @@ void CWorld::AddTimer(CRationalEntity *penThinker)
     // remove it
     penThinker->en_lnInTimers.Remove();
   }
+#if defined(__EMSCRIPTEN__)
+  // Web port (perf): the scan below walks from the head, so with a horde (every enemy re-arms its
+  // timer every tick, mostly to the latest time) inserting n timers costs O(n^2) per tick; it was
+  // 4.4% of the worker in PerformAttack_03 at stress1000. The list is always sorted
+  // non-decreasing (every insert goes through here, removals keep order, AdjustLateTimers raises
+  // a prefix to the current time, a load restores the saved order), so "insert before the first
+  // element with t >= x" is the same place as "insert after the last element with t < x", which
+  // a scan from the tail finds in O(1) for the usual case. A NaN time breaks the ordering
+  // argument, so after the first one we fall back to the original scan for the rest of the run.
+  static BOOL _bTimerNaN = FALSE;
+  const TIME tmNew = penThinker->en_timeTimer;
+  if (tmNew!=tmNew) {
+    _bTimerNaN = TRUE;
+  }
+  if (!_bTimerNaN) {
+    CListNode *pln = &wo_lhTimers.IterationTail();
+    while (!pln->IsHeadMarker() &&
+      ((CRationalEntity *)((UBYTE *)pln - _offsetof(CRationalEntity, en_lnInTimers)))->en_timeTimer>=tmNew) {
+      pln = &pln->IterationPred();
+    }
+    pln->IterationInsertAfter(penThinker->en_lnInTimers);
+    return;
+  }
+#endif
   // for each entity in the thinker list
   FOREACHINLISTKEEP(CRationalEntity, en_lnInTimers, wo_lhTimers, iten) {
     // if the entity in list has greater or same think time than the one to add
