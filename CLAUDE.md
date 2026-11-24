@@ -42,6 +42,7 @@ page. The user plays the `full` build; the tests use the free demo data. Longer 
 | build-web-tfe-mt | demo | 8094 | most tests |
 | build-web-tfe-rel | demo, single-threaded | 8092 | |
 | build-test-mt / -st | demo | own | `tools/test.sh` |
+| build-pub-mt/byod, build-pub-st/byod | none: the player imports their folder (`notes/user-data.md`) | 8088 (`serve pub`) | the public bundle (`tools/package.sh`) |
 
 Data is packed into the build: after changing files under a build's data dir, relink
 (`touch port/common/Se1ModBots.cpp && node tools/dev.mjs build full`).

@@ -29,10 +29,12 @@ const SERVICES = {
   mt: devserver(8094, 'build-web-tfe-mt'),       // demo data, threaded: what the tests use
   rel: devserver(8092, 'build-web-tfe-rel'),
   web: devserver(8090, 'build-web-tfe'),         // single-threaded (JSPI)
+  // the public page: no game data, the player imports their folder (notes/user-data.md)
+  pub: { ...devserver(8088, 'build-pub-mt/byod'), build: 'build-pub-mt', target: 'serioussam_byod' },
   switch: { cmd: ['cargo', 'run', '-p', 'se1-server', '--release'], cwd: 'rust', port: 9002, url: 'ws://127.0.0.1:9002', ready: 300 },
   se1d: { cmd: ['node', 'tools/se1d.mjs', 'serve'], port: 9230, url: 'http://127.0.0.1:9230/status', ready: 15 },
 };
-const BUILDS = ['build-web-tfe-full', 'build-web-tfe-mt', 'build-web-tfe-rel', 'build-web-tfe', 'build-test-mt', 'build-test-st'];
+const BUILDS = ['build-web-tfe-full', 'build-web-tfe-mt', 'build-web-tfe-rel', 'build-web-tfe', 'build-test-mt', 'build-test-st', 'build-pub-mt/byod', 'build-pub-st/byod'];
 const RUN = join(ROOT, 'data/dev/run'), LOGS = join(ROOT, 'data/dev/logs');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
@@ -124,10 +126,11 @@ function buildStatus() {
   for (const b of BUILDS) {
     const dir = join(ROOT, b);
     if (!existsSync(dir)) continue;
+    const root = join(ROOT, b.split('/')[0]);   // <build>/byod: the cache is in the build dir
     let wasm;
     try { wasm = statSync(join(dir, 'serioussam.wasm')).mtimeMs; } catch { lines.push(`  ${b.padEnd(20)} not built`); continue; }
     let [m, f] = [srcM, srcF];
-    const data = (readFileSync(join(dir, 'CMakeCache.txt'), 'utf8').match(/^DATA_DIR:[A-Z]+=(.*)$/m) || [])[1];
+    const data = (readFileSync(join(root, 'CMakeCache.txt'), 'utf8').match(/^DATA_DIR:[A-Z]+=(.*)$/m) || [])[1];
     if (data && existsSync(data)) { const [dm, df] = newest(walk(data)); if (dm > m) [m, f] = [dm, df]; }
     const age = ago(Date.now() - wasm);
     lines.push(m > wasm
@@ -182,7 +185,8 @@ function build(args) {
   for (const a of args) {
     const dir = SERVICES[a]?.build || a;
     const t0 = Date.now();
-    const r = spawnSync('ninja', ['-C', dir], { cwd: ROOT, stdio: 'inherit' });
+    const target = SERVICES[a]?.target;
+    const r = spawnSync('ninja', ['-C', dir, ...(target ? [target] : [])], { cwd: ROOT, stdio: 'inherit' });
     console.log(`${dir}: ${r.status === 0 ? 'built' : 'FAILED'} in ${ago(Date.now() - t0)}`);
     if (r.status !== 0) return r.status || 1;
   }

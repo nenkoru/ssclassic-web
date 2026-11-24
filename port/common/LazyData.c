@@ -10,6 +10,9 @@
  *     and the read waits: the threaded build posts the request to the main thread and waits on a
  *     futex (as gl1shim.c does), the single-threaded build awaits it through JSPI (or, inside a
  *     script function where JSPI can't suspend, reads with a synchronous XHR).
+ * A user-data build (no game data of its own, the player imports theirs: port/web/userdata.js)
+ * adds SE1Lazy/user.txt, written by the page before main(); its files are read the same way,
+ * and the page serves them from the player's copy in OPFS.
  * The engine reads data only through fopen/fread/fseek/ftell (Stream.cpp, Unzip.cpp); its
  * _open + fstat calls (time stamps) see the placeholder, which is fine.
  */
@@ -35,28 +38,31 @@
 
 FILE *__real_fopen(const char *path, const char *mode);
 
-typedef struct { char *path; char key[17]; uint32_t size; } LzFile;
+typedef struct { char *path; char key[17]; uint32_t size; const char *ds; } LzFile;
 typedef struct { int file; uint32_t idx, len; uint64_t used; uint8_t *data; } Slot;
 typedef struct { int file; uint32_t pos, lastEnd; } Handle;
 
 static LzFile *_files;
 static int _nfiles;
-static char _dataset[17];
+static char _dataset[17];      /* the build's lazy files (gamedata/) */
+static char _userDataset[17];  /* the player's own files (port/web/userdata.js), if any */
 static pthread_once_t _once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t _mx = PTHREAD_MUTEX_INITIALIZER;
 static Slot _slots[CACHE_SLOTS];
 static uint64_t _tick;
 
-static void load_manifest(void)
+/* a manifest: "dataset <16 chars>", then "<key> <size> <path>" per file */
+static void load_one(const char *mpath, char *ds)
 {
-  FILE *f = __real_fopen("/SE1Lazy/manifest.txt", "rb");
-  if (!f) return;   /* a build without lazy data (SE1_LAZY_DATA=OFF) */
+  FILE *f = __real_fopen(mpath, "rb");
+  if (!f) return;
   char line[1200];
-  int cap = 0;
+  static int cap;
+  int before = _nfiles;
   while (fgets(line, sizeof(line), f)) {
     size_t n = strlen(line);
     while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
-    if (!strncmp(line, "dataset ", 8)) { strncpy(_dataset, line + 8, 16); _dataset[16] = 0; continue; }
+    if (!strncmp(line, "dataset ", 8)) { strncpy(ds, line + 8, 16); ds[16] = 0; continue; }
     char *sp1 = strchr(line, ' '), *sp2 = sp1 ? strchr(sp1 + 1, ' ') : NULL;
     if (!sp1 || !sp2 || sp1 - line != 16) continue;
     if (_nfiles == cap) { cap = cap ? cap * 2 : 64; _files = (LzFile *)realloc(_files, cap * sizeof(LzFile)); }
@@ -64,9 +70,16 @@ static void load_manifest(void)
     memcpy(z->key, line, 16); z->key[16] = 0;
     z->size = (uint32_t)strtoul(sp1 + 1, NULL, 10);
     z->path = strdup(sp2 + 1);
+    z->ds = ds;
   }
   fclose(f);
-  printf("lazy data: %d files on demand (dataset %s)\n", _nfiles, _dataset);
+  printf("lazy data: %d files on demand from %s (dataset %s)\n", _nfiles - before, mpath, ds);
+}
+
+static void load_manifest(void)
+{
+  load_one("/SE1Lazy/manifest.txt", _dataset);   /* missing in a SE1_LAZY_DATA=OFF build */
+  load_one("/SE1Lazy/user.txt", _userDataset);   /* written by the page in a user-data build */
 }
 
 /* "/Levels//X.wld", "./Levels/X.wld" -> "Levels/X.wld" */
@@ -86,7 +99,8 @@ static int find_file(const char *path)
 {
   char p[1024];
   norm(path, p, sizeof(p));
-  for (int i = 0; i < _nfiles; i++) if (!strcasecmp(_files[i].path, p)) return i;
+  for (int i = _nfiles - 1; i >= 0; i--)   /* the last listed wins: the player's files over the build's */
+    if (!strcasecmp(_files[i].path, p)) return i;
   return -1;
 }
 
@@ -100,7 +114,7 @@ static int fetch_chunks(int fi, uint32_t first, uint32_t count, uint8_t *dst, ui
   }
   int32_t state = 0;   /* 0 pending, 1 done, -1 failed: set by the page */
   MAIN_THREAD_ASYNC_EM_ASM({ Module['se1Lazy'].fetchForThread($0, $1, $2, $3, $4, $5, $6, $7, $8); },
-                           &state, _dataset, _files[fi].key, _files[fi].path, first, count, CHUNK, dst, len);
+                           &state, _files[fi].ds, _files[fi].key, _files[fi].path, first, count, CHUNK, dst, len);
   int32_t v;
   while ((v = (int32_t)emscripten_atomic_load_u32((void *)&state)) == 0)
     emscripten_futex_wait((void *)&state, 0, 1000.0);
@@ -123,8 +137,8 @@ extern int _iSE1ShellDepth __attribute__((weak));
 static int fetch_chunks(int fi, uint32_t first, uint32_t count, uint8_t *dst, uint32_t len)
 {
   int r = (&_iSE1ShellDepth && _iSE1ShellDepth > 0)
-    ? se1_lazy_fetch_sync_js(_dataset, _files[fi].key, _files[fi].path, first, count, CHUNK, dst, len)
-    : se1_lazy_fetch_js(_dataset, _files[fi].key, _files[fi].path, first, count, CHUNK, dst, len);
+    ? se1_lazy_fetch_sync_js(_files[fi].ds, _files[fi].key, _files[fi].path, first, count, CHUNK, dst, len)
+    : se1_lazy_fetch_js(_files[fi].ds, _files[fi].key, _files[fi].path, first, count, CHUNK, dst, len);
   return r == 1 ? 0 : -1;
 }
 #endif

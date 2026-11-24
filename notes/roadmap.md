@@ -11,9 +11,20 @@ What's next, in rough priority order. Details and measurements live in notes/ren
 2. ~~**Lazy data loading with an OPFS cache.**~~ Done (2026-11-24): the big files come on demand in
    256 KiB chunks and stay in OPFS. Full data, 100 Mbit / 40 ms: menu in 14.3 s instead of 33.9 s,
    73 MB instead of 393 MB; a reload reads no game data from the network (notes/lazy-data.md).
-   Next there: a boot prefetch list for high-latency links.
-3. **Platform items below:** public hosting of what the demo data's license allows, checks on real
-   phones and pads.
+   Next there: a boot prefetch list for high-latency links (only for builds that serve data).
+3. **Ship it: put the game where people can play.**
+   - ~~Bring your own data.~~ Done (2026-11-24): neither the retail data nor the demo may be served,
+     so the public page carries the engine and the repo's GPL files only (a 34 MB bundle). The
+     player picks their game folder once; it's copied into OPFS and the big files are read from
+     there on demand (notes/user-data.md, `tools/userdatatest.mjs`, the "user data" steps in
+     `tools/test.sh`). It passes with retail data on a plain static server, threaded through
+     `coi-sw.js` and single-threaded.
+   - The boot prefetch list is dropped for the public site: with the player's own files there is
+     nothing slow to fetch.
+   - **Deploy** (`tools/package.sh <out> build-pub-mt/byod build-pub-st/byod`): the host, the
+     domain and a neutral page title ("Serious Sam" is a trademark) are the user's call.
+   - **Real devices:** phones, pads, Safari (`createWritable`), folder picking on mobile (a zip
+     import?).
 4. **CI** (branch `ci-workflow`): when the user says so; it needs a token with the `workflow` scope.
 
 ### Later: bot nav maps
@@ -96,8 +107,9 @@ What's next, in rough priority order. Details and measurements live in notes/ren
 - **Data loading:** lazy fetch plus an OPFS cache: done (notes/lazy-data.md). Still open: a boot
   prefetch list, compressed textures where supported (notes/plan.md, performance item 5).
 - **Hosting:** `tools/package.sh` builds a folder any static host can serve (threaded build via
-  `coi-sw.js` or `_headers`, single-threaded fallback, landing page). Still open: the actual public
-  deployment; the demo data's license decides what may be served.
+  `coi-sw.js` or `_headers`, single-threaded fallback, landing page). No game data may be served, so
+  the public bundle is made of the user-data pages (`<build>/byod/`, notes/user-data.md). Still
+  open: the actual deployment (host, domain, name).
 - **Input:** touch controls (`port/web/touch.js`), game controllers with aim assist
   (`port/web/gamepad.js`, `port/common/AimAssist.cpp`); all in `notes/controls.md`. Still open: a
   check on real phones and real pads.

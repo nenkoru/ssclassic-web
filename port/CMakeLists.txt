@@ -151,56 +151,94 @@ if(SE1_RUSTMOD)
   target_include_directories(engine PRIVATE "${ROOT}/port/common")
 endif()
 
-# --- the executable ---
-add_executable(serioussam ${S_SAM} "${ROOT}/port/${GAME}/static_symbols.cpp")
-target_link_libraries(serioussam
-  "-Wl,--whole-archive" engine engine_safemath entities game shaders "-Wl,--no-whole-archive"
-)
-if(SE1_RUSTMOD)
-  add_dependencies(serioussam rustmod)
-  target_compile_definitions(serioussam PRIVATE SE1_WITH_RUSTMOD=1)
-  target_link_libraries(serioussam "${RUSTMOD_LIB}")
+# --- the executables ---
+# se1_add_game(<target> <data dir> <user data> <out dir>): one page (<out dir>/serioussam.html)
+# linked from the libraries above. With <user data> ON it carries no game data: the player imports their own
+# (port/web/userdata.js, notes/user-data.md).
+set(SE1_PRE_JS isolate pre audio gfx gfx-webgpu net lobby input touch gamepad gyro survivors persist
+    lazydata playtest archipelago)
+function(se1_add_game tgt data_dir user_data out)
+  add_executable(${tgt} ${S_SAM} "${ROOT}/port/${GAME}/static_symbols.cpp")
+  set_target_properties(${tgt} PROPERTIES SUFFIX ".html" OUTPUT_NAME serioussam RUNTIME_OUTPUT_DIRECTORY "${out}")
+  target_link_libraries(${tgt}
+    "-Wl,--whole-archive" engine engine_safemath entities game shaders "-Wl,--no-whole-archive"
+  )
+  if(SE1_RUSTMOD)
+    add_dependencies(${tgt} rustmod)
+    target_compile_definitions(${tgt} PRIVATE SE1_WITH_RUSTMOD=1)
+    target_link_libraries(${tgt} "${RUSTMOD_LIB}")
+  endif()
+  set(prejs "")
+  set(deps "")
+  foreach(js ${SE1_PRE_JS})
+    if(js STREQUAL "isolate" AND NOT SE1_THREADS)
+      continue()
+    endif()
+    list(APPEND prejs "SHELL:--pre-js ${ROOT}/port/web/${js}.js")
+    list(APPEND deps "${ROOT}/port/web/${js}.js")
+  endforeach()
+  if(user_data)
+    # which game the page expects the player to bring (read by userdata.js)
+    if(SE1_DEMO)
+      set(demo true)
+    else()
+      set(demo false)
+    endif()
+    set(cfg "${CMAKE_CURRENT_BINARY_DIR}/${tgt}-config.js")
+    file(WRITE "${cfg}" "Module['se1UserDataConfig'] = { game: 'tfe', demo: ${demo} };\n")
+    list(APPEND prejs "SHELL:--pre-js ${cfg}" "SHELL:--pre-js ${ROOT}/port/web/userdata.js")
+    list(APPEND deps "${cfg}" "${ROOT}/port/web/userdata.js")
+  endif()
+  target_link_options(${tgt} PRIVATE
+    ${PORT_FLAGS} ${EH_FLAGS} ${OPT_FLAGS}
+    $<$<BOOL:${SE1_DEV}>:-sASSERTIONS=1>
+    $<$<OR:$<BOOL:${SE1_DEV}>,$<BOOL:${SE1_PROFILE}>>:--profiling-funcs>
+    ${prejs}
+    "SHELL:--shell-file ${ROOT}/port/web/shell.html" "SHELL:--post-js ${ROOT}/port/web/bench.js"
+    # (SHELL: keeps each flag with its argument; target_link_options would de-duplicate "--pre-js")
+    -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=256MB -sSTACK_SIZE=4MB
+    -Wl,--wrap=fopen -Wl,--wrap=open -Wl,--wrap=opendir   # case-insensitive opens (port/common/CaseFs.c)
+    -Wl,--wrap=qsort   # introsort instead of musl's smoothsort (port/common/FastSort.c)
+    -Wl,--wrap=socket -Wl,--wrap=bind -Wl,--wrap=sendto -Wl,--wrap=recvfrom -Wl,--wrap=fcntl -Wl,--wrap=close -Wl,--wrap=gethostname -Wl,--wrap=gethostbyname   # virtual LAN (port/common/NetLan.c)
+    -sFULL_ES3=1 -sMAX_WEBGL_VERSION=2 -sMIN_WEBGL_VERSION=2
+    $<IF:$<BOOL:${SE1_THREADS}>,-sPROXY_TO_PTHREAD,-sJSPI=1>
+    $<$<BOOL:${SE1_THREADS}>:-sPTHREAD_POOL_SIZE=4>
+    $<$<BOOL:${SE1_THREADS}>:-sWASMFS>   # filesystem in wasm: no per-read proxy to the main thread
+    -sFORCE_FILESYSTEM=1
+    $<$<NOT:$<BOOL:${SE1_THREADS}>>:-lidbfs.js>   # WASMFS (threaded build) persists via its OPFS backend instead
+    -sEXPORTED_RUNTIME_METHODS=FS,callMain,HEAPU8,HEAP16,HEAPU16,HEAPU32,HEAP32,HEAPF32,UTF8ToString,stringToUTF8,lengthBytesUTF8,addRunDependency,removeRunDependency
+  )
+  if(user_data)
+    # only what the repo ships (tools/basedata.py), split like any lazy build
+    add_custom_command(TARGET ${tgt} PRE_LINK
+      COMMAND python3 "${ROOT}/tools/basedata.py" --game "${GAME}" --out "${out}/data-base"
+      COMMAND python3 "${ROOT}/tools/lazydata.py" --data "${out}/data-base" --out "${out}" VERBATIM)
+    target_link_options(${tgt} PRIVATE "--preload-file" "${out}/data-boot@/" "--exclude-file" "*.DS_Store")
+  elseif(data_dir AND SE1_LAZY_DATA)
+    # big files on demand (notes/lazy-data.md): tools/lazydata.py splits the data dir on every link
+    # into data-boot/ (the preload bundle: small files, empty placeholders, SE1Lazy/manifest.txt) and
+    # gamedata/ (the big files, fetched with HTTP Range by port/web/lazydata.js)
+    add_custom_command(TARGET ${tgt} PRE_LINK
+      COMMAND python3 "${ROOT}/tools/lazydata.py" --data "${data_dir}" --out "${out}" VERBATIM)
+    target_link_options(${tgt} PRIVATE "--preload-file" "${out}/data-boot@/" "--exclude-file" "*.DS_Store")
+  elseif(data_dir)
+    target_link_options(${tgt} PRIVATE "--preload-file" "${data_dir}@/" "--exclude-file" "*.DS_Store")
+  endif()
+  if(SE1_THREADS)
+    # cross-origin isolation for hosts that can't send COOP/COEP (registered by port/web/isolate.js)
+    add_custom_command(TARGET ${tgt} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ROOT}/port/web/coi-sw.js" "${out}/coi-sw.js")
+  endif()
+  # --pre-js/--post-js files are link inputs: relink when they change
+  set_property(TARGET ${tgt} APPEND PROPERTY LINK_DEPENDS ${deps}
+    "${ROOT}/port/web/bench.js" "${ROOT}/port/web/shell.html" "${ROOT}/tools/lazydata.py")
+endfunction()
+
+se1_add_game(serioussam "${DATA_DIR}" OFF "${CMAKE_CURRENT_BINARY_DIR}")
+# The user-data page, in <build>/byod/: what a public host serves (no game data of its own).
+# Not part of "all": build it with `ninja -C <build> serioussam_byod`.
+option(SE1_USER_DATA "Add the serioussam_byod target (no game data; the player imports theirs)" ON)
+if(SE1_USER_DATA)
+  se1_add_game(serioussam_byod "" ON "${CMAKE_CURRENT_BINARY_DIR}/byod")
+  set_target_properties(serioussam_byod PROPERTIES EXCLUDE_FROM_ALL ON)
 endif()
-target_link_options(serioussam PRIVATE
-  ${PORT_FLAGS} ${EH_FLAGS} ${OPT_FLAGS}
-  $<$<BOOL:${SE1_DEV}>:-sASSERTIONS=1>
-  $<$<OR:$<BOOL:${SE1_DEV}>,$<BOOL:${SE1_PROFILE}>>:--profiling-funcs>
-  "$<$<BOOL:${SE1_THREADS}>:SHELL:--pre-js ${ROOT}/port/web/isolate.js>"
-  "SHELL:--pre-js ${ROOT}/port/web/pre.js" "SHELL:--pre-js ${ROOT}/port/web/audio.js" "SHELL:--pre-js ${ROOT}/port/web/gfx.js" "SHELL:--pre-js ${ROOT}/port/web/gfx-webgpu.js" "SHELL:--pre-js ${ROOT}/port/web/net.js" "SHELL:--pre-js ${ROOT}/port/web/lobby.js" "SHELL:--pre-js ${ROOT}/port/web/input.js" "SHELL:--pre-js ${ROOT}/port/web/touch.js" "SHELL:--pre-js ${ROOT}/port/web/gamepad.js" "SHELL:--pre-js ${ROOT}/port/web/gyro.js" "SHELL:--pre-js ${ROOT}/port/web/survivors.js"
-  "SHELL:--pre-js ${ROOT}/port/web/pre.js" "SHELL:--pre-js ${ROOT}/port/web/audio.js" "SHELL:--pre-js ${ROOT}/port/web/gfx.js" "SHELL:--pre-js ${ROOT}/port/web/gfx-webgpu.js" "SHELL:--pre-js ${ROOT}/port/web/net.js" "SHELL:--pre-js ${ROOT}/port/web/input.js" "SHELL:--pre-js ${ROOT}/port/web/survivors.js"
-  "SHELL:--pre-js ${ROOT}/port/web/persist.js" "SHELL:--pre-js ${ROOT}/port/web/lazydata.js" "SHELL:--pre-js ${ROOT}/port/web/playtest.js" "SHELL:--pre-js ${ROOT}/port/web/archipelago.js"
-  "SHELL:--shell-file ${ROOT}/port/web/shell.html" "SHELL:--post-js ${ROOT}/port/web/bench.js"
-  # (SHELL: keeps each flag with its argument; target_link_options would de-duplicate "--pre-js")
-  -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=256MB -sSTACK_SIZE=4MB
-  -Wl,--wrap=fopen -Wl,--wrap=open -Wl,--wrap=opendir   # case-insensitive opens (port/common/CaseFs.c)
-  -Wl,--wrap=qsort   # introsort instead of musl's smoothsort (port/common/FastSort.c)
-  -Wl,--wrap=socket -Wl,--wrap=bind -Wl,--wrap=sendto -Wl,--wrap=recvfrom -Wl,--wrap=fcntl -Wl,--wrap=close -Wl,--wrap=gethostname -Wl,--wrap=gethostbyname   # virtual LAN (port/common/NetLan.c)
-  -sFULL_ES3=1 -sMAX_WEBGL_VERSION=2 -sMIN_WEBGL_VERSION=2
-  $<IF:$<BOOL:${SE1_THREADS}>,-sPROXY_TO_PTHREAD,-sJSPI=1>
-  $<$<BOOL:${SE1_THREADS}>:-sPTHREAD_POOL_SIZE=4>
-  $<$<BOOL:${SE1_THREADS}>:-sWASMFS>   # filesystem in wasm: no per-read proxy to the main thread
-  -sFORCE_FILESYSTEM=1
-  $<$<NOT:$<BOOL:${SE1_THREADS}>>:-lidbfs.js>   # WASMFS (threaded build) persists via its OPFS backend instead
-  -sEXPORTED_RUNTIME_METHODS=FS,callMain,HEAPU8,HEAP16,HEAPU16,HEAPU32,HEAP32,HEAPF32,UTF8ToString,stringToUTF8,lengthBytesUTF8,addRunDependency,removeRunDependency
-)
-if(DATA_DIR AND SE1_LAZY_DATA)
-  # big files on demand (notes/lazy-data.md): tools/lazydata.py splits DATA_DIR on every link into
-  # data-boot/ (the preload bundle: small files, empty placeholders, SE1Lazy/manifest.txt) and
-  # gamedata/ (the big files, fetched with HTTP Range by port/web/lazydata.js)
-  add_custom_command(TARGET serioussam PRE_LINK
-    COMMAND python3 "${ROOT}/tools/lazydata.py" --data "${DATA_DIR}" --out "${CMAKE_CURRENT_BINARY_DIR}" VERBATIM)
-  target_link_options(serioussam PRIVATE "--preload-file" "${CMAKE_CURRENT_BINARY_DIR}/data-boot@/" "--exclude-file" "*.DS_Store")
-elseif(DATA_DIR)
-  target_link_options(serioussam PRIVATE "--preload-file" "${DATA_DIR}@/" "--exclude-file" "*.DS_Store")
-endif()
-set_target_properties(serioussam PROPERTIES SUFFIX ".html")
-if(SE1_THREADS)
-  # cross-origin isolation for hosts that can't send COOP/COEP (registered by port/web/isolate.js)
-  add_custom_command(TARGET serioussam POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ROOT}/port/web/coi-sw.js" "$<TARGET_FILE_DIR:serioussam>/coi-sw.js")
-  set_property(TARGET serioussam APPEND PROPERTY LINK_DEPENDS "${ROOT}/port/web/isolate.js")
-endif()
-# --pre-js/--post-js files are link inputs: relink when they change
-set_property(TARGET serioussam APPEND PROPERTY LINK_DEPENDS
-  "${ROOT}/port/web/pre.js" "${ROOT}/port/web/audio.js" "${ROOT}/port/web/gfx.js" "${ROOT}/port/web/gfx-webgpu.js" "${ROOT}/port/web/net.js" "${ROOT}/port/web/lobby.js" "${ROOT}/port/web/input.js" "${ROOT}/port/web/touch.js" "${ROOT}/port/web/gamepad.js" "${ROOT}/port/web/gyro.js" "${ROOT}/port/web/survivors.js" "${ROOT}/port/web/persist.js" "${ROOT}/port/web/lazydata.js" "${ROOT}/port/web/playtest.js" "${ROOT}/port/web/archipelago.js" "${ROOT}/port/web/bench.js"
-  "${ROOT}/port/web/shell.html")

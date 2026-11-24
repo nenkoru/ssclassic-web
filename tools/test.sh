@@ -24,7 +24,8 @@
 #   - timedemo:     one timedemo run completes, no frame over SE1_MAX_FRAME_MS (no fps assertion)
 # plus a two-browser co-op test on the threaded build (tools/mptest.mjs, also with --rtc for WebRTC,
 # and tools/lobbytest.mjs; needs cargo for the LAN switch, otherwise skipped), the static hosting
-# bundle on a plain static server (tools/package.sh + tools/packagetest.mjs), the unit tests (tests/run.sh) and the Rust tests (cargo test --workspace).
+# bundle on a plain static server (tools/package.sh + tools/packagetest.mjs), the user-data pages
+# (<build>/byod/, tools/userdatatest.mjs: import the unpacked demo folder, play from it), the unit tests (tests/run.sh) and the Rust tests (cargo test --workspace).
 # Also tools/navroamtest.mjs (bots roam a level on its baked nav graph) on the full-data build
 # (build-web-tfe-full, rebuilt incrementally unless --no-build); skipped when data/tfe-full-web is missing.
 # Prints a PASS/FAIL/SKIP summary; exit code 1 on any failure.
@@ -121,7 +122,7 @@ build_one() {   # dir threads(ON|OFF)
     emcmake cmake -S port -B "$dir" -G Ninja -DCMAKE_BUILD_TYPE=Release -DSE1_DEV=OFF -DSE1_DEMO=ON \
       -DSE1_PROFILE=ON -DSE1_RUSTMOD=ON -DSE1_THREADS="$threads" -DDATA_DIR="$DATA" || return 1
   fi
-  ninja -C "$dir"
+  ninja -C "$dir" && ninja -C "$dir" serioussam_byod   # and the user-data page, $dir/byod/
 }
 if [ $BUILD = 1 ] && [ $OWN_BUILDS = 1 ]; then
   step "build"
@@ -339,6 +340,20 @@ step "hosting bundle"
 if logged package bash tools/package.sh --force "$OUT/pkg" "$MT_DIR" "$ST_DIR" && logged package-test node tools/packagetest.mjs "$OUT/pkg"; then
   result PASS "hosting bundle" "threaded via coi-sw.js, single-threaded fallback, plain static server"
 else result FAIL "hosting bundle" "see $OUT/package*.log"; fi
+
+# ---------------------------------------------------------------- user data (bring your own files)
+UD_RAW=${SE1_DEMO_RAW_DIR:-$ROOT/data/tfe-demo-raw/Disk1}
+for b in $NAMES; do
+  step "$b: user data"
+  dir=$MT_DIR; p=$((PORT + 3)); iso=""
+  [ $b = st ] && { dir=$ST_DIR; p=$((PORT + 4)); iso=--no-isolate; }
+  if [ ! -f "$dir/byod/serioussam.html" ]; then result SKIP "$b user data" "$dir/byod not built (ninja -C $dir serioussam_byod)"
+  elif [ ! -d "$UD_RAW" ]; then result SKIP "$b user data" "no $UD_RAW (tools/fetch_demo_data.sh)"
+  elif ! serve "$dir/byod" $p $iso; then result FAIL "$b user data" "dev server on port $p did not start"
+  elif logged "userdata-$b" node tools/userdatatest.mjs "http://127.0.0.1:$p/serioussam.html" "$UD_RAW"; then
+    result PASS "$b user data" "asks for the folder, imports it into OPFS, plays a level from it"
+  else result FAIL "$b user data" "see $OUT/userdata-$b.log"; fi
+done
 
 # ---------------------------------------------------------------- optional extras
 if [ $WEBGPU = 1 ]; then

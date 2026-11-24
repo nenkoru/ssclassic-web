@@ -6,6 +6,10 @@
 // for the next visit. A server that ignores Range and sends the whole file still works: the
 // file is kept in memory for this session and served from there.
 //
+// A dataset that starts with "u" is the player's own files (user-data build, port/web/userdata.js):
+// those chunks are read from the player's copy in OPFS through Module.se1UserRead, never fetched
+// or cached again.
+//
 //   ?lazycache=0       no OPFS: every chunk from the network (tests, comparisons)
 //   Module.se1LazyBase base URL of the lazy files (default: gamedata/ next to the page)
 //   Module.se1LazyStats()  counters (network/OPFS bytes and requests, time waited)
@@ -103,10 +107,19 @@
   }
 
   // fill HEAPU8[dst .. dst+len) with chunks first .. first+count-1 of the file
+  function isUser(dataset) { return dataset.charAt(0) === 'u'; }
+
   async function fill(dataset, key, path, first, count, chunk, dst, len) {
     var t0 = performance.now();
     stats.requests++; stats.chunks += count;
     stats.files[path] = (stats.files[path] || 0) + count;   // chunks asked for, per file
+    if (isUser(dataset)) {
+      var ub = await Module['se1UserRead'](path, first * chunk, len);
+      stats.userBytes = (stats.userBytes || 0) + ub.length;
+      HEAPU8.set(ub, dst);
+      stats.waitMs += performance.now() - t0;
+      return;
+    }
     var sizes = [], parts = new Array(count), off = 0;
     for (var i = 0; i < count; i++) { sizes.push(Math.min(chunk, len - off)); off += sizes[i]; }
     var dir = null;
@@ -141,6 +154,13 @@
     stats.requests++; stats.chunks += count; stats.syncRequests = (stats.syncRequests || 0) + 1;
     stats.files[path] = (stats.files[path] || 0) + count;
     var start = first * chunk, bytes = null, whole = wholeDone.get(path), err;
+    if (isUser(dataset)) {
+      var ub = Module['se1UserReadSync'](path, start, len);
+      stats.userBytes = (stats.userBytes || 0) + ub.length;
+      HEAPU8.set(ub, dst);
+      stats.waitMs += performance.now() - t0;
+      return;
+    }
     if (whole) bytes = new Uint8Array(whole, start, len);
     for (var attempt = 0; attempt < 3 && !bytes; attempt++) {
       try {

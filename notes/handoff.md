@@ -101,7 +101,10 @@ Emscripten builds (CMake + ninja, Release, `SE1_THREADS`, `SE1_RUSTMOD`). Rebuil
      builds preload only `data-boot/` and fetch `gamedata/` with Range; `?lazycache=0` skips OPFS;
      a server must answer Range (tools/devserver.py does; one that sends 200 still works but
      downloads whole files);
-   - public hosting (what the demo data's license allows);
+   - ~~public hosting~~ the bundle is ready: no game data may be served, so the public pages
+     are the user-data builds (`<build>/byod/`, target `serioussam_byod`, notes/user-data.md); the
+     player imports their own folder into OPFS. Deploying waits for the user (host, domain, a
+     neutral name);
    - real-device checks for touch and pads;
    - interest management and STUN/TURN for the 128-player goal;
    - engine visibility code performance.
@@ -113,8 +116,12 @@ Emscripten builds (CMake + ninja, Release, `SE1_THREADS`, `SE1_RUSTMOD`). Rebuil
 - **`tools/test.sh` failures that are not regressions** (2026-11-24; each one fails the same way on
   a build without lazy data): `st post-processing` (`se1gfx.capture` reads a blank buffer in the
   single-threaded build), `st bots` "bots fight" (no bot reaches Fight in time), `mt quality
-  controller` "restores when fast" (no lower level within 90 s). `mt input` and `multiplayer
-  WebRTC` failed once and passed on rerun. Worth fixing, one at a time.
+  controller` "restores when fast" (no lower level within 90 s). `mt input`, `multiplayer
+  WebRTC` and `st threat warnings` ("hurt direction": no hit from behind in time) failed once and
+  passed on rerun. Worth fixing, one at a time.
+- **WASMFS before `main()`:** the FS JS API aborts in `preRun` (the preloaded files are only made
+  during runtime init), so write files in `onRuntimeInitialized`. Preloaded directories are mode
+  0555: `FS.chmod` them before adding files (port/web/userdata.js does both).
 - The browser pane in the desktop app keeps the game paused ("Click to play"). Use the headless test
   scripts (tools/*.mjs) for checks; they emulate focus and pointer lock.
 - **Bot status line format** (the tests parse it):
