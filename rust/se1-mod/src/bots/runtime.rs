@@ -383,6 +383,11 @@ impl Runtime {
             self.bake(h);
             return;
         }
+        // only bots use the graph: without them, a live build is up to 4 ms a tick for nothing
+        // (with Survivors' hordes its rays cost the most); it starts when the first bot is wanted
+        if self.build.is_none() && self.bots.is_empty() && h.page_option("se1Bots") <= 0.0 {
+            return;
+        }
         if self.build.is_none() {
             let Some(human) = h.humans(1).into_iter().next() else {
                 return;

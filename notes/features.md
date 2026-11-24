@@ -53,6 +53,8 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
 | Persistence (saves, settings) | ✅ | port/common/Persist.cpp, port/web/persist.js | — | persisttest | — |
 | Lazy data (big files on demand, OPFS cache) | ✅ | tools/lazydata.py (build split), port/common/LazyData.c (`fopen` hook in CaseFs.c), port/web/lazydata.js, Range in tools/devserver.py | build `SE1_LAZY_DATA` (on), `?lazycache=0` | menutime --check-lazy, test_lazydata.py, test_devserver.py | — |
 | User data (the player's own game files) | ✅ | port/web/userdata.js, tools/basedata.py, `u` datasets in LazyData.c + lazydata.js, target `serioussam_byod` (port/CMakeLists.txt) | build `SE1_USER_DATA` (on; `<build>/byod/`), `?userdata=reset` | userdatatest | lazy data |
+| Simulation hash (behaviour oracle) | ✅ | port/common/SimHash.cpp, SessionState.cpp hook (1 call, `__EMSCRIPTEN__`) | `?simhash=1` | perfbench --check | — |
+| Perf bench | ✅ | tools/perfbench.mjs, tools/perfsnap.py | — | — | simulation hash |
 | Static hosting / packaging | ✅ | port/web/{isolate,coi-sw}.js, tools/package.sh, landing.html | — | packagetest | — |
 | Multiplayer: virtual LAN switch | ✅ | rust/se1-server, port/common/NetLan.c, port/web/net.js | `?room=`, `&host=1` | mptest | — |
 | Multiplayer: WebRTC data channels | 🧪 | port/web/net.js, se1-server signal relay | `&rtc=1` | mptest --rtc (local only; internet needs STUN/TURN) | LAN |

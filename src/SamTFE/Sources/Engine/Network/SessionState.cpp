@@ -902,6 +902,9 @@ void ClearDumpStream(void)
  */
 
 extern INDEX cli_bEmulateDesync;
+#ifdef __EMSCRIPTEN__
+extern "C" void SE1_SimHashTick(CSessionState *ses);   // port/common/SimHash.cpp
+#endif
 void CSessionState::ProcessGameTick(CNetworkMessage &nmMessage, TIME tmCurrentTick)
 {
   ses_tmLastPredictionProcessed = -1;
@@ -996,6 +999,10 @@ void CSessionState::ProcessGameTick(CNetworkMessage &nmMessage, TIME tmCurrentTi
   CEntity::HandleSentEvents();
   _pfPhysicsProfile.StopTimer(CPhysicsProfile::PTI_WORLDBASETICK);
 
+#ifdef __EMSCRIPTEN__
+  // the simulation hash (port/common/SimHash.cpp, ?simhash=1): the oracle for optimizations
+  SE1_SimHashTick(this);
+#endif
   // make sync-check and send to server if needed
   MakeSynchronisationCheck();
 
