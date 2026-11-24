@@ -51,6 +51,7 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
 | Gamepad + aim assist + bullet magnetism | ✅ | port/web/gamepad.js, port/common/AimAssist.cpp, WorldRayCasting.cpp hook, Game.cpp hook | `?aimassist=0-3` | gamepadtest | input |
 | DualSense gyro (WebHID) | ✅ | port/web/gyro.js | `?gyro=0`, `?gyrosens=` | gyrotest; tools/dualsense.html (manual) | gamepad |
 | Persistence (saves, settings) | ✅ | port/common/Persist.cpp, port/web/persist.js | — | persisttest | — |
+| Lazy data (big files on demand, OPFS cache) | ✅ | tools/lazydata.py (build split), port/common/LazyData.c (`fopen` hook in CaseFs.c), port/web/lazydata.js, Range in tools/devserver.py | build `SE1_LAZY_DATA` (on), `?lazycache=0` | menutime --check-lazy, test_lazydata.py, test_devserver.py | — |
 | Static hosting / packaging | ✅ | port/web/{isolate,coi-sw}.js, tools/package.sh, landing.html | — | packagetest | — |
 | Multiplayer: virtual LAN switch | ✅ | rust/se1-server, port/common/NetLan.c, port/web/net.js | `?room=`, `&host=1` | mptest | — |
 | Multiplayer: WebRTC data channels | 🧪 | port/web/net.js, se1-server signal relay | `&rtc=1` | mptest --rtc (local only; internet needs STUN/TURN) | LAN |

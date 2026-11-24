@@ -39,7 +39,14 @@ try {
     err: Module.se1gfx ? Module.se1gfx.glError() : -1,
     cw: Module.canvas.width, ch: Module.canvas.height })`)) || '{}');
   const until = async (pred, ms) => { let s; for (let t = 0; t < ms / 250; t++) { s = await st(); if (pred(s)) return s; await sleep(250); } return s; };
-  const grab = async () => {   // one capture via the replayer (post pass runs if enabled)
+  // a capture that shows a picture: with lazy data the intro level may still be loading (a blank
+  // screen) after 60 frames, so retry for up to 30 s
+  const grab = async () => {
+    let g;
+    for (let t = 0; t < 60 * TIMEOUT_SCALE; t++) { g = await grab1(); if (g && g.colors > 8) break; await sleep(500); }
+    return g;
+  };
+  const grab1 = async () => {   // one capture via the replayer (post pass runs if enabled)
     const r = await send('Runtime.evaluate', { expression: `new Promise((res) => Module.se1gfx.capture((px, w, h) => { const c = new Set(); for (let i = 0; i < px.length; i += 4 * 499) c.add(px[i] << 16 | px[i + 1] << 8 | px[i + 2]); res(JSON.stringify({ len: px.length, w, h, colors: c.size })); }))`, awaitPromise: true });
     if (r.result?.exceptionDetails) throw new Error('capture failed: ' + (r.result.exceptionDetails.exception?.description || r.result.exceptionDetails.text));
     return JSON.parse(r.result?.result?.value || 'null');

@@ -19,6 +19,8 @@
 FILE *__real_fopen(const char *path, const char *mode);
 int __real_open(const char *path, int flags, ...);
 DIR *__real_opendir(const char *path);
+/* port/common/LazyData.c; weak so the unit test (tests/casefs_test.c) links without it */
+__attribute__((weak)) FILE *se1_lazy_fopen(const char *path, const char *mode);
 
 /* resolve `in` component by component into `out`; returns 1 if anything changed */
 static int resolve_case(const char *in, char *out, size_t cap)
@@ -62,7 +64,9 @@ static int resolve_case(const char *in, char *out, size_t cap)
 
 FILE *__wrap_fopen(const char *path, const char *mode)
 {
-  FILE *f = __real_fopen(path, mode);
+  FILE *f = se1_lazy_fopen ? se1_lazy_fopen(path, mode) : NULL;   /* fetched on demand (notes/lazy-data.md) */
+  if (f) return f;
+  f = __real_fopen(path, mode);
   if (f || errno != ENOENT || !path || !*path) return f;
   char fixed[1024];
   if (!resolve_case(path, fixed, sizeof(fixed))) { errno = ENOENT; return NULL; }

@@ -8,9 +8,13 @@ What's next, in rough priority order. Details and measurements live in notes/ren
 ### Now: finish what's open
 1. ~~**`navroamtest` in `tools/test.sh`**, skipped when the full data is missing.~~ Done (2026-11-24):
    the "nav roam (full data)" step serves build-web-tfe-full on port +2; SKIP without data/tfe-full-web.
-2. **Platform items below:** lazy data loading with an OPFS cache, public hosting of what the demo
-   data's license allows, checks on real phones and pads.
-3. **CI** (branch `ci-workflow`): when the user says so; it needs a token with the `workflow` scope.
+2. ~~**Lazy data loading with an OPFS cache.**~~ Done (2026-11-24): the big files come on demand in
+   256 KiB chunks and stay in OPFS. Full data, 100 Mbit / 40 ms: menu in 14.3 s instead of 33.9 s,
+   73 MB instead of 393 MB; a reload reads no game data from the network (notes/lazy-data.md).
+   Next there: a boot prefetch list for high-latency links.
+3. **Platform items below:** public hosting of what the demo data's license allows, checks on real
+   phones and pads.
+4. **CI** (branch `ci-workflow`): when the user says so; it needs a token with the `workflow` scope.
 
 ### Later: bot nav maps
 - **Bot nav for every level** (on hold, the user said not yet).
@@ -89,8 +93,8 @@ What's next, in rough priority order. Details and measurements live in notes/ren
 - **Saves and settings: done.** The user dir is stored in OPFS (threaded) or IndexedDB
   (single-threaded) and the page asks the engine to store its settings when the tab is hidden or
   closed (`port/common/Persist.cpp`, `port/web/persist.js`).
-- **Data loading:** lazy fetch plus an OPFS cache instead of preloading 117 MB; compressed textures
-  where supported (notes/plan.md, performance item 5).
+- **Data loading:** lazy fetch plus an OPFS cache: done (notes/lazy-data.md). Still open: a boot
+  prefetch list, compressed textures where supported (notes/plan.md, performance item 5).
 - **Hosting:** `tools/package.sh` builds a folder any static host can serve (threaded build via
   `coi-sw.js` or `_headers`, single-threaded fallback, landing page). Still open: the actual public
   deployment; the demo data's license decides what may be served.

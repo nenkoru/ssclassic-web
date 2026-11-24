@@ -153,7 +153,7 @@ if [ $UNIT = 1 ]; then
   elif logged rust bash -c 'cd rust && cargo test --workspace'; then result PASS "rust tests" "mod config, Survivors tables, LAN switch"
   else result FAIL "rust tests" "see $OUT/rust.log"; fi
   step "python tool tests"
-  if logged pytools bash -c 'python3 tools/test_playtriage.py && python3 tools/test_playtest_report.py'; then result PASS "python tool tests" "play triage, playtest report"
+  if logged pytools bash -c 'python3 tools/test_playtriage.py && python3 tools/test_playtest_report.py && python3 tools/test_lazydata.py && python3 tools/test_devserver.py'; then result PASS "python tool tests" "play triage, playtest report, lazy data split, dev server ranges"
   else result FAIL "python tool tests" "see $OUT/pytools.log"; fi
 fi
 
@@ -200,6 +200,10 @@ for b in $NAMES; do
   step "$b: flow test"
   if logged "flow-$b" node tools/flowtest.mjs "$url" "$OUT/flow-$b"; then result PASS "$b flow test" "intro, click into a demo, Escape to menu"
   else result FAIL "$b flow test" "see $OUT/flow-$b.log"; fi
+
+  step "$b: lazy data"
+  if logged "lazy-$b" node tools/menutime.mjs "$url" --check-lazy; then result PASS "$b lazy data" "chunks fetched with Range, a reload reads them all from OPFS"
+  else result FAIL "$b lazy data" "see $OUT/lazy-$b.log"; fi
 
   step "$b: input"
   if logged "input-$b" node tools/inputtest.mjs "$url" "$OUT/input-$b"; then result PASS "$b input" "mouse capture and re-capture, menu release, Space, fullscreen"

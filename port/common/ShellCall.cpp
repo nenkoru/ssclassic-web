@@ -16,6 +16,9 @@
 
 extern "C" {
 void *_pSE1ShellArgs = 0;
+/* > 0 while a script function runs: its wasm frames sit below a JS frame (se1_shell_jscall), so the
+   single-threaded build can't suspend there through JSPI (LazyData.c reads synchronously then) */
+int _iSE1ShellDepth = 0;
 }
 
 EM_JS(double, se1_shell_jscall, (void *pfn, int iFloatMask, int ctArgs, void *pvSRet, void **apvArgs), {
@@ -34,7 +37,9 @@ extern "C" double SE1_ShellCall(void *pfn, int iFloatMask, int ctArgs, void *pvS
   // nested shell calls may happen inside pfn: save/restore the NEXTARGUMENT cursor
   void *pOld = _pSE1ShellArgs;
   _pSE1ShellArgs = apvArgs;
+  _iSE1ShellDepth++;
   double r = se1_shell_jscall(pfn, iFloatMask, ctArgs, pvSRet, apvArgs);
+  _iSE1ShellDepth--;
   _pSE1ShellArgs = pOld;
   return r;
 }

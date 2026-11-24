@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Static hosting bundle: one folder any static web host can serve as-is.
-#   outdir/mt/  threaded build (needs cross-origin isolation; coi-sw.js adds it)
+#   outdir/mt/  threaded build (needs cross-origin isolation; coi-sw.js adds it), with its
+#               gamedata/ (big data files fetched on demand, when built with SE1_LAZY_DATA)
 #   outdir/st/  single-threaded build (needs nothing)
 #   outdir/index.html  landing page: picks the build the visitor's page can run
 #   outdir/_headers    COOP/COEP for /mt/* (Netlify / Cloudflare Pages format)
@@ -51,6 +52,13 @@ mkdir -p "$outdir/mt" "$outdir/st"
 for f in serioussam.html serioussam.js serioussam.wasm serioussam.data; do
   cp "$mt_dir/$f" "$outdir/mt/"
   cp "$st_dir/$f" "$outdir/st/"
+done
+# lazy data (notes/lazy-data.md): the big files each page fetches on demand; hard links in the
+# build dir, real copies here. Both builds' OPFS caches are keyed by content, so a visitor who
+# switches builds doesn't download twice.
+for b in mt st; do
+  src=$mt_dir; [ "$b" = st ] && src=$st_dir
+  if [ -d "$src/gamedata" ]; then cp -R "$src/gamedata" "$outdir/$b/"; fi
 done
 cp "$mt_dir/coi-sw.js" "$outdir/mt/"
 cp "$ROOT/port/web/landing.html" "$outdir/index.html"

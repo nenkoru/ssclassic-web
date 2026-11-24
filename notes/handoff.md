@@ -97,7 +97,10 @@ Emscripten builds (CMake + ninja, Release, `SE1_THREADS`, `SE1_RUSTMOD`). Rebuil
    - Hatshepsut has a few small islands: the intro box and two closed rooms.
 3. ~~**Add `navroamtest` to `tools/test.sh`.**~~ Done: the "nav roam (full data)" step, SKIP without data/tfe-full-web.
 4. **Roadmap items** (notes/roadmap.md):
-   - lazy data loading with an OPFS cache;
+   - ~~lazy data loading with an OPFS cache~~ done: notes/lazy-data.md (design, measurements); the
+     builds preload only `data-boot/` and fetch `gamedata/` with Range; `?lazycache=0` skips OPFS;
+     a server must answer Range (tools/devserver.py does; one that sends 200 still works but
+     downloads whole files);
    - public hosting (what the demo data's license allows);
    - real-device checks for touch and pads;
    - interest management and STUN/TURN for the 128-player goal;

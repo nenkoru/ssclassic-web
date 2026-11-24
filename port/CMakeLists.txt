@@ -59,6 +59,7 @@ option(SE1_SIMD "Enable wasm SIMD (-msimd128)" ON)
 # headers (tools/devserver.py sends them), or coi-sw.js on static hosts (port/web/isolate.js).
 # -DSE1_THREADS=OFF: the single-threaded JSPI build, which runs anywhere.
 option(SE1_THREADS "Run the engine in a worker thread" ON)
+option(SE1_LAZY_DATA "Fetch the big data files on demand, cached in OPFS (notes/lazy-data.md)" ON)
 set(OPT_FLAGS "")
 if(SE1_SIMD)
   list(APPEND OPT_FLAGS -msimd128)
@@ -103,7 +104,7 @@ list(FILTER S_ENGINE EXCLUDE REGEX "Engine/Base/Unix/UnixDynamicLoader\\.cpp$")
 if(SE1_THREADS)
   list(APPEND S_ENGINE "${ROOT}/port/common/SdlGlThreads.cpp")
 endif()
-list(APPEND S_ENGINE "${ROOT}/port/common/WebDynamicLoader.cpp" "${ROOT}/port/common/gl1shim.c" "${ROOT}/port/common/ShellCall.cpp" "${ROOT}/port/common/WebAudio.cpp" "${ROOT}/port/common/WebFrame.cpp" "${ROOT}/port/common/CaseFs.c" "${ROOT}/port/common/FastSort.c" "${ROOT}/port/common/NetLan.c")
+list(APPEND S_ENGINE "${ROOT}/port/common/WebDynamicLoader.cpp" "${ROOT}/port/common/gl1shim.c" "${ROOT}/port/common/ShellCall.cpp" "${ROOT}/port/common/WebAudio.cpp" "${ROOT}/port/common/WebFrame.cpp" "${ROOT}/port/common/CaseFs.c" "${ROOT}/port/common/LazyData.c" "${ROOT}/port/common/FastSort.c" "${ROOT}/port/common/NetLan.c")
 if(SE1_THREADS)
   list(APPEND S_ENGINE "${ROOT}/port/common/Persist.cpp")
 endif()
@@ -167,7 +168,7 @@ target_link_options(serioussam PRIVATE
   "$<$<BOOL:${SE1_THREADS}>:SHELL:--pre-js ${ROOT}/port/web/isolate.js>"
   "SHELL:--pre-js ${ROOT}/port/web/pre.js" "SHELL:--pre-js ${ROOT}/port/web/audio.js" "SHELL:--pre-js ${ROOT}/port/web/gfx.js" "SHELL:--pre-js ${ROOT}/port/web/gfx-webgpu.js" "SHELL:--pre-js ${ROOT}/port/web/net.js" "SHELL:--pre-js ${ROOT}/port/web/lobby.js" "SHELL:--pre-js ${ROOT}/port/web/input.js" "SHELL:--pre-js ${ROOT}/port/web/touch.js" "SHELL:--pre-js ${ROOT}/port/web/gamepad.js" "SHELL:--pre-js ${ROOT}/port/web/gyro.js" "SHELL:--pre-js ${ROOT}/port/web/survivors.js"
   "SHELL:--pre-js ${ROOT}/port/web/pre.js" "SHELL:--pre-js ${ROOT}/port/web/audio.js" "SHELL:--pre-js ${ROOT}/port/web/gfx.js" "SHELL:--pre-js ${ROOT}/port/web/gfx-webgpu.js" "SHELL:--pre-js ${ROOT}/port/web/net.js" "SHELL:--pre-js ${ROOT}/port/web/input.js" "SHELL:--pre-js ${ROOT}/port/web/survivors.js"
-  "SHELL:--pre-js ${ROOT}/port/web/persist.js" "SHELL:--pre-js ${ROOT}/port/web/playtest.js" "SHELL:--pre-js ${ROOT}/port/web/archipelago.js"
+  "SHELL:--pre-js ${ROOT}/port/web/persist.js" "SHELL:--pre-js ${ROOT}/port/web/lazydata.js" "SHELL:--pre-js ${ROOT}/port/web/playtest.js" "SHELL:--pre-js ${ROOT}/port/web/archipelago.js"
   "SHELL:--shell-file ${ROOT}/port/web/shell.html" "SHELL:--post-js ${ROOT}/port/web/bench.js"
   # (SHELL: keeps each flag with its argument; target_link_options would de-duplicate "--pre-js")
   -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=256MB -sSTACK_SIZE=4MB
@@ -182,7 +183,14 @@ target_link_options(serioussam PRIVATE
   $<$<NOT:$<BOOL:${SE1_THREADS}>>:-lidbfs.js>   # WASMFS (threaded build) persists via its OPFS backend instead
   -sEXPORTED_RUNTIME_METHODS=FS,callMain,HEAPU8,HEAP16,HEAPU16,HEAPU32,HEAP32,HEAPF32,UTF8ToString,stringToUTF8,lengthBytesUTF8,addRunDependency,removeRunDependency
 )
-if(DATA_DIR)
+if(DATA_DIR AND SE1_LAZY_DATA)
+  # big files on demand (notes/lazy-data.md): tools/lazydata.py splits DATA_DIR on every link into
+  # data-boot/ (the preload bundle: small files, empty placeholders, SE1Lazy/manifest.txt) and
+  # gamedata/ (the big files, fetched with HTTP Range by port/web/lazydata.js)
+  add_custom_command(TARGET serioussam PRE_LINK
+    COMMAND python3 "${ROOT}/tools/lazydata.py" --data "${DATA_DIR}" --out "${CMAKE_CURRENT_BINARY_DIR}" VERBATIM)
+  target_link_options(serioussam PRIVATE "--preload-file" "${CMAKE_CURRENT_BINARY_DIR}/data-boot@/" "--exclude-file" "*.DS_Store")
+elseif(DATA_DIR)
   target_link_options(serioussam PRIVATE "--preload-file" "${DATA_DIR}@/" "--exclude-file" "*.DS_Store")
 endif()
 set_target_properties(serioussam PROPERTIES SUFFIX ".html")
@@ -194,5 +202,5 @@ if(SE1_THREADS)
 endif()
 # --pre-js/--post-js files are link inputs: relink when they change
 set_property(TARGET serioussam APPEND PROPERTY LINK_DEPENDS
-  "${ROOT}/port/web/pre.js" "${ROOT}/port/web/audio.js" "${ROOT}/port/web/gfx.js" "${ROOT}/port/web/gfx-webgpu.js" "${ROOT}/port/web/net.js" "${ROOT}/port/web/lobby.js" "${ROOT}/port/web/input.js" "${ROOT}/port/web/touch.js" "${ROOT}/port/web/gamepad.js" "${ROOT}/port/web/gyro.js" "${ROOT}/port/web/survivors.js" "${ROOT}/port/web/persist.js" "${ROOT}/port/web/playtest.js" "${ROOT}/port/web/archipelago.js" "${ROOT}/port/web/bench.js"
+  "${ROOT}/port/web/pre.js" "${ROOT}/port/web/audio.js" "${ROOT}/port/web/gfx.js" "${ROOT}/port/web/gfx-webgpu.js" "${ROOT}/port/web/net.js" "${ROOT}/port/web/lobby.js" "${ROOT}/port/web/input.js" "${ROOT}/port/web/touch.js" "${ROOT}/port/web/gamepad.js" "${ROOT}/port/web/gyro.js" "${ROOT}/port/web/survivors.js" "${ROOT}/port/web/persist.js" "${ROOT}/port/web/lazydata.js" "${ROOT}/port/web/playtest.js" "${ROOT}/port/web/archipelago.js" "${ROOT}/port/web/bench.js"
   "${ROOT}/port/web/shell.html")

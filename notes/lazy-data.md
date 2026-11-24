@@ -1,15 +1,214 @@
 # Lazy game-data loading
 
-> **Reviewer's note (Claude):** the byte counts below are the sizes of the files the game *opened*,
-> not the bytes it *read*. Three quarters of them are `.gro` archives, which the engine opens whole
-> and then seeks into, so the bytes actually needed at boot are probably far fewer than the 86 MB in
-> the tables. The first implementation step is therefore to measure bytes read per file (wrap
-> `read`/`fread`, as the opens were wrapped). That decides between whole-file fetching with an OPFS
-> cache (simple, but ~86 MB on the first visit) and HTTP range requests into the archives. The
-> "read-through cache" in the threaded-build recommendation reads files whole, so it only fits
-> the first of the two.
+Goal: the menu shows fast, level data is fetched when the engine reads it, and fetched data is
+kept in OPFS so the next visit downloads nothing. Both builds (threaded WASMFS, single-threaded
+MEMFS + JSPI) must keep working, and `tools/test.sh` stays green.
 
-## Today
+## The problem (2026-11-24)
+
+`port/CMakeLists.txt` packs the whole data folder into one `serioussam.data` with
+`--preload-file`. For the full build that is 386 MB (`data/tfe-full-web`, 497 files), and the
+Emscripten runtime downloads all of it and copies it into the in-memory filesystem before
+`main()` runs. The file also stays in the wasm heap (WASMFS) or the JS heap (MEMFS) for the whole
+session.
+
+Most of those bytes are in a few large files. 38 files are 256 KB or more, and together they hold
+361 MB:
+
+| File | Size | Read how |
+|---|---:|---|
+| `1_00c.gro` | 201 MB | every model, texture and sound; a zip opened at boot, entries read by seek + read |
+| `1_00_music.gro` | 72 MB | music, streamed while it plays |
+| `Help/*.chm` | 19 MB | never |
+| `Levels/*.wld` (20) | 70 MB | one level at a time; the menu's level list reads only their headers |
+| `Demos/*.dem` | ~10 MB | when a demo plays |
+
+Whole-file laziness cannot work for the two archives. The engine opens every `.gro` at boot
+(`Stream.cpp`, `UNZIPAddArchive` reads the central directory at the end of the file), so fetching
+a whole archive when it is opened would fetch 273 MB before the menu. The lazy unit has to be a
+**byte range** of a file.
+
+## Design
+
+### Overview
+
+```
+engine fopen("1_00c.gro","rb") ──► __wrap_fopen (CaseFs.c)
+                                     │ path in the lazy manifest?
+                                     ├─ no  ─► __real_fopen (as today)
+                                     └─ yes ─► fopencookie(LazyFile) ── read/seek/close
+                                                   │ chunk in the heap cache? copy it
+                                                   └─ no ─► se1_lazy_fetch(file, chunks)
+                                                             mt: proxy to the page + futex wait
+                                                             st: EM_ASYNC_JS (JSPI suspends)
+page (main thread)  Module.se1Lazy.fetch(...)
+   OPFS se1-lazy/<dataset>/<file>.<chunk> ─ hit ─► copy into the heap
+   └─ miss ─► fetch(gamedata/<path>, Range) ─► copy into the heap, then write to OPFS
+```
+
+### 1. Build: split the data folder (`tools/lazydata.py`)
+
+At link time a script splits `DATA_DIR` into:
+
+- **`<build>/data-boot/`**, the new `--preload-file` source. It has hard links to every small file
+  and an **empty placeholder** for each lazy file. The placeholders are there so directory
+  listings (`FindFiles("*.gro")`, the level list), `stat` and the case-insensitive lookup still
+  see the file. The engine only uses `stat`/`fstat` for existence, mode and mtime, never for the
+  size (`Stream.cpp` GetFileTimeStamp_t / IsFileReadOnly, `UnixFileSystem.cpp`). It gets sizes
+  through `fseek`/`ftell`, which the lazy FILE answers.
+- **`<build>/gamedata/<path>`**: hard links to the lazy files (no extra disk), served next to the
+  page and fetched with HTTP `Range`.
+- **`data-boot/SE1Lazy/manifest.txt`**, packed into the boot bundle: one line per lazy file:
+  `<key> <size> <path>`. `key` is a hex hash of path, size and mtime, so a changed file gets new
+  cache entries. The first line is `dataset <hash of all lines>`.
+
+Which files are lazy: every file of 256 KB or more, except under `Nav/` and `SE1Mod/` (the Rust
+mod reads those; they are small anyway). For the full data that is 361 MB lazy and about 9 MB in
+the boot bundle. The demo data does the same, so `tools/test.sh` exercises the lazy path in both
+builds.
+
+It is a CMake option, `SE1_LAZY_DATA` (default ON). OFF keeps today's single bundle. The script
+runs on every link (PRE_LINK custom command). It looks only at sizes and mtimes, so it is quick
+and picks up data changes on a relink, as the preload does today.
+
+### 2. Engine side: `port/common/LazyData.c` (both builds)
+
+- `__wrap_fopen` (`CaseFs.c`) asks `se1_lazy_open(resolved_path, mode)` first. For a manifest
+  path opened read-only it returns a `fopencookie` FILE; anything else falls through to
+  `__real_fopen` as today. Write modes on a lazy path keep the old behaviour (it never happens:
+  the engine writes only under the user directory).
+- `fopencookie` is in Emscripten's musl. The engine reads data files only through
+  `fopen`/`fread`/`fseek`/`ftell` (`Stream.cpp` CTFileStream, `Unzip.cpp`). `_open` is used only
+  for `fstat` (time stamps), which the placeholder answers. No engine (`src/`) change is needed.
+- **Chunks:** 256 KiB (chosen by measurement, see below). A read finds the chunks it covers and
+  fetches every missing one in one request (one `Range`, at most 16 chunks). If the read continues where the last read on that FILE ended
+  (sequential), the request also takes up to 3 following chunks (read-ahead for `.wld` and
+  music).
+- **Script functions, single-threaded build:** a console or script function (`PlayDemo`, for
+  example) is called through a JS frame (`port/common/ShellCall.cpp`), and JSPI can't suspend
+  through JS frames (`SuspendError`). `ShellCall.cpp` counts its depth in `_iSE1ShellDepth`; while it
+  is above 0, `LazyData.c` reads with `Module.se1Lazy.fetchSync`, a synchronous XHR Range request
+  (no OPFS read, since OPFS is async on the page; the chunks are still written to OPFS). The
+  threaded build doesn't need this: its engine thread blocks on a futex.
+- **Heap cache:** chunks live in a shared LRU in the wasm heap, 64 MiB at most (256 slots). An evicted chunk
+  comes back from OPFS on its next read. Today the full build keeps all 386 MB in the heap, so
+  this is also a memory cut, which matters on phones.
+- **Fetch call, threaded build:** the engine runs in a pthread. It allocates the destination
+  buffer, posts `Module.se1Lazy.fetch(...)` to the page with `MAIN_THREAD_ASYNC_EM_ASM` and
+  waits on a futex word that the page sets when the bytes are in. This is the same pattern as
+  the frame hand-off in `gl1shim.c`. A read on the browser main thread can't block, so it
+  fails with EIO and a console line (nothing in the engine reads data there).
+- **Fetch call, single-threaded build:** `EM_ASYNC_JS` awaits the same JS function, and JSPI
+  suspends the wasm stack. The whole game runs under `main()` (`WebFrame.cpp` already awaits rAF
+  the same way), so every engine read can suspend. Page calls into wasm (`se1Cmd` and others)
+  only queue work for the frame loop.
+- **Thread safety:** a mutex around the manifest and the heap cache. In the threaded build, the
+  engine thread and the sound mixer can both read.
+- **Stats:** `SE1_LazyStats()` returns the counters as JSON: bytes and requests from the network
+  and from OPFS, cache hits, and time spent waiting. It is exposed as `Module.se1LazyStats()` for
+  `tools/menutime.mjs` and the tests.
+
+### 3. Page side: `port/web/lazydata.js` (pre-js, both builds)
+
+`Module.se1Lazy.fetch(dataset, key, path, firstChunk, count, chunkSize, fileSize, dst)` returns
+a Promise and fills the heap at `dst`. For each chunk:
+
+1. OPFS: `navigator.storage.getDirectory()` → `se1-lazy/<dataset>/<key>.<chunk>`. On a hit,
+   read the bytes from it.
+2. Missing chunks are fetched together: `fetch(gamedata/<path>, {headers: {Range}})`. A server
+   that answers `200` with the whole file still works: the page slices the bytes it needs and
+   caches every chunk of that response. Failed fetches are retried 3 times with backoff, then the
+   read fails (the engine shows its usual "cannot read" error).
+3. The page copies the bytes into `HEAPU8` (the shared buffer in the threaded build), sets the
+   done word (`Atomics.store` + `Atomics.notify` in the threaded build; the Promise resolves in
+   the single-threaded one), and only then writes the new chunks to OPFS (`createWritable`, fire
+   and forget). Writing to the cache never delays the game.
+4. Housekeeping at start-up: `navigator.storage.persist()` (best effort). Keep the current
+   dataset and the most recently used other one (the mt and st builds of one bundle share a
+   dataset), and delete older `se1-lazy/*` folders.
+5. `?lazycache=0` skips OPFS (always network), for tests and comparisons. `Module.se1LazyClear()`
+   empties the cache.
+
+OPFS is per origin, so the threaded and single-threaded builds of one hosting bundle share
+cached chunks.
+
+### 4. Servers and the hosting bundle
+
+- `tools/devserver.py`: answer `Range: bytes=a-b` with `206 Partial Content` (single ranges are
+  enough). Python's `SimpleHTTPRequestHandler` ignores Range and sends 200, which the page also
+  handles, at the cost of the whole file.
+- `tools/package.sh`: copy `gamedata/` next to each build, dereferencing the hard links. When both
+  builds' manifests have the same dataset, keep one copy and point the st build at it.
+  `packagetest.mjs` uses `python -m http.server` (no Range), so it also covers the
+  200 fallback.
+
+### 5. What is not lazy, and what comes later
+
+- Not lazy: the wasm, the JS and the boot bundle (about 9 MB for the full data).
+- Later: per-level prefetch lists. Record which chunks a level load reads, then fetch them in
+  parallel when the level starts, instead of one blocking request after another. Worth it on
+  high-latency links; measure first.
+- Done: on `QuotaExceededError` the page stops writing to OPFS and reads keep coming from the
+  network.
+- Later: a boot prefetch list. Before the menu the engine reads about 150 chunks one after
+  another (mostly `1_00c.gro` entries), so on a 40 ms link most of the cold time is waiting, not
+  downloading. Fetching the known boot chunks in parallel at page load should take the cold
+  menu from about 14 s towards the 6 s that the bytes alone need.
+
+### Measuring
+
+`tools/menutime.mjs <url> [--runs N] [--throttle MBIT]`: a cold load (fresh profile) and a warm
+reload in the same profile. It records the time to the first engine frame and to 60 frames, the
+bytes downloaded, and `Module.se1LazyStats()`. The dev server sends `Cache-Control: no-store`, so
+"warm" before this change re-downloads the 386 MB bundle. On a static host the HTTP cache would
+keep it, but it could also evict it.
+
+Results: see "Measurements" below.
+
+### Measurements
+
+Full data, threaded build, `tools/menutime.mjs`, headless Chrome on the M-series Mac. "Before" is
+the same commit built with `-DSE1_LAZY_DATA=OFF` (386 MB preload bundle). Times are to the first
+engine frame / to 60 frames (the menu is up and animating); MB is everything the page downloaded.
+
+| Build | Link | Cold first frame | Cold 60 frames | Cold MB | Warm 60 frames | Warm MB |
+|---|---|---|---|---|---|---|
+| before | localhost | 1.03 s | 2.35 s | 393.1 | 2.02 s | 393.1 |
+| lazy, 1 MiB chunks | localhost | 0.52 s | 2.05 s | 120.6 | 1.74 s | 14.9 |
+| lazy, 256 KiB | localhost | | 2.26 s | 74.5 | | |
+| lazy, 64 KiB | localhost | | 2.52 s | 57.0 | | |
+| before | 100 Mbit, 40 ms | 32.44 s | 33.87 s | 393.1 | 34.05 s | 393.1 |
+| lazy, 1 MiB | 100 Mbit, 40 ms | 7.97 s | 15.51 s | 120.6 | 3.19 s | 14.9 |
+| **lazy, 256 KiB** | 100 Mbit, 40 ms | **5.84 s** | **14.32 s** | **73.0** | **3.39 s** | **14.9** |
+
+- Warm loads read every chunk from OPFS (0 network requests for game data); the 14.9 MB left is
+  the wasm, JS and the 8.2 MB boot bundle, which the dev server sends with `no-store`.
+- Chunk size: smaller chunks download less (the boot reads scattered `.gro` entries) but need
+  more serial requests: 1 MiB = 83 requests / 106 MB of game data, 256 KiB = 147 / 58 MB,
+  64 KiB = 306 / 42 MB. 256 KiB is the best of the three on the throttled link and close to
+  the best on localhost.
+- What the boot reads (256 KiB): `1_00c.gro` 183 chunks, `Intro.wld` 16, music 3,
+  `SE1_10b.gro` 2, `1_00_ExtraTools.gro` 1, and the first chunk of every `.wld` (the level list
+  reads the headers).
+
+### Rejected options
+
+- **WASMFS fetch backend** (`wasmfs_create_fetch_backend`): it does Range reads but caches
+  nothing, it needs its own pthread, and the single-threaded MEMFS build doesn't have it.
+- **`FS.createLazyFile`**: it fetches whole files with synchronous XHR, which browsers allow only
+  in workers, and the single-threaded build runs on the main thread.
+- **Splitting the preload into several `file_packager` bundles**: the bundles are whole files,
+  and the boot still needs the `.gro` archives because the engine opens them all at start-up.
+- **Repacking `1_00c.gro` per level**: an engine-format change, and the boot still opens every
+  archive.
+
+## Background: earlier research (demo data)
+
+The sections below are from the first look at the demo data (`notes/lazy-data-files.txt`). Two of
+their conclusions don't hold: the single-threaded `FS.createLazyFile` plan (synchronous XHR is
+worker-only), and whole-archive caching (the boot opens every archive).
+
+### Today
 
 The demo data folder (`data/tfe-demo`, 112.4 MB, 117,877,087 bytes) is packed into a
 single `serioussam.data` file by `file_packager` at link time:
@@ -61,7 +260,7 @@ The six `.gro` files in the demo folder total 74.8 MB (78,388,666 bytes). The la
 is `1_00c_demo.gro` (54.3 MB, 1157 entries, 93.4 MB uncompressed) which holds all the
 3D models, textures, and sounds for the demo levels.
 
-## What the game reads
+### What the game reads
 
 Measured with an instrumented threaded build: `__wrap_fopen` and `__wrap_open` in
 `port/common/CaseFs.c` log every successful read-open (path + file size) into a
@@ -143,7 +342,7 @@ seeking, so a range-request backend can serve only the bytes actually read.
 - Level thumbnail `.tex` files: ~200 KB
 - `Help/`, `Players/`, `SaveGame/`, `Temp/` directories: small
 
-## Options
+### Options considered then
 
 ### 1. WASMFS fetch backend + OPFS cache (threaded build)
 
@@ -272,103 +471,3 @@ help with ranges (LZ4 is a stream format, not seekable).
 requirement. For the demo, 54 MB is acceptable; for the full game (est. 1-2 GB),
 ranges become important.
 
-## Recommendation
-
-### Threaded build (WASMFS)
-
-1. **Mount a fetch backend at `/data`** in `wasmfs_before_preload` (or early in
-   `main()`, like `Persist.cpp`). `base_url` = the page origin + `/data/`.
-   `chunk_size` = 0 (default, ~256 KB).
-2. **Mount an OPFS backend at `/cache`** (same pattern as `Persist.cpp:24-27`).
-3. **Remove `--preload-file`** from CMakeLists. The data folder is served by the
-   dev server (or production CDN) at `/data/`.
-4. **Add a read-through cache layer** in `CaseFs.c`: before calling `__real_fopen`,
-   check if `/cache/<path>` exists; if so, open that. If not, open `/data/<path>`,
-   read it, write to `/cache/<path>`, then open the cached copy.
-   (Alternatively, use WASMFS's `wasmfs_create_icase_backend` wrapper, `wasmfs.h:109`,
-   to get case-insensitivity for free and drop `CaseFs.c`'s `resolve_case`.)
-5. **First visit:** downloads only the files the engine actually reads (~86 MB for
-   the demo, less with ranges). **Second visit:** zero downloads (OPFS).
-
-Steps in order:
-1. Serve `data/tfe-demo` at `/data/` from the dev server (no CMake change yet).
-2. Add `wasmfs_before_preload` in a new `port/common/LazyFs.cpp` (threaded-only,
-   `#ifdef SE1_THREADS`): mount fetch at `/data`, OPFS at `/cache`.
-3. Modify `CaseFs.c` to redirect opens: try `/cache/<path>`, then `/data/<path>`,
-   then the old path (for `/libsdl`). Write-through to `/cache`.
-4. Remove `--preload-file` from CMakeLists. Verify with `tools/flowtest.mjs`.
-5. Add a test: `tools/lazytest.mjs` that loads the page, measures bytes downloaded
-   (via `PerformanceResourceTiming` or a dev-server counter), clicks to start a demo,
-   reloads, and verifies the second load downloads ~0 bytes.
-
-### Single-threaded build (MEMFS + JSPI)
-
-1. **Replace `--preload-file` with `FS.createLazyFile`** calls in a new
-   `port/web/lazyfs.js` (pre-js). For each file in the data folder manifest,
-   create a lazy file at its path with `readAsync: (file, offset, length, cb) =>
-   fetch(url + offset + '-' + (offset+length-1)).then(r => r.arrayBuffer())...`.
-   The manifest is a small JSON file listing all data files (generated by a script
-   from the data folder).
-2. **JSPI handles the await:** the engine's `fread` suspends via JSPI while the
-   fetch is in flight. The game shows its normal loading screen.
-3. **Cache in IndexedDB:** after the first fetch, store the bytes in IDB. On
-   subsequent visits, `readAsync` checks IDB first. (The st build already links
-   `-lidbfs.js`; reuse the IDB connection.)
-4. **First visit:** downloads files as they're read (same ~86 MB for the demo).
-   **Second visit:** zero downloads (IDB).
-
-Steps in order:
-1. Generate a manifest JSON from `data/tfe-demo` (path, size, sha256).
-2. Write `port/web/lazyfs.js`: in `Module.preRun`, read the manifest, call
-   `FS.createLazyFile` for each entry with a `readAsync` that fetches from
-   `/data/<path>` with a `Range` header, caching in IDB.
-3. Remove `--preload-file` from CMakeLists (st build). Add `lazyfs.js` to the
-   `--pre-js` list.
-4. Verify with `tools/flowtest.mjs` on the st build.
-
-### Testing
-
-- **Existing tests that must keep passing:** `tools/flowtest.mjs` (boot → menu →
-  demo → Escape), `tools/svtest.mjs` (survivors), `tools/inputtest.mjs`,
-  `tools/qualitytest.mjs`, `tools/shimtest.mjs`.
-- **New test: `tools/lazytest.mjs`.** Loads the page, records total bytes downloaded
-  (sum of `transferSize` from `Performance.getEntriesByType('resource')`), clicks to
-  start a demo, waits for it to run, then reloads the page (same user-data-dir, so
-  OPFS/IDB persists) and records the second load's bytes. Checks: first load > 0
-  bytes, second load < 1 MB (only the wasm + js, no data).
-- **Byte-count check:** the dev server can log request sizes; the test can hit a
-  `/__bytes` endpoint to get the total bytes served.
-
-### Risks
-
-- **Fetch backend worker thread:** consumes one of the 4 pthread pool slots
-  (`-sPTHREAD_POOL_SIZE=4`). If the engine also uses 4 workers, the pool is
-  exhausted. Mitigation: increase `PTHREAD_POOL_SIZE` to 6, or use the browser's
-  HTTP cache instead of a separate OPFS cache.
-- **OPFS quota:** browsers cap OPFS at a fraction of available disk space
-  (Chrome: ~60% of free space). 112 MB is fine for the demo; the full game
-  (1-2 GB) may hit the cap on small devices. Mitigation: evict LRU files, or
-  use the browser's HTTP cache (no quota).
-- **`.gro` range reads:** the engine seeks randomly within `.gro` files. With a
-  range backend, each seek that crosses a chunk boundary triggers a new HTTP
-  request. Chunk size matters: too small → many requests; too large → wasted
-  bytes. The default (256 KB) is reasonable for the demo; profile with the full
-  game.
-- **Case-insensitivity + fetch:** the fetch backend is case-sensitive.
-  `CaseFs.c`'s `resolve_case` works on the local FS; it must also work when the
-  file is at `/data/<path>`. The `wasmfs_create_icase_backend` wrapper
-  (`wasmfs.h:109`) handles this at the WASMFS level, which would be cleaner than
-  the current `CaseFs.c` approach.
-- **st build fetch latency:** `FS.createLazyFile` with `readAsync` fetches the
-  whole file on first read. A 54 MB `.gro` is one 54 MB fetch. JSPI suspends the
-  wasm stack during the fetch, so the game doesn't freeze, but the loading screen
-  is up for the duration of the download. With a fast connection this is a few
-  seconds; on slow connections it's longer. The threaded build's range backend
-  is better here, but WASMFS is not available in the st build.
-- **`file_packager --lz4` vs ranges:** LZ4-compressed packages are not seekable.
-  If using `--preload-file` with `--lz4`, the whole package is downloaded and
-  decompressed before any file is accessible. Ranges require uncompressed files
-  on the server. For the threaded build, serve raw (uncompressed) files and use
-  the fetch backend's range requests. For the st build, `FS.createLazyFile`
-  fetches raw bytes, so no compression is needed (HTTP compression, `gzip`/
-  `br`, is handled by the server transparently).
