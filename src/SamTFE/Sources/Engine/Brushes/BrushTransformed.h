@@ -54,6 +54,9 @@ public:
   CMappingVectors wpl_mvView;   // mapping vectors in view space
   CPlanarGradients wpl_pgOoK;   // plane gradients in default mapping
   BOOL wpl_bVisible;            // set if the plane is visible
+#ifdef __EMSCRIPTEN__
+  BOOL wpl_bViewMappingReady;   // web port: wpl_mvView and wpl_pgOoK are made on first use (RenCache.cpp)
+#endif
   /* Clear the object. */
   inline void Clear(void) {};
 };

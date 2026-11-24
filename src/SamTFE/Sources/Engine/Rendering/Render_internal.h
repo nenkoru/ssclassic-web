@@ -141,7 +141,14 @@ public:
   FIX16_16 ace_xI;            // top I coordinate
   FIX16_16 ace_xIStep;        // I coordinate step per scan line
   CScreenEdge *ace_psedEdge;  // the edge
+#ifdef __EMSCRIPTEN__
+  // web port perf: a copy of ace_psedEdge->sed_pspo in the padding slot (pointers are 4 bytes in
+  // wasm32, so the size stays 16). sed_pspo is set before the edge is added and never changes while
+  // it is active, so ScanOneLine() can read the polygon without waiting for the edge's cache line.
+  CScreenPolygon *ace_pspo;
+#else
   ULONG ace_ulDummy;  // alignment to 16 bytes
+#endif
 
   ALIGNED_NEW_AND_DELETE(32);
 
@@ -150,6 +157,9 @@ public:
     : ace_xI(psed->sed_xI)
     , ace_xIStep(psed->sed_xIStep)
     , ace_psedEdge(psed)
+#ifdef __EMSCRIPTEN__
+    , ace_pspo(psed->sed_pspo)
+#endif
   {};
   inline void Clear(void) {};
 };
@@ -408,6 +418,9 @@ public:
   void PreClipVertices(void);
   // transform planes in current sector before clipping
   void PreClipPlanes(void);
+#ifdef __EMSCRIPTEN__
+  __forceinline void PrepareViewPlane(CWorkingPlane &wpl);
+#endif
   // make initial edges for a polygon
   void MakeInitialPolygonEdges(CBrushPolygon &bpo, CScreenPolygon &spo, BOOL bInverted);
   // find which portals should be rendered as portals or as pretenders
@@ -443,6 +456,8 @@ public:
   inline void RemRemoveListFromActiveList(CScreenEdge *psedFirst);
   /* Step all edges in active list by one scan line and resort them. */
   inline void StepAndResortActiveList(void);
+  /* Both of the above in one pass (web port). */
+  inline void RemRemoveListAndStepActiveList(CScreenEdge *psedFirst);
   /* Copy I coordinates from active list to edge data. */
   inline void CopyActiveCoordinates(void);
   /* Remove an active portal from rendering */
@@ -455,6 +470,9 @@ public:
 
   /* Generate a span for a polygon on current scan line. */
   inline void MakeSpan(CScreenPolygon &spo, CScreenEdge *psed0, CScreenEdge *psed1);
+  // web port perf: MakeSpan with its common case (a polygon that already has a span, in view
+  // rendering: only its screen box and area grow) inlined into ScanOneLine
+  __forceinline void MakeSpanInline(CScreenPolygon &spo, CScreenEdge *psed0, CScreenEdge *psed1);
 
   /* Add spans in current line to scene. */
   void AddSpansToScene(void);
@@ -464,6 +482,7 @@ public:
   
   /* Add a polygon to surface stack. */
   inline BOOL AddPolygonToSurfaceStack(CScreenPolygon &spo);
+  inline BOOL AddPolygonToSurfaceStackAt(CScreenPolygon &spo, FIX16_16 xCurrentScanI);
   /* Remove a polygon from surface stack. */
   inline BOOL RemPolygonFromSurfaceStack(CScreenPolygon &spo);
   /* Swap two polygons in surface stack. */

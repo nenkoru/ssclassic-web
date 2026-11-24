@@ -239,6 +239,87 @@ void CRenderer::StepAndResortActiveList(void)
   _pfRenderProfile.StopTimer(CRenderProfile::PTI_STEPANDRESORT);
 }
 
+#ifdef __EMSCRIPTEN__
+/*
+ * Web port perf: RemRemoveListFromActiveList() followed by StepAndResortActiveList() in one pass
+ * over the active list instead of two. Same result: the edges that survive the removal are
+ * stepped and insertion-sorted in the same order, against the same already-placed edges, as the
+ * two separate passes do. (A third of the scan lines remove some edge; the separate removal pass
+ * was ~3.6k edge visits per timedemo frame.)
+ */
+void CRenderer::RemRemoveListAndStepActiveList(CScreenEdge *psedFirst)
+{
+  // if the remove list is empty
+  if (psedFirst==NULL) {
+    // only step and resort
+    StepAndResortActiveList();
+    return;
+  }
+  // mark that scan-line coherence is lost
+  re_bCoherentScanLine = 0;
+
+  // for each edge to be removed on this line
+  CScreenEdge *psed = psedFirst;
+  do {
+    // mark it as removed
+    psed->sed_xI.slHolder = ACE_REMOVED;
+    psed = psed->sed_psedNextRemove;
+  } while (psed!=NULL);
+
+  // for each active edge after the left sentinel and before the right sentinel
+  CActiveEdge *paceEnd = &re_aaceActiveEdges[re_aaceActiveEdges.Count()-1];
+  CActiveEdge *paceSrc = &re_aaceActiveEdges[1];
+  CActiveEdge *paceDst = paceSrc;
+  while (paceSrc<paceEnd) {
+    // if it is not removed
+    if (paceSrc->ace_psedEdge->sed_xI.slHolder!=ACE_REMOVED) {
+      // step the edge by one scan line
+      CActiveEdge aceCurrent = *paceSrc;
+      aceCurrent.ace_xI.slHolder += aceCurrent.ace_xIStep.slHolder;
+      // if the previous is right of the current
+      if (paceDst[-1].ace_xI.slHolder > aceCurrent.ace_xI.slHolder) {
+        // mark that scan-line coherence is lost
+        re_bCoherentScanLine = 0;
+        // find last one that is not right
+        CActiveEdge *pacePred = paceDst;
+        do {
+          pacePred--;
+        } while(pacePred->ace_xI.slHolder > aceCurrent.ace_xI.slHolder);
+        // move all of the edges between one place forward
+        CActiveEdge *paceMove=paceDst-1;
+        do {
+          paceMove[1]=paceMove[0];
+          paceMove--;
+        } while (paceMove>pacePred);
+        // insert the current to its new place
+        paceMove[1] = aceCurrent;
+      } else {
+        *paceDst = aceCurrent;
+      }
+      paceDst++;
+    }
+    paceSrc++;
+  }
+  // keep the right sentinel (never removed, its step is zero)
+  ASSERT(paceEnd->ace_psedEdge->sed_xI.slHolder!=ACE_REMOVED);
+  *paceDst = *paceEnd;
+  // trim the end of active list
+  re_aaceActiveEdges.PopUntil(paceDst-&re_aaceActiveEdges[0]);
+
+  // check that the active list is sorted right
+  #if ASER_EXTREME_CHECKING
+  {
+    CActiveEdge *paceEnd = &re_aaceActiveEdges[re_aaceActiveEdges.Count()-1];
+    CActiveEdge *paceSrc = &re_aaceActiveEdges[0];
+    while (paceSrc<paceEnd) {
+      ASSERT(paceSrc[0].ace_xI.slHolder <= paceSrc[1].ace_xI.slHolder);
+      paceSrc++;
+    };
+  }
+  #endif
+}
+#endif
+
 /* Copy I coordinates from active list to edge data. */
 void CRenderer::CopyActiveCoordinates(void)
 {
@@ -479,6 +560,11 @@ void CRenderer::EndScanEdges(void)
  */
 BOOL CRenderer::AddPolygonToSurfaceStack(CScreenPolygon &spo)
 {
+  return AddPolygonToSurfaceStackAt(spo, re_xCurrentScanI);
+}
+// web port perf: the same, with the current I coordinate passed in (ScanOneLine keeps it in a local)
+BOOL CRenderer::AddPolygonToSurfaceStackAt(CScreenPolygon &spo, FIX16_16 xCurrentScanI)
+{
   // increment in-stack counter
   spo.spo_iInStack++;
 
@@ -491,7 +577,7 @@ BOOL CRenderer::AddPolygonToSurfaceStack(CScreenPolygon &spo)
 #define BIAS (1)
 //#define BIAS (0)
 
-  FLOAT fScanI = FLOAT(re_xCurrentScanI)+BIAS;
+  FLOAT fScanI = FLOAT(xCurrentScanI)+BIAS;
   FLOAT fScanJ = re_fCurrentScanJ;//+re_fMinJ;
 
   // calculate 1/k for new polygon
@@ -664,6 +750,106 @@ CScreenPolygon *CRenderer::ScanOneLine(void)
   // for all edges in the line
   CActiveEdge *pace = &re_aaceActiveEdges[1];
   CActiveEdge *paceEnd = &re_aaceActiveEdges[re_aaceActiveEdges.Count()-1];
+#ifdef __EMSCRIPTEN__
+  // web port perf (this loop is ~17% of the timedemo frame): the edge-transition counters and the
+  // current I coordinate live in locals while scanning and are stored on every way out, so the
+  // compiler can keep them in registers (the stores into the edges would otherwise force them
+  // through memory on every edge). The float statistics counter gets the same sequence of +1.0f
+  // additions as before, so it ends with the same value.
+  CActiveEdge *const paceFirst = pace;
+  FLOAT fStatEdgeTransitions = _sfStats.sf_ascCounters[CStatForm::SCI_EDGETRANSITIONS].sc_fCount;
+  FIX16_16 xCurrentScanI = re_xCurrentScanI;
+  #define SCANONELINE_FLUSH(ctEdges) { \
+    _pfRenderProfile.IncrementCounter(CRenderProfile::PCI_EDGETRANSITIONS, (ctEdges)); \
+    _sfStats.sf_ascCounters[CStatForm::SCI_EDGETRANSITIONS].sc_fCount = fStatEdgeTransitions; \
+    re_xCurrentScanI = xCurrentScanI; }
+  while (pace<paceEnd) {
+    CScreenEdge &sed = *pace->ace_psedEdge;
+    ASSERT(&sed!=&re_sedLeftSentinel);
+    ASSERT(&sed!=&re_sedRightSentinel);
+    // set up current I coordinate on the scan line
+    xCurrentScanI = sed.sed_xI = pace->ace_xI;
+    ASSERT(xCurrentI <= sed.sed_xI);
+    // count edge transitions
+    fStatEdgeTransitions += 1.0f;
+
+    // if this edge has active polygon
+    CScreenPolygon *pspo = pace->ace_pspo;
+    ASSERT(pspo==sed.sed_pspo);
+    if (pspo!= NULL && pspo->spo_bActive) {
+      CScreenPolygon &spo = *pspo;
+      // if it is right edge of the polygon
+      if (sed.sed_ldtDirection==LDT_ASCENDING) {
+
+        // remove the left polygon from stack
+        BOOL bWasTop = RemPolygonFromSurfaceStack(spo);
+
+        // if that was top polygon in surface stack
+        if (bWasTop) {
+          // if it is portal
+          if (spo.IsPortal() && 
+             (re_ubLightIllumination==0||re_ubLightIllumination!=spo.spo_ubIllumination)) {
+            // fail scanning and add that portal
+            SCANONELINE_FLUSH(INDEX(pace-paceFirst)+1);
+            _pfRenderProfile.StopTimer(CRenderProfile::PTI_SCANONELINE);
+            return &spo;
+          }
+          // generate a span for it
+          MakeSpanInline(spo, spo.spo_psedSpanStart, &sed);
+
+          // mark that span of new top starts here
+          CScreenPolygon *pspoNewTop =
+            LIST_HEAD(re_lhSurfaceStack, CScreenPolygon, spo_lnInStack);
+          pspoNewTop->spo_psedSpanStart = &sed;
+        }
+
+      // if it is left edge of the polygon
+      } else {
+        ASSERT(sed.sed_ldtDirection==LDT_DESCENDING);
+
+        // add the right polygon to stack
+        BOOL bIsTop = AddPolygonToSurfaceStackAt(spo, xCurrentScanI);
+
+        // if it is the new top of surface stack
+        if (bIsTop) {
+          // get the old top
+          CScreenPolygon &spoOldTop = *LIST_SUCC(spo, CScreenPolygon, spo_lnInStack);
+          // if it is portal
+          if (spoOldTop.IsPortal() &&
+             (re_ubLightIllumination==0||re_ubLightIllumination!=spoOldTop.spo_ubIllumination)) {
+            // if its span has at least one pixel in length
+            if ( PIXCoord(xCurrentScanI)-PIXCoord(spoOldTop.spo_psedSpanStart->sed_xI)>0) {
+              // fail scanning and add that portal
+              SCANONELINE_FLUSH(INDEX(pace-paceFirst)+1);
+              _pfRenderProfile.StopTimer(CRenderProfile::PTI_SCANONELINE);
+              return &spoOldTop;
+            }
+          // if it is not portal
+          } else {
+            // generate span for old top
+            MakeSpanInline(spoOldTop, spoOldTop.spo_psedSpanStart, &sed);
+          }
+
+          // mark that span of new polygon starts here
+          spo.spo_psedSpanStart = &sed;
+        }
+      }
+
+      IFDEBUG(xCurrentI = pace->ace_xI);
+    // if this edge has no active polygon
+    } else {
+      // mark it for removal
+      sed.sed_xI.slHolder = ACE_REMOVED;
+    }
+
+    pace++;
+  }
+  SCANONELINE_FLUSH(INDEX(paceEnd-paceFirst));
+  #undef SCANONELINE_FLUSH
+#else
+  // for all edges in the line
+  CActiveEdge *pace = &re_aaceActiveEdges[1];
+  CActiveEdge *paceEnd = &re_aaceActiveEdges[re_aaceActiveEdges.Count()-1];
   while (pace<paceEnd) {
     CScreenEdge &sed = *pace->ace_psedEdge;
     ASSERT(&sed!=&re_sedLeftSentinel);
@@ -746,6 +932,7 @@ CScreenPolygon *CRenderer::ScanOneLine(void)
 
     pace++;
   }
+#endif
 
   // NOTE: In some rare and extreme situations (usually when casting shadows)
   // the stack might not be empty after scanning - this code fixes that.
@@ -851,11 +1038,16 @@ void CRenderer::ScanEdges(void)
       }
     #endif
 
+#ifdef __EMSCRIPTEN__
+    // remove the edges that stop on this scan, step the others and resort (in one pass)
+    RemRemoveListAndStepActiveList(re_apsedRemoveFirst[re_iCurrentScan]);
+#else
     // remove all edges that stop on this scan from active list and from other lists.
     RemRemoveListFromActiveList(re_apsedRemoveFirst[re_iCurrentScan]);
 
     // step all remaining edges by one scan line and resort the active list
     StepAndResortActiveList();
+#endif
 
   }
 
