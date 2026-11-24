@@ -124,11 +124,11 @@ All guarded by `SE1_WITH_RUSTMOD` (set for the `entities` target) and listed in
 ## Running it
 
 ```
-# once: the Archipelago source checkout with Python 3.12 (see archipelago/serioussam_tfe/README.md)
-python3 archipelago/serioussam_tfe/build_apworld.py      # dist/serioussam_tfe.apworld
-cp archipelago/serioussam_tfe/dist/serioussam_tfe.apworld ~/code/repos/Archipelago/custom_worlds/
+# once: the Archipelago source checkout with Python 3.12 (see archipelago/README.md)
+python3 archipelago/build_apworld.py      # archipelago/dist/serioussam_tfe.apworld
+cp archipelago/dist/serioussam_tfe.apworld ~/code/repos/Archipelago/custom_worlds/
 cd ~/code/repos/Archipelago
-.venv/bin/python Generate.py --player_files_path <dir with Sam.yaml> --outputpath <out>
+.venv/bin/python Generate.py --player_files_path <repo>/archipelago/players --outputpath <out>
 .venv/bin/python MultiServer.py --port 38281 <out>/AP_*.zip
 # then open the game with ?ap=127.0.0.1:38281&slot=Sam
 ```

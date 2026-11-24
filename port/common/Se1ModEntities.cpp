@@ -20,6 +20,8 @@
 #include "Entities/ArmorItem.h"
 #include "Entities/AmmoItem.h"
 #include "Entities/WeaponItem.h"
+#include "Entities/KeyItem.h"
+#include "Entities/Camera.h"
 #include "Entities/Player.h"
 #include "Entities/PlayerWeapons.h"
 
@@ -205,6 +207,20 @@ void SE1ModEnt_EndAutoActions(CEntity *penPlayer)
   eAA.penFirstMarker = NULL;
   pl->SendEvent(eAA);
 }
+/* end a camera sequence the way a fire press does (Player.es AutoActions: trigger the camera's
+   on-break target, else drop the camera), then the auto-actions. Test hook: headless tests skip
+   a level's intro with it (SE1Mod_DebugSkipIntro). */
+void SE1ModEnt_SkipCutscene(CEntity *penPlayer)
+{
+  if (penPlayer == NULL || !IsDerivedFromClass(penPlayer, "Player")) return;
+  CPlayer *pl = (CPlayer *)penPlayer;
+  if (pl->m_penCamera != NULL) {
+    CEntity *penOnBreak = ((CCamera &)*pl->m_penCamera).m_penOnBreak;
+    if (penOnBreak != NULL) SendToTarget(penOnBreak, EET_TRIGGER, pl);
+    else pl->m_penCamera = NULL;
+  }
+  SE1ModEnt_EndAutoActions(pl);
+}
 void SE1ModEnt_Eye(CEntity *penPlayer, FLOAT3D &pos, FLOAT3D &dir)
 {
   CPlacement3D pl = ((CPlayerEntity *)penPlayer)->en_plViewpoint;
@@ -212,4 +228,15 @@ void SE1ModEnt_Eye(CEntity *penPlayer, FLOAT3D &pos, FLOAT3D &dir)
   if (IsDerivedFromClass(penPlayer, "Player")) ((CPlayer *)penPlayer)->GetLerpedAbsoluteViewPlacement(pl);
   pos = pl.pl_PositionVector;
   AnglesToDirectionVector(pl.pl_OrientationAngle, dir);
+}
+
+int SE1ModEnt_PickupKind(CEntity *pen)
+{
+  if (pen == NULL) return -1;
+  if (IsOfClass(pen, "Health Item")) return (0 << 8) | (int)((CHealthItem *)pen)->m_EhitType;
+  if (IsOfClass(pen, "Armor Item"))  return (1 << 8) | (int)((CArmorItem *)pen)->m_EaitType;
+  if (IsOfClass(pen, "Ammo Item"))   return (2 << 8) | (int)((CAmmoItem *)pen)->m_EaitType;
+  if (IsOfClass(pen, "Weapon Item")) return (3 << 8) | (int)((CWeaponItem *)pen)->m_EwitType;
+  if (IsOfClass(pen, "KeyItem"))     return (4 << 8) | (int)((CKeyItem *)pen)->m_kitType;
+  return -1;
 }

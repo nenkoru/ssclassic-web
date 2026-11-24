@@ -4,7 +4,7 @@ use std::ffi::{c_char, c_int, CStr, CString};
 
 use crate::config::CvarValue;
 
-pub const API_VERSION: u32 = 10;
+pub const API_VERSION: u32 = 11;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -70,6 +70,9 @@ pub struct SE1ModHost {
     pub bot_teleport: Option<extern "C" fn(c_int, *const f32, f32)>,
     // v10
     pub ray_door: Option<extern "C" fn(*const f32, *const f32, c_int, *mut u32, *mut c_int) -> f32>,
+    // v11: Archipelago
+    pub page_recv: Option<extern "C" fn(*mut c_char, c_int) -> c_int>,
+    pub pickups: Option<extern "C" fn(*mut i32, *mut i32, *mut f32, c_int) -> c_int>,
 }
 
 /// What a bot's player entity looks like right now (`Host::bot_state`).
@@ -469,6 +472,30 @@ impl Host {
         let (mut k, mut p) = (vec![0i32; max], vec![0f32; max * 3]);
         let n = f(k.as_mut_ptr(), p.as_mut_ptr(), max as c_int).max(0) as usize;
         (0..n.min(max)).map(|i| (k[i], [p[i * 3], p[i * 3 + 1], p[i * 3 + 2]])).collect()
+    }
+    /// Pop the oldest string the page pushed to `Module.se1ModInbox` (API v11).
+    pub fn page_recv(&self) -> Option<String> {
+        let f = self.raw.page_recv?;
+        let mut buf = vec![0u8; 4096];
+        let r = f(buf.as_mut_ptr() as *mut c_char, buf.len() as c_int);
+        if r == 0 {
+            return None;
+        }
+        if r < 0 {
+            // cap too small: the message stays queued; reallocate and try again
+            buf.resize((-r) as usize, 0);
+            let r = f(buf.as_mut_ptr() as *mut c_char, buf.len() as c_int);
+            (r > 0).then(|| String::from_utf8_lossy(&buf[..r as usize]).into_owned())
+        } else {
+            Some(String::from_utf8_lossy(&buf[..r as usize]).into_owned())
+        }
+    }
+    /// Pickup items in the world, picked or not (API v11): (entity id, kind << 8 | type, position).
+    pub fn pickups(&self, max: usize) -> Vec<(u32, i32, [f32; 3])> {
+        let Some(f) = self.raw.pickups else { return Vec::new() };
+        let (mut ids, mut kt, mut p) = (vec![0i32; max], vec![0i32; max], vec![0f32; max * 3]);
+        let n = f(ids.as_mut_ptr(), kt.as_mut_ptr(), p.as_mut_ptr(), max as c_int).max(0) as usize;
+        (0..n.min(max)).map(|i| (ids[i] as u32, kt[i], [p[i * 3], p[i * 3 + 1], p[i * 3 + 2]])).collect()
     }
     /// Positions of the live players that are not bots.
     pub fn humans(&self, max: usize) -> Vec<[f32; 3]> {

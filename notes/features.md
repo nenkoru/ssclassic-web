@@ -61,6 +61,7 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
 | Threat warnings + hit direction | ✅ | survivors (mod + page) for now; move to a shared HUD module when war mode needs it. Host `player_hurt` (API v7) | `?svthreats=0` | threattest | Survivors |
 | Survivors auto guns (every owned gun fires on its own) | ✅ | survivors mod (`auto_guns`), data.rs `AUTO_GUNS` | `?svautofire=0` | autogunstest, autofiretest | Survivors |
 | Playtest recording + report | ✅ | port/web/playtest.js, lib.rs `post_telemetry`, tools/devserver.py, tools/playtest-report.py | `?rec=1` | playtesttest, test_playtest_report.py | mod |
+| Archipelago client (weapon pickups as checks, weapons as items) | 🧪 | port/web/archipelago.js (socket), rust/se1-mod/src/archipelago.rs, archipelago/serioussam_tfe (APWorld, tfe.toml); host `page_recv`, `pickups` (API v11); `WeaponItem.es` hook | `?ap=host:port`, `slot=`, `appass=`, `apscan=1`, `level=` | aptest, cargo test | mod |
 | Benchmarks, visual regression | ✅ | port/web/bench.js, tools/{bench.mjs,shotdiff.py} | `?timedemo`, `?shots=` | test.sh | — |
 | Bots: navigation graph | ✅ | rust/se1-mod/src/bots/nav.rs (pure Rust, behind the `World` trait); `impl Paths for NavGraph` in bots/mod.rs | — | tests/bots_nav_accept.rs | — |
 | Bots: brain | ✅ | rust/se1-mod/src/bots/brain.rs (pure Rust, behind the `Paths` trait) | — | tests/bots_brain_accept.rs, bots_brain_accept2.rs | — |
@@ -74,7 +75,7 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
 
 ## Engine changes since `vanilla`
 
-`git diff --stat vanilla -- src/` touches 9 files (as of 2026-11-20):
+`git diff --stat vanilla -- src/` touches 12 files (as of 2026-11-24):
 - `SDLInput.cpp`: touch, pad and pointer exports.
 - `Entity.cpp`: the damage hook.
 - `WorldRayCasting.cpp`: the bullet-magnetism ray radius.
@@ -85,5 +86,10 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
   `MakeAllActions`.
 - `Network/PlayerBuffer.cpp`, `PlayerBuffer.h`: the `plb_bVirtual` mark, so bot calls can never reach a
   human player.
+- `Engine/Base/Console.cpp` (TFE and TSE): each console line also goes to the page's console
+  (`SE1_WebConsolePut`, port/common/WebFrame.cpp).
+- `Entities/WeaponItem.es`: with `SE1_WITH_RUSTMOD`, the mod may take a weapon pickup of the local
+  player as an Archipelago check (`SE1Mod_Pickup`): the item is picked up but gives nothing
+  (notes/archipelago.md).
 
 Update this list when an engine change lands.

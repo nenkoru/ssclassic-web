@@ -16,6 +16,14 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 802
 %{
 #include "Entities/StdH/StdH.h"
+// port/common/Se1ModHost.cpp: the mod may take a weapon pickup as an Archipelago check (API v11).
+// A plain function, since Ecc can't parse preprocessor lines inside a procedure.
+#ifdef SE1_WITH_RUSTMOD
+int SE1Mod_Pickup(CEntity *penItem);
+static BOOL SE1ModTakesPickup(CEntity *penItem, CEntity *penPlayer) { return _pNetwork->IsPlayerLocal(penPlayer) && SE1Mod_Pickup(penItem); }
+#else
+static BOOL SE1ModTakesPickup(CEntity *penItem, CEntity *penPlayer) { return FALSE; }
+#endif
 #include "Models/Items/ItemHolder/ItemHolder.h"
 #include "Models/Weapons/Colt/ColtItem.h"
 #include "Models/Weapons/SingleShotgun/SingleShotgunItem.h"
@@ -430,6 +438,13 @@ procedures:
       }
     }
 
+    // Archipelago: the pickup is a location check; the player gets the item the server sends
+    if (SE1ModTakesPickup(this, epass.penOther)) {
+      m_soPick.Set3DParameters(50.0f, 1.0f, 1.0f, 1.0f);
+      PlaySound(m_soPick, SOUND_PICK, SOF_3D);
+      m_fPickSoundLen = GetSoundLength(SOUND_PICK);
+      jump CItem::ItemReceived();
+    }
     // send weapon to entity
     EWeaponItem eWeapon;
     eWeapon.iWeapon = m_EwitType;

@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-#define SE1MOD_API_VERSION 10
+#define SE1MOD_API_VERSION 11
 
 typedef struct SE1ModHost {
   uint32_t api_version;   /* SE1MOD_API_VERSION */
@@ -110,6 +110,17 @@ typedef struct SE1ModHost {
      *steep: 1 if the polygon hit is too steep to stand on (steeper than its surface type's climb
      slope: designers keep players in with slopes they slide down), else 0. */
   float (*ray_door)(const float *from3, const float *to3, int flags, uint32_t *door, int *steep);
+  /* v11: Archipelago (notes/archipelago.md).
+     page_recv: pop the oldest string the page pushed onto Module.se1ModInbox (an array) into buf,
+     NUL-terminated; returns its length in bytes, 0 if the queue is empty, or -(length+1) if cap is
+     too small (the message stays queued). The page-to-mod queue next to ui_poll's single int. */
+  int   (*page_recv)(char *buf, int cap);
+  /* pickup items in the world, picked or not: entity id (read from the world file, so stable for a
+     level), kind << 8 | type (kind 0 health, 1 armor, 2 ammo, 3 weapon, 4 key; type is the item's
+     HealthItemType, ArmorItemType, AmmoItemType, WeaponItemType or KeyItemType) plus 0x10000 when
+     it is visible (can be picked up now; hidden ones appear later or are precache copies),
+     position; returns how many were written */
+  int   (*pickups)(int32_t *ids, int32_t *kind_type, float *pos3, int max);
 } SE1ModHost;
 
 /* called once after the engine and game library are initialized; returns 0 on success */
@@ -130,6 +141,10 @@ float se1mod_damage(int target, int source, int damage_type, float amount, int w
 /* v8: called on the server once per simulated tick, before the tick's actions go out: set the
    bots' actions here (host->bot_action) */
 void se1mod_bot_tick(void);
+/* v11: the local player touched a pickup (only weapon items call it so far: WeaponItem.es).
+   id, kind_type and pos are as in host.pickups. Return 1 to take it: the item disappears with its
+   pickup sound and the player gets nothing (an Archipelago location check); 0 lets the game give it. */
+int  se1mod_pickup(uint32_t id, int kind_type, const float *pos3);
 /* called when a new session (level) has started */
 void se1mod_level_started(const char *world_file);
 /* called before the engine shuts down */

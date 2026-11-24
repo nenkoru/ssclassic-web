@@ -1,0 +1,133 @@
+# Serious Sam: The First Encounter as an Archipelago game: the item and location tables.
+# One source of truth for both sides: the APWorld (archipelago/serioussam_tfe/__init__.py) reads it
+# with tomllib, and the Rust mod (rust/se1-mod/src/archipelago.rs) embeds it with include_str!.
+# Design: notes/archipelago.md. IDs never change once published (save files and servers keep them).
+#
+# items:     id = 5330000 + WeaponItemType (WeaponItem.es); `wit` is what host.give_weapon takes,
+#            `weapon` the WeaponType (PlayerWeapons.es) whose bit 1 << (weapon - 1) is in weapons_owned.
+# locations: id = 5340000 + level * 1000 + n. `world` is the file se1mod_level_started reports,
+#            `entity` the pickup's entity id in that world file (host.pickups; tools/apscan.mjs).
+
+game = "Serious Sam TFE"
+
+[[item]]
+id = 5330002
+name = "Single Shotgun"
+kind = "weapon"
+wit = 2
+weapon = 4
+classification = "progression"
+
+[[item]]
+id = 5330003
+name = "Double Shotgun"
+kind = "weapon"
+wit = 3
+weapon = 5
+classification = "progression"
+
+[[item]]
+id = 5330004
+name = "Tommygun"
+kind = "weapon"
+wit = 4
+weapon = 6
+classification = "progression"
+
+[[item]]
+id = 5330005
+name = "Minigun"
+kind = "weapon"
+wit = 5
+weapon = 7
+classification = "progression"
+
+[[item]]
+id = 5330006
+name = "Rocket Launcher"
+kind = "weapon"
+wit = 6
+weapon = 8
+classification = "useful"
+
+[[item]]
+id = 5330007
+name = "Grenade Launcher"
+kind = "weapon"
+wit = 7
+weapon = 9
+classification = "useful"
+
+[[item]]
+id = 5330010
+name = "Laser"
+kind = "weapon"
+wit = 10
+weapon = 14
+classification = "useful"
+
+[[item]]
+id = 5330012
+name = "Cannon"
+kind = "weapon"
+wit = 12
+weapon = 16
+classification = "useful"
+
+# Hatshepsut (level 1): its 7 weapon pickups, from a scan (?apscan=1&level=Levels/01_Hatshepsut.wld).
+
+[[location]]
+id = 5341001
+name = "Hatshepsut: Colt 1"
+world = "Levels/01_Hatshepsut.wld"
+entity = 1400
+kind = "weapon"
+wit = 1
+
+[[location]]
+id = 5341002
+name = "Hatshepsut: Single Shotgun 1"
+world = "Levels/01_Hatshepsut.wld"
+entity = 1401
+kind = "weapon"
+wit = 2
+
+[[location]]
+id = 5341003
+name = "Hatshepsut: Single Shotgun 2"
+world = "Levels/01_Hatshepsut.wld"
+entity = 1402
+kind = "weapon"
+wit = 2
+
+[[location]]
+id = 5341004
+name = "Hatshepsut: Colt 2"
+world = "Levels/01_Hatshepsut.wld"
+entity = 1509
+kind = "weapon"
+wit = 1
+
+[[location]]
+id = 5341005
+name = "Hatshepsut: Double Shotgun"
+world = "Levels/01_Hatshepsut.wld"
+entity = 1510
+kind = "weapon"
+wit = 3
+
+[[location]]
+id = 5341006
+name = "Hatshepsut: Colt 3"
+world = "Levels/01_Hatshepsut.wld"
+entity = 1520
+kind = "weapon"
+wit = 1
+
+[[location]]
+id = 5341007
+name = "Hatshepsut: Rocket Launcher"
+world = "Levels/01_Hatshepsut.wld"
+entity = 1830
+kind = "weapon"
+wit = 6

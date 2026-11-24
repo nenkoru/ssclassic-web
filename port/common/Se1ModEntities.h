@@ -22,4 +22,6 @@ float SE1ModEnt_Armor(CEntity *penPlayer);
 void SE1ModEnt_Eye(CEntity *penPlayer, FLOAT3D &pos, FLOAT3D &dir);
 int SE1ModEnt_PlayerBlocked(CEntity *penPlayer);   /* 1 camera sequence, 2 auto-actions */
 void SE1ModEnt_EndAutoActions(CEntity *penPlayer);
+void SE1ModEnt_SkipCutscene(CEntity *penPlayer);   /* test hook: what a fire press does to a camera sequence */
 int SE1ModEnt_ProjectileWeapon(CEntity *pen);   /* WeaponType the projectile was fired with, 0 if not a player projectile */
+int SE1ModEnt_PickupKind(CEntity *pen);   /* kind << 8 | type of a pickup item (se1mod.h pickups), -1 if not one */

@@ -11,6 +11,7 @@ pub mod host;
 pub mod bots;
 mod quality;
 mod survivors;
+mod archipelago;
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, CStr};
@@ -32,6 +33,9 @@ struct ModState {
     playtest: Option<bool>,
     tel_t: f64,
     world: String,
+    // Archipelago (API v11, notes/archipelago.md): created lazily when the page option is set
+    ap: Option<archipelago::Archipelago>,
+    ap_checked: bool,
 }
 
 /// The auto quality controller plus the original cvar values it restores to.
@@ -182,8 +186,19 @@ pub extern "C" fn se1mod_init(raw: *const SE1ModHost) -> c_int {
     apply_cvars(&host, &config.cvars);
     run_commands(&host, &config.startup.commands);
 
-    unsafe { STATE = Some(ModState { host, bots: bots::runtime::Runtime::new(), config, frames: 0, survivors: None, quality: None, quality_last_tm: None, quality_checked: false, playtest: None, tel_t: 0.0, world: String::new() }) };
+    unsafe { STATE = Some(ModState { host, bots: bots::runtime::Runtime::new(), config, frames: 0, survivors: None, quality: None, quality_last_tm: None, quality_checked: false, playtest: None, tel_t: 0.0, world: String::new(), ap: None, ap_checked: false }) };
     0
+}
+
+/// Create the Archipelago client once when the page option is set (?ap=host:port, ?apscan=1: port/web/archipelago.js).
+fn ap_init(st: &mut ModState) {
+    if st.ap_checked {
+        return;
+    }
+    st.ap_checked = true;
+    if st.host.page_option("se1Ap") > 0.0 || st.host.page_option("se1ApScan") > 0.0 {
+        st.ap = archipelago::Archipelago::new(&st.host, st.host.page_option("se1Ap") > 0.0, st.host.page_option("se1ApScan") > 0.0);
+    }
 }
 
 /// Called once per presented frame.
@@ -193,6 +208,11 @@ pub extern "C" fn se1mod_frame(tm_real: f64) {
     st.frames += 1;
     if let Some(sv) = st.survivors.as_mut() {
         sv.frame(&st.host);
+    }
+    // Archipelago (API v11): create on the first frame when the page option is set
+    ap_init(st);
+    if let Some(ap) = st.ap.as_mut() {
+        ap.frame(&st.host);
     }
     // ?quality=auto: create the controller on the first frame when the page option is set
     if !st.quality_checked {
@@ -275,6 +295,25 @@ pub extern "C" fn se1mod_level_started(world_file: *const c_char) {
     if let Some(cmds) = st.config.level.per_world.get(&world) {
         run_commands(&st.host, cmds);
     }
+    // Archipelago (API v11): the first level may start before the first frame
+    ap_init(st);
+    if let Some(ap) = st.ap.as_mut() {
+        ap.level_started(&st.host, &world);
+    }
+}
+
+/// The local player touched a pickup (engine API v11, WeaponItem.es). Returns 1 to take it:
+/// the item disappears and the player gets nothing (an Archipelago location check); 0 lets
+/// the game give it.
+///
+/// The engine never calls this from within `se1mod_frame` (Archipelago weapons are given
+/// directly through `host.give_weapon`, not through a pickup item), so taking `state()` here
+/// is fine.
+#[no_mangle]
+pub extern "C" fn se1mod_pickup(id: u32, kind_type: c_int, _pos3: *const f32) -> c_int {
+    let Some(st) = state() else { return 0 };
+    let Some(ap) = st.ap.as_mut() else { return 0 };
+    ap.pickup(&st.host, id, kind_type) as c_int
 }
 
 /// The level's baked nav graph (tools/navbake.mjs), if the game data has one: bots are ready at

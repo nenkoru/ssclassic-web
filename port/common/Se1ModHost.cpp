@@ -293,6 +293,41 @@ static void host_log(const char *msg)
 }
 static int host_ui_poll(void) { int v = _iUiValue; if (v >= 0) _iUiValue = -1; return v; }
 
+/* v11: page -> mod string queue (Module.se1ModInbox) and the level's pickups (Archipelago) */
+#ifdef SE1_THREADS
+#define SE1_PAGE_ASM_INT MAIN_THREAD_EM_ASM_INT
+#else
+#define SE1_PAGE_ASM_INT EM_ASM_INT
+#endif
+static int host_page_recv(char *buf, int cap)
+{
+  return SE1_PAGE_ASM_INT({
+    var q = Module.se1ModInbox;
+    if (!q || !q.length) return 0;
+    var n = lengthBytesUTF8(q[0]);
+    if (n + 1 > $1) return -(n + 1);
+    stringToUTF8(q.shift(), $0, $1);
+    return n;
+  }, buf, cap);
+}
+static int host_pickups(int32_t *ids, int32_t *kindType, float *pos3, int max)
+{
+  int n = 0;
+  FOREACHINDYNAMICCONTAINER(_pNetwork->ga_World.wo_cenEntities, CEntity, iten) {
+    CEntity *pen = &*iten;
+    if (n >= max) break;
+    if (pen->GetFlags() & ENF_DELETED) continue;
+    int kt = SE1ModEnt_PickupKind(pen);
+    if (kt < 0) continue;
+    const FLOAT3D &v = pen->GetPlacement().pl_PositionVector;
+    if (pen->GetRenderType() == CEntity::RT_MODEL) kt |= 0x10000;   // visible: can be picked up now
+    ids[n] = (int32_t)pen->en_ulID; kindType[n] = kt;
+    pos3[n * 3 + 0] = v(1); pos3[n * 3 + 1] = v(2); pos3[n * 3 + 2] = v(3);
+    n++;
+  }
+  return n;
+}
+
 static BOOL _bModReady = FALSE;
 
 void SE1Mod_Init(void)
@@ -346,13 +381,69 @@ void SE1Mod_Init(void)
   host.armor = host_armor;
   host.player_eye = host_player_eye;
   host.player_hurt = host_player_hurt;
+  host.page_recv = host_page_recv;
+  host.pickups = host_pickups;
   SE1ModBots_Register(host);
   _bModReady = se1mod_init(&host) == 0;
   if (!_bModReady) host_log("se1mod: init failed (API version mismatch?)");
 }
 
-void SE1Mod_Frame(void) { if (_bModReady) se1mod_frame(_pTimer->GetHighPrecisionTimer().GetSeconds()); }
+/* Test hooks, applied on the game thread at the next frame (tools/aptest.mjs):
+   Module._SE1Mod_DebugTeleport(x, y, z) moves the local player; Module._SE1Mod_DebugSkipIntro()
+   ends the level's intro camera and auto-actions and closes NETRICSA, as a fire press would;
+   Module._SE1Mod_DebugTouch(id) makes the local player touch entity `id` (a pickup) with the EPass
+   event the physics sends when a player walks through an item (a teleport moves nobody through
+   anything, so it never touches). */
+static volatile int _iTeleportPending = 0, _iSkipIntroPending = 0;
+static volatile int32_t _iTouchPending = -1;
+extern "C" EMSCRIPTEN_KEEPALIVE void SE1Mod_DebugTouch(int32_t id) { _iTouchPending = id; }
+static float _vTeleport[3];
+extern "C" EMSCRIPTEN_KEEPALIVE void SE1Mod_DebugTeleport(float x, float y, float z)
+{
+  _vTeleport[0] = x; _vTeleport[1] = y; _vTeleport[2] = z; _iTeleportPending = 1;
+}
+extern "C" EMSCRIPTEN_KEEPALIVE void SE1Mod_DebugSkipIntro(void) { _iSkipIntroPending = 1; }
+void SE1Mod_Frame(void)
+{
+  if (_iSkipIntroPending) {
+    _iSkipIntroPending = 0;
+    SE1ModEnt_SkipCutscene(local_player());
+    host_close_computer();
+  }
+  if (_iTouchPending >= 0) {
+    ULONG ulID = (ULONG)_iTouchPending;
+    _iTouchPending = -1;
+    CEntity *penPlayer = local_player(), *pen = NULL;
+    FOREACHINDYNAMICCONTAINER(_pNetwork->ga_World.wo_cenEntities, CEntity, iten) {
+      if (iten->en_ulID == ulID && !(iten->GetFlags() & ENF_DELETED)) { pen = &*iten; break; }
+    }
+    if (pen != NULL && penPlayer != NULL) {
+      EPass ePass;
+      ePass.penOther = penPlayer;
+      ePass.bThisMoved = FALSE;
+      pen->SendEvent(ePass);
+    } else {
+      host_log("se1mod: DebugTouch: no such entity or no player");
+    }
+  }
+  if (_iTeleportPending) {
+    _iTeleportPending = 0;
+    CEntity *pen = local_player();
+    if (pen != NULL) pen->Teleport(CPlacement3D(FLOAT3D(_vTeleport[0], _vTeleport[1], _vTeleport[2]), pen->GetPlacement().pl_OrientationAngle), FALSE);
+  }
+  if (_bModReady) se1mod_frame(_pTimer->GetHighPrecisionTimer().GetSeconds());
+}
 void SE1Mod_LevelStarted(const char *strWorld) { if (_bModReady) se1mod_level_started(strWorld); }
+/* Pickup hook (API v11, WeaponItem.es): 1 when the mod takes the item (an Archipelago check) */
+int SE1Mod_Pickup(CEntity *penItem)
+{
+  if (!_bModReady || penItem == NULL) return 0;
+  int kt = SE1ModEnt_PickupKind(penItem);
+  if (kt < 0) return 0;
+  const FLOAT3D &v = penItem->GetPlacement().pl_PositionVector;
+  float pos[3] = { v(1), v(2), v(3) };
+  return se1mod_pickup((uint32_t)penItem->en_ulID, kt, pos);
+}
 void SE1Mod_Shutdown(void) { if (_bModReady) se1mod_shutdown(); _bModReady = FALSE; }
 
 /* Damage hook (API v6): ask the mod to scale the damage before it is applied.
