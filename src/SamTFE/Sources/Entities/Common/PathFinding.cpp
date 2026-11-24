@@ -13,6 +13,11 @@ You should have received a copy of the GNU General Public License along
 with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA. */
 
+#if defined(__EMSCRIPTEN__)
+// before the engine headers, so their macros can't reach into the STL
+#include <unordered_map>
+#include <vector>
+#endif
 #include "../StdH/StdH.h"
 #include "Entities/Common/PathFinding.h"
 #include "Entities/NavigationMarker.h"
@@ -190,6 +195,38 @@ static void ClearPath(CEntity *penThis)
 #endif
 }
 
+#if defined(SE1_RELATIONS_GENERATION)
+// Web port (perf): the navigation markers of each sector, cached. FindClosestMarker used to walk
+// every entity in the enemy's sectors with a class-name strcmp each, for every enemy that starts
+// path finding: with a horde in one big sector that is enemies x entities per tick (stress500:
+// StartPathFinding was ~10% of the engine thread). The cache keeps the markers in the order the
+// sector's entity list has them, so the closest marker and its ties come out exactly as before; it
+// is rebuilt whenever the sector's list changed (CRelationSrc generation: any entity entering or
+// leaving the sector), which is far rarer than the lookups.
+struct SectorMarkers {
+  unsigned long long sm_ullGeneration;
+  std::vector<CNavigationMarker *> sm_apnm;
+  SectorMarkers(void) : sm_ullGeneration(0) {}
+};
+static std::unordered_map<const CBrushSector *, SectorMarkers> _mapSectorMarkers;
+
+static const std::vector<CNavigationMarker *> &MarkersInSector(CBrushSector *pbsc)
+{
+  SectorMarkers &sm = _mapSectorMarkers[pbsc];
+  // generations start at 1 and are unique, so a new entry (0) or a sector that changed rebuilds
+  if (sm.sm_ullGeneration != pbsc->bsc_rsEntities.rs_ullGeneration) {
+    sm.sm_apnm.clear();
+    {FOREACHDSTOFSRC(pbsc->bsc_rsEntities, CEntity, en_rdSectors, pen)
+      if (IsOfClass(pen, "NavigationMarker")) {
+        sm.sm_apnm.push_back((CNavigationMarker *)pen);
+      }
+    ENDFOR}
+    sm.sm_ullGeneration = pbsc->bsc_rsEntities.rs_ullGeneration;
+  }
+  return sm.sm_apnm;
+}
+#endif
+
 // find marker closest to a given position
 static void FindClosestMarker(
     CEntity *penThis, const FLOAT3D &vSrc, CEntity *&penMarker, FLOAT3D &vPath)
@@ -198,12 +235,19 @@ static void FindClosestMarker(
   FLOAT fMinDist = UpperLimit(0.0f);
   // for each sector this entity is in
   {FOREACHSRCOFDST(penThis->en_rdSectors, CBrushSector, bsc_rsEntities, pbsc)
+#if defined(SE1_RELATIONS_GENERATION)
+    // for each navigation marker in that sector (cached, in the sector's list order)
+    const std::vector<CNavigationMarker *> &apnm = MarkersInSector(pbsc);
+    for (size_t inm = 0; inm < apnm.size(); inm++) {
+      CNavigationMarker &nm = *apnm[inm];
+#else
     // for each navigation marker in that sector
     {FOREACHDSTOFSRC(pbsc->bsc_rsEntities, CEntity, en_rdSectors, pen)
       if (!IsOfClass(pen, "NavigationMarker")) {
         continue;
       }
       CNavigationMarker &nm = (CNavigationMarker&)*pen;
+#endif
 
       // get distance from source
       FLOAT fDist = (vSrc-nm.GetPlacement().pl_PositionVector).Length();
@@ -213,7 +257,11 @@ static void FindClosestMarker(
         fMinDist = fDist;
         pnmMin = &nm;
       }
+#if defined(SE1_RELATIONS_GENERATION)
+    }
+#else
     ENDFOR}
+#endif
   ENDFOR}
 
   // if none found

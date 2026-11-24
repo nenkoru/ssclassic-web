@@ -1203,6 +1203,23 @@ functions:
     m_penPathMarker = penMarker;
   }
 
+  // Web port (perf): TRUE when StartPathFinding() is sure to fail because there is no first
+  // marker. Check*ForPathFinding() cast a visibility ray to the enemy only to choose between
+  // DT_PATHPERSISTENT and DT_PATHTEMPORARY, and every StartPathFinding() (this one, EnemyFly's,
+  // EnemyDive's) overwrites that with DT_PLAYERSPOTTED when it finds no first marker; the ray has
+  // no side effects and PATH_FindFirstMarker() is pure, so the ray can be skipped then. A horde
+  // pushing on each other gets several ETouch events per enemy per tick, each one casting this ray
+  // (stress500 on KarnakDemo: about half of all the enemies' visibility rays).
+  BOOL NoFirstPathMarker(void)
+  {
+    CEntity *penMarker;
+    FLOAT3D vPath;
+    PATH_FindFirstMarker(this,
+      GetPlacement().pl_PositionVector, m_penEnemy->GetPlacement().pl_PositionVector,
+      penMarker, vPath);
+    return penMarker==NULL;
+  }
+
   // check if a touch event triggers pathfinding
   BOOL CheckTouchForPathFinding(const ETouch &eTouch)
   {
@@ -1223,6 +1240,10 @@ functions:
     vDir*=GetRotationMatrix();
     // if the touched plane is more or less orthogonal to the current velocity
     if ((eTouch.plCollision%vDir)<-0.5f) {
+      // web port (perf): see NoFirstPathMarker()
+      if (PATH_SKIP_UNUSED_RAYS && NoFirstPathMarker()) {
+        m_dtDestination = DT_PATHTEMPORARY;
+      } else
       if (m_penEnemy!=NULL && IsVisible(m_penEnemy)) {
         m_dtDestination = DT_PATHPERSISTENT;
       } else {
@@ -1250,6 +1271,10 @@ functions:
       return FALSE;
     }
 
+    // web port (perf): see NoFirstPathMarker()
+    if (PATH_SKIP_UNUSED_RAYS && NoFirstPathMarker()) {
+      m_dtDestination = DT_PATHTEMPORARY;
+    } else
     if (m_penEnemy!=NULL && IsVisible(m_penEnemy)) {
       m_dtDestination = DT_PATHPERSISTENT;
     } else {

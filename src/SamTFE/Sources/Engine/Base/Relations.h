@@ -21,10 +21,23 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include <Engine/Base/Lists.h>
 
+#if defined(__EMSCRIPTEN__)
+// Web port (perf): every change to a domain member's list of links (a link added or removed) gives
+// it a new generation number, unique over the whole run, so code can cache what it derives from
+// the list and know when to rebuild (Entities/Common/PathFinding.cpp: navigation markers per
+// sector). Generations never repeat, so a new member at a freed member's address can't match.
+extern ENGINE_API unsigned long long _ullRelationGeneration;
+#define SE1_RELATIONS_GENERATION 1
+#endif
+
 // Object representing a link at the member of relation domain.
 class CRelationSrc : public CListHead {
 public:
 // implementation:
+#if defined(SE1_RELATIONS_GENERATION)
+  unsigned long long rs_ullGeneration;  // see _ullRelationGeneration
+  inline void Changed(void) { rs_ullGeneration = ++_ullRelationGeneration; }
+#endif
 // interface:
   // Construction/destruction.
   ENGINE_API CRelationSrc(void);

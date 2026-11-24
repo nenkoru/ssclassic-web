@@ -24,8 +24,15 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 // CRelationSrc
 
 // Construction/destruction.
+#if defined(SE1_RELATIONS_GENERATION)
+unsigned long long _ullRelationGeneration = 0;
+#endif
+
 CRelationSrc::CRelationSrc(void)
 {
+#if defined(SE1_RELATIONS_GENERATION)
+  Changed();
+#endif
 }
 
 CRelationSrc::~CRelationSrc(void)
@@ -72,6 +79,9 @@ CRelationLnk::CRelationLnk(void)
 
 CRelationLnk::~CRelationLnk(void)
 {
+#if defined(SE1_RELATIONS_GENERATION)
+  rl_prsSrc->Changed();
+#endif
   // unlink from both domain and codomain members
   rl_lnSrc.Remove();
   rl_lnDst.Remove();
@@ -96,6 +106,9 @@ void AddRelationPair(CRelationSrc &rsSrc, CRelationDst &rdDst)
   CRelationLnk &lnk = *new CRelationLnk;
   lnk.rl_prsSrc = &rsSrc;
   lnk.rl_prdDst = &rdDst;
+#if defined(SE1_RELATIONS_GENERATION)
+  rsSrc.Changed();
+#endif
   // add the link to the domain and codomain members
   rsSrc.AddTail(lnk.rl_lnSrc);
   rdDst.AddTail(lnk.rl_lnDst);
@@ -106,6 +119,9 @@ void AddRelationPairTailTail(CRelationSrc &rsSrc, CRelationDst &rdDst)
   CRelationLnk &lnk = *new CRelationLnk;
   lnk.rl_prsSrc = &rsSrc;
   lnk.rl_prdDst = &rdDst;
+#if defined(SE1_RELATIONS_GENERATION)
+  rsSrc.Changed();
+#endif
   // add the link to the domain and codomain members
   rsSrc.AddTail(lnk.rl_lnSrc);
   rdDst.AddTail(lnk.rl_lnDst);
@@ -116,6 +132,9 @@ void  AddRelationPairHeadHead(CRelationSrc &rsSrc, CRelationDst &rdDst)
   CRelationLnk &lnk = *new CRelationLnk;
   lnk.rl_prsSrc = &rsSrc;
   lnk.rl_prdDst = &rdDst;
+#if defined(SE1_RELATIONS_GENERATION)
+  rsSrc.Changed();
+#endif
   // add the link to the domain and codomain members
   rsSrc.AddHead(lnk.rl_lnSrc);
   rdDst.AddHead(lnk.rl_lnDst);

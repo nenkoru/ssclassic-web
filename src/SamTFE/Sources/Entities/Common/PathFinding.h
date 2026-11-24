@@ -50,6 +50,13 @@ DECL_DLL void PATH_FindFirstMarker(
 DECL_DLL void PATH_FindNextMarker(
     CEntity *penThis, const FLOAT3D &vSrc, const FLOAT3D &vDst, CEntity *&penMarker, FLOAT3D &vPath);
 
+// web port (perf): CEnemyBase::NoFirstPathMarker() lets enemies skip visibility rays whose result
+// can't matter (.es procedure bodies can't hold preprocessor lines, hence a constant)
+#if defined(__EMSCRIPTEN__)
+#define PATH_SKIP_UNUSED_RAYS 1
+#else
+#define PATH_SKIP_UNUSED_RAYS 0
+#endif
 
 #endif  /* include-once check. */
 
