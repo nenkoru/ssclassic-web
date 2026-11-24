@@ -25,6 +25,8 @@ What's next, in rough priority order. Details and measurements live in notes/ren
    "locations", weapons, keys and level unlocks as "items". It joins the existing multiworld
    (about 80 games, including Doom via APDOOM and an existing Fusion integration) before we build
    anything of our own.
+   Prototype done (notes/archipelago.md, `tools/aptest.mjs`): Hatshepsut's weapon pickups are
+   checks, weapons are items. Next: the other pickups, secrets, level exits and unlocks, keys.
 2. **TFE↔TSE live portal:** two same-origin iframes on one hub page. It answers the open questions:
    the per-frame canvas copy, memory with two heaps, joining mid-game.
 3. **War server** in `rust/se1-server`: fronts, heartbeats, distress calls, portal tickets; protocol
