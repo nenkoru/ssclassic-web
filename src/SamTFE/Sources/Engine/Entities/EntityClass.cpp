@@ -590,6 +590,33 @@ void CDLLEntityClass::PrecacheClass(SLONG slID, INDEX iUser /* = -1 */)
     pecClass->ec_pecEntityClass->ec_pdecDLLClass, iUser);
 }
 
+#if defined(__EMSCRIPTEN__)
+// Web port (perf): HandlerForStateAndEvent is a linear search through the class's handler table,
+// then its base classes' (CEnemyBase has hundreds of states), done for every state on an entity's
+// stack for every event it gets: ~4% of the engine thread with a horde (stress500). The answer
+// depends only on the (class, state) pair and the classes' tables never change, so remember it in
+// a small direct-mapped cache (per thread; an entry is used only if both keys match exactly).
+struct HandlerCacheEntry {
+  const CDLLEntityClass *hce_pdec;
+  SLONG hce_slState;
+  CEntity::pEventHandler hce_peh;
+};
+#define HANDLER_CACHE_SIZE 2048  // power of two
+static thread_local HandlerCacheEntry _ahceHandlerCache[HANDLER_CACHE_SIZE];
+
+static CEntity::pEventHandler HandlerForStateUncached(CDLLEntityClass *pdec, SLONG slState)
+{
+  for (; pdec!=NULL; pdec = pdec->dec_pdecBase) {
+    for (INDEX iHandler=0; iHandler<pdec->dec_ctHandlers; iHandler++) {
+      if (pdec->dec_aeheHandlers[iHandler].ehe_slState==slState) {
+        return pdec->dec_aeheHandlers[iHandler].ehe_pEventHandler;
+      }
+    }
+  }
+  return NULL;
+}
+#endif
+
 /*
  * Get event handler given state and event code.
  */
@@ -597,6 +624,20 @@ CEntity::pEventHandler CDLLEntityClass::HandlerForStateAndEvent(SLONG slState, S
 {
   // we ignore the event code here
   (void) slEvent;
+
+#if defined(__EMSCRIPTEN__)
+  {
+    ULONG ulHash = ((ULONG)(size_t)this>>3) ^ ((ULONG)slState*2654435761U);
+    ulHash ^= ulHash>>15;
+    HandlerCacheEntry &hce = _ahceHandlerCache[ulHash&(HANDLER_CACHE_SIZE-1)];
+    if (hce.hce_pdec!=this || hce.hce_slState!=slState) {
+      hce.hce_peh = HandlerForStateUncached(this, slState);
+      hce.hce_pdec = this;
+      hce.hce_slState = slState;
+    }
+    return hce.hce_peh;
+  }
+#endif
 
   // for each handler
   for (INDEX iHandler=0; iHandler<dec_ctHandlers; iHandler++) {
