@@ -405,8 +405,11 @@ static void attrib_pointer(int l, int size, GLenum type, int norm, int stride, s
   w[0].i = l; w[1].i = size; w[2].i = (int)type; w[3].i = norm; w[4].i = stride; w[5].i = (int)off;
 }
 
-static void shim_init(void) {
-  if (S.inited) return;
+/* every entry point calls shim_init(): keep the check inline, the one-time setup out of line
+   (as a called function it was 0.6% of the engine thread with 500 models on screen) */
+static void shim_init_once(void);
+static inline __attribute__((always_inline)) void shim_init(void) { if (__builtin_expect(!S.inited, 0)) shim_init_once(); }
+static __attribute__((noinline)) void shim_init_once(void) {
   S.inited = 1;
   mat_identity(&S.modelview); mat_identity(&S.projection);
   S.matrixMode = GL1_MODELVIEW;

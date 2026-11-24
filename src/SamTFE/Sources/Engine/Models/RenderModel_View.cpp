@@ -32,6 +32,9 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <Engine/Templates/StaticStackArray.cpp>
 
 #include <Engine/Models/RenderModel_internal.h>
+#if defined(__wasm_simd128__)
+#include <wasm_simd128.h>
+#endif
 
 // asm shortcuts
 #define O offset
@@ -1141,19 +1144,57 @@ static void *UnpackCache_Alloc( SLONG slBytes)
   return pv;
 }
 
-// find (or make) the cache entry for this model's current frame; NULL if it can't be cached
-static UnpackCacheEntry *UnpackCache_Find( CRenderModel &rm)
+// texture coordinates of a mip scaled to the diffuse texture size are the same for every instance too
+struct TexCoordCacheEntry {
+  const ModelMipInfo *tce_pmmi;
+  FLOAT tce_fCorrU, tce_fCorrV;
+  GFXTexCoord *tce_ptex;
+  BOOL tce_bFilled;
+};
+#define TCE_MAXENTRIES 64
+static TexCoordCacheEntry _atceEntries[TCE_MAXENTRIES];
+static INDEX _ctTceEntries = 0;
+
+// new rendered frame or model data changed: start over
+static void UnpackCache_Check(void)
 {
-  if( !mdl_bUnpackCache) return NULL;
-  // new rendered frame or model data changed: start over
   if( _iUceFrame!=_pGfx->gl_iFrameNumber || _ulUceGen!=_ulModelUnpackCacheGen) {
     _iUceFrame = _pGfx->gl_iFrameNumber;
     _ulUceGen  = _ulModelUnpackCacheGen;
     if( _ctUceEntries>0) memset( _aiUceHash, 0, sizeof(_aiUceHash));
     _ctUceEntries = 0;
+    _ctTceEntries = 0;
     _iUceChunk = 0;
     _slUceChunkUsed = 0;
   }
+}
+
+static TexCoordCacheEntry *TexCoordCache_Find( const ModelMipInfo &mmi, FLOAT fCorrU, FLOAT fCorrV)
+{
+  if( !mdl_bUnpackCache) return NULL;
+  UnpackCache_Check();
+  for( INDEX i=0; i<_ctTceEntries; i++) {
+    TexCoordCacheEntry &tce = _atceEntries[i];
+    // compare bits (the values are always finite here)
+    if( tce.tce_pmmi==&mmi && memcmp(&tce.tce_fCorrU,&fCorrU,4)==0 && memcmp(&tce.tce_fCorrV,&fCorrV,4)==0) return &tce;
+  }
+  if( _ctTceEntries>=TCE_MAXENTRIES) return NULL;
+  GFXTexCoord *ptex = (GFXTexCoord*)UnpackCache_Alloc( mmi.mmpi_ctSrfVx*sizeof(GFXTexCoord));
+  if( ptex==NULL) return NULL;
+  TexCoordCacheEntry &tce = _atceEntries[_ctTceEntries++];
+  tce.tce_pmmi = &mmi;
+  tce.tce_fCorrU = fCorrU;
+  tce.tce_fCorrV = fCorrV;
+  tce.tce_ptex = ptex;
+  tce.tce_bFilled = FALSE;
+  return &tce;
+}
+
+// find (or make) the cache entry for this model's current frame; NULL if it can't be cached
+static UnpackCacheEntry *UnpackCache_Find( CRenderModel &rm)
+{
+  if( !mdl_bUnpackCache) return NULL;
+  UnpackCache_Check();
   UnpackCacheKey key;
   memset( &key, 0, sizeof(key));
   if( rm.rm_pmdModelData->md_Flags & MF_COMPRESSED_16BIT) {
@@ -1224,6 +1265,55 @@ static void ShadesFromNormals( CRenderModel &rm)
   const FLOAT fLightObjX = rm.rm_vLightObj(1) * -255.0f;
   const FLOAT fLightObjY = rm.rm_vLightObj(2) * -255.0f;
   const FLOAT fLightObjZ = rm.rm_vLightObj(3) * -255.0f;
+#if defined(__wasm_simd128__)
+  // 4 vertices at a time, then ShadesToColors() per lane: the same float ops in the same order,
+  // FloatToInt as f+copysign(0.5,f) truncated, the SWORD store, the clamp and the pubClipByte
+  // clamp (indices stay within its -512..1023 range), so the colors are bit-identical
+  {
+    const v128_t vLX = wasm_f32x4_splat(fLightObjX);
+    const v128_t vLY = wasm_f32x4_splat(fLightObjY);
+    const v128_t vLZ = wasm_f32x4_splat(fLightObjZ);
+    const v128_t vSign = wasm_i32x4_splat(0x80000000);
+    const v128_t vHalf = wasm_f32x4_splat(0.5f);
+    const v128_t vZero = wasm_i32x4_splat(0);
+    const v128_t v255  = wasm_i32x4_splat(255);
+    const v128_t vLR = wasm_i32x4_splat(_slLR), vLG = wasm_i32x4_splat(_slLG), vLB = wasm_i32x4_splat(_slLB);
+    const v128_t vAR = wasm_i32x4_splat(_slAR), vAG = wasm_i32x4_splat(_slAG), vAB = wasm_i32x4_splat(_slAB);
+    const FLOAT *pfNor = &pnorMipBase[0].nx;
+    INDEX iMipVx=0;
+    for( ; iMipVx+4<=_ctAllMipVx; iMipVx+=4) {
+      const v128_t a = wasm_v128_load( pfNor + iMipVx*3 + 0);  // x0 y0 z0 x1
+      const v128_t b = wasm_v128_load( pfNor + iMipVx*3 + 4);  // y1 z1 x2 y2
+      const v128_t c = wasm_v128_load( pfNor + iMipVx*3 + 8);  // z2 x3 y3 z3
+      const v128_t vNX = wasm_i32x4_shuffle( wasm_i32x4_shuffle( a, b, 0, 3, 6, 6), c, 0, 1, 2, 5);
+      const v128_t vNY = wasm_i32x4_shuffle( wasm_i32x4_shuffle( a, b, 1, 4, 7, 7), c, 0, 1, 2, 6);
+      const v128_t vNZ = wasm_i32x4_shuffle( wasm_i32x4_shuffle( a, b, 2, 5, 5, 5), c, 0, 1, 4, 7);
+      const v128_t vDot = wasm_f32x4_add( wasm_f32x4_add( wasm_f32x4_mul(vNX,vLX), wasm_f32x4_mul(vNY,vLY)), wasm_f32x4_mul(vNZ,vLZ));
+      const v128_t vRound = wasm_v128_or( vHalf, wasm_v128_and( vDot, vSign));  // copysignf(0.5f, f)
+      v128_t vShade = wasm_i32x4_trunc_sat_f32x4( wasm_f32x4_add( vDot, vRound));
+      vShade = wasm_i32x4_shr( wasm_i32x4_shl( vShade, 16), 16);  // stored as SWORD
+      vShade = wasm_i32x4_min( wasm_i32x4_max( vShade, vZero), v255);
+      const v128_t vR = wasm_i32x4_min( wasm_i32x4_max( wasm_i32x4_add( vAR, wasm_i32x4_shr( wasm_i32x4_mul( vLR, vShade), 8)), vZero), v255);
+      const v128_t vG = wasm_i32x4_min( wasm_i32x4_max( wasm_i32x4_add( vAG, wasm_i32x4_shr( wasm_i32x4_mul( vLG, vShade), 8)), vZero), v255);
+      const v128_t vB = wasm_i32x4_min( wasm_i32x4_max( wasm_i32x4_add( vAB, wasm_i32x4_shr( wasm_i32x4_mul( vLB, vShade), 8)), vZero), v255);
+      const v128_t vCol = wasm_v128_or( wasm_v128_or( vR, wasm_i32x4_shl( vG, 8)), wasm_v128_or( wasm_i32x4_shl( vB, 16), wasm_i32x4_shl( vShade, 24)));
+      wasm_v128_store( &pcolMipBase[iMipVx], vCol);
+    }
+    // the rest one by one
+    for( ; iMipVx<_ctAllMipVx; iMipVx++) {
+      const FLOAT fNX = pnorMipBase[iMipVx].nx;
+      const FLOAT fNY = pnorMipBase[iMipVx].ny;
+      const FLOAT fNZ = pnorMipBase[iMipVx].nz;
+      const SLONG slShade = Clamp( (SLONG)(SWORD)FloatToInt(fNX*fLightObjX + fNY*fLightObjY + fNZ*fLightObjZ), (SLONG)0, (SLONG)255);
+      GFXColor &col = pcolMipBase[iMipVx];
+      col.ub.r = pubClipByte[_slAR + ((_slLR*slShade)>>8)];
+      col.ub.g = pubClipByte[_slAG + ((_slLG*slShade)>>8)];
+      col.ub.b = pubClipByte[_slAB + ((_slLB*slShade)>>8)];
+      col.ub.a = slShade;
+    }
+    return;
+  }
+#endif
   SWORD *pswMipCol = (SWORD*)&pcolMipBase[_ctAllMipVx>>1];
   for( INDEX iMipVx=0; iMipVx<_ctAllMipVx; iMipVx++) {
     const FLOAT fNX = pnorMipBase[iMipVx].nx;
@@ -2359,6 +2449,11 @@ srfVtxLoop:
   const COLOR colB = AdjustColor( rm.rm_colBlend,                    _slTexHueShift, _slTexSaturation);
   colMdlDiff.MultiplyRGBA( colD, colB);
 
+  // diffuse texture coordinates: shared between instances (see TexCoordCache_Find)
+  TexCoordCacheEntry *ptce = TexCoordCache_Find( mmi, fTexCorrU, fTexCorrV);
+  GFXTexCoord *ptexDiffArray = (ptce!=NULL) ? ptce->tce_ptex : &_atexSrfBase[0];
+  const BOOL bTexCoordsDone = (ptce!=NULL) && ptce->tce_bFilled;
+
   // for each surface in current mip model
   {FOREACHINSTATICARRAY( mmi.mmpi_MappingSurfaces, MappingSurface, itms)
   {
@@ -2369,7 +2464,7 @@ srfVtxLoop:
     // cache surface pointers
     puwSrfToMip = &mmi.mmpi_auwSrfToMip[iSrfVx0];
     pvTexCoord  = &mmi.mmpi_avmexTexCoord[iSrfVx0];
-    ptexSrfBase = &_atexSrfBase[iSrfVx0];
+    ptexSrfBase = &ptexDiffArray[iSrfVx0];
     pcolSrfBase = &_acolSrfBase[iSrfVx0];
 
     // get surface diffuse color and combine with model color
@@ -2377,6 +2472,7 @@ srfVtxLoop:
     const COLOR colD = AdjustColor( ms.ms_colDiffuse, _slTexHueShift, _slTexSaturation);
     colSrfDiff.MultiplyRGBA( colD, colMdlDiff);
 
+    if( !bTexCoordsDone) {
 #if (defined __MSVC_INLINE__)
     // setup texcoord array
     __asm {
@@ -2455,6 +2551,7 @@ vtxEnd:
       ptexSrfBase[iSrfVx].st.t = pvTexCoord[iSrfVx](2) *fTexCorrV;
     }
 #endif
+    } // texcoords
 
     // setup color array
     if( ms.ms_sstShadingType==SST_FULLBRIGHT) {
@@ -2501,7 +2598,26 @@ diffColLoop:
       // setup color array
       const COLOR colS = colSrfDiff.ul.abgr;
       // setup diffuse color array
-      for( INDEX iSrfVx=0; iSrfVx<ctSrfVx; iSrfVx++) {
+      INDEX iSrfVx=0;
+#if defined(__wasm_simd128__)
+      // 4 at a time, per byte exactly MultiplyRGBCopyA1: (r1*r2)>>8 (<=254, fits 16 bits), alpha of colSrfDiff
+      {
+        const v128_t vS = wasm_u16x8_make( colSrfDiff.ub.r, colSrfDiff.ub.g, colSrfDiff.ub.b, 0,
+                                           colSrfDiff.ub.r, colSrfDiff.ub.g, colSrfDiff.ub.b, 0);
+        const v128_t vRGBMask = wasm_i32x4_splat(0x00FFFFFF);
+        const v128_t vA = wasm_i32x4_splat( (SLONG)((ULONG)colSrfDiff.ub.a<<24));
+        const ULONG *pulMip = (const ULONG*)pcolMipBase;
+        for( ; iSrfVx+4<=ctSrfVx; iSrfVx+=4) {
+          const v128_t vM = wasm_u32x4_make( pulMip[puwSrfToMip[iSrfVx+0]], pulMip[puwSrfToMip[iSrfVx+1]],
+                                             pulMip[puwSrfToMip[iSrfVx+2]], pulMip[puwSrfToMip[iSrfVx+3]]);
+          const v128_t vLo = wasm_u16x8_shr( wasm_i16x8_mul( wasm_u16x8_extend_low_u8x16(vM),  vS), 8);
+          const v128_t vHi = wasm_u16x8_shr( wasm_i16x8_mul( wasm_u16x8_extend_high_u8x16(vM), vS), 8);
+          const v128_t vC = wasm_v128_or( wasm_v128_and( wasm_u8x16_narrow_i16x8( vLo, vHi), vRGBMask), vA);
+          wasm_v128_store( &pcolSrfBase[iSrfVx], vC);
+        }
+      }
+#endif
+      for( ; iSrfVx<ctSrfVx; iSrfVx++) {
         const INDEX iMipVx = puwSrfToMip[iSrfVx];
         pcolSrfBase[iSrfVx].MultiplyRGBCopyA1( colSrfDiff, pcolMipBase[iMipVx]);
       }
@@ -2519,6 +2635,7 @@ diffColLoop:
       else AttenuateAlpha( pshdMipFogy, ctSrfVx);
     }
   }}
+  if( ptce!=NULL) ptce->tce_bFilled = TRUE;
   // done with diffuse surfaces setup
   _pfModelProfile.StopTimer( CModelProfile::PTI_VIEW_INIT_DIFF_SURF);
 
@@ -2554,7 +2671,7 @@ diffColLoop:
     INDEX iFrame=0;
     if( ptdDiff!=NULL) iFrame = mo_toTexture.GetFrame();;
     SetCurrentTexture( ptdDiff, iFrame);
-    gfxSetTexCoordArray( &_atexSrfBase[0], FALSE);
+    gfxSetTexCoordArray( ptexDiffArray, FALSE);
     gfxSetColorArray(    &_acolSrfBase[0]);
     // do rendering
     RenderOneSide( rm, TRUE,  SRF_DIFFUSE);
