@@ -92,6 +92,8 @@ static FLOAT       *ptx1MipHaze;
 static UBYTE       *pshdMipHaze;
 static FLOAT       *pooqMipShad;
 static UWORD       *puwSrfToMip;
+extern ULONG _ulModelUnpackCacheGen;
+static GFXVertex4  *_pvtxSrfArray;  // surface vertices of the model being rendered (_avtxSrfBase or the unpack cache)
 
 // misc
 static ULONG _ulColorMask = 0;
@@ -580,6 +582,7 @@ extern void PrepareModelForRendering( CModelData &md)
 {
   // do nothing, if the model has already been initialized for rendering
   if( md.md_bPreparedForRendering) return;
+  _ulModelUnpackCacheGen++;  // mip infos are rebuilt: drop unpack cache entries
   _pfModelProfile.StartTimer( CModelProfile::PTI_VIEW_PREPAREFORRENDERING);
   _pfWorldEditingProfile.StartTimer(CWorldEditingProfile::PTI_TRISTRIPMODELS);
   // prepare each mip model
@@ -942,7 +945,7 @@ static void RenderColors( CRenderModel &rm)
   gfxDisableTexture();
   gfxEnableDepthWrite();
 
-  gfxSetVertexArray( &_avtxSrfBase[0], _avtxSrfBase.Count());
+  gfxSetVertexArray( _pvtxSrfArray, _avtxSrfBase.Count());
   gfxSetColorArray(  &_acolSrfBase[0]);
 
   // for each surface in current mip model
@@ -995,7 +998,7 @@ static void RenderWireframe(CRenderModel &rm)
   gfxDisableTexture();
   gfxDisableDepthTest();
 
-  gfxSetVertexArray( &_avtxSrfBase[0], _avtxSrfBase.Count());
+  gfxSetVertexArray( _pvtxSrfArray, _avtxSrfBase.Count());
   gfxSetColorArray(  &_acolSrfBase[0]);
 
   COLOR colWire = _mrpModelRenderPrefs.GetInkColor()|CT_OPAQUE;
@@ -1080,6 +1083,155 @@ static void AttenuateColor( const UBYTE *pshdMip, const INDEX ctVertices)
     pcolSrfBase[iSrfVx].AttenuateRGB( pshdMip[iMipVx]);
   }
   _pfModelProfile.StopTimer( CModelProfile::PTI_VIEW_ATTENUATE_SURF);
+}
+
+
+// UNPACK CACHE (web port, perf): many instances of one model often show the very same animation
+// frame in one rendered frame (500 monsters of a few kinds walking in step: ~70% of the unpacked
+// vertices were duplicates). Unpacked mip vertices, normals and surface vertices depend only on the
+// frame pair, lerp ratio, stretch, offset and mip, not on the instance, so they are computed once
+// per rendered frame and shared; each instance still computes its own shades from the cached
+// normals with the very same float expression (UnpackFrame), so every value is bit-identical.
+// Entries live until the next gl_iFrameNumber or until any model data is cleared or prepared
+// (_ulModelUnpackCacheGen), so freed frame data is never matched. Measured: stress500 UnpackFrame
+// self 8.9% -> see notes/perf/models.md.
+ULONG _ulModelUnpackCacheGen = 0;
+struct UnpackCacheKey {
+  const void *uck_pFrame0, *uck_pFrame1;
+  const ModelMipInfo *uck_pmmi;
+  ULONG uck_ulRatio;      // bits of the lerp ratio (0 if not lerping)
+  ULONG uck_aulStretch[3], uck_aulOffset[3];
+};
+struct UnpackCacheEntry {
+  UnpackCacheKey uce_key;
+  GFXVertex3 *uce_pvtx;   // mip vertices
+  GFXNormal3 *uce_pnor;   // mip normals
+  GFXVertex4 *uce_pvtxSrf;// surface vertices
+  BOOL uce_bFilled, uce_bSrfFilled;
+};
+#define UCE_HASHSIZE 2048   // power of 2
+#define UCE_MAXENTRIES 1024
+#define UCE_CHUNKBYTES (4<<20)
+#define UCE_MAXCHUNKS 16    // at most 64 MB per rendered frame, then no more caching
+static UnpackCacheEntry _auceEntries[UCE_MAXENTRIES];
+static INDEX _aiUceHash[UCE_HASHSIZE];  // entry+1, 0 = empty
+static INDEX _ctUceEntries = 0;
+static INDEX _iUceFrame = -1;
+static ULONG _ulUceGen = 0;
+static UBYTE *_apubUceChunks[UCE_MAXCHUNKS];
+static INDEX _iUceChunk = 0;
+static SLONG _slUceChunkUsed = 0;
+extern INDEX mdl_bUnpackCache;
+INDEX mdl_bUnpackCache = 1;
+
+static void *UnpackCache_Alloc( SLONG slBytes)
+{
+  slBytes = (slBytes+15)&~15;
+  if( slBytes>UCE_CHUNKBYTES) return NULL;
+  if( _slUceChunkUsed+slBytes>UCE_CHUNKBYTES) {
+    if( _iUceChunk+1>=UCE_MAXCHUNKS) return NULL;
+    _iUceChunk++;
+    _slUceChunkUsed = 0;
+  }
+  if( _apubUceChunks[_iUceChunk]==NULL) {
+    _apubUceChunks[_iUceChunk] = (UBYTE*)AllocMemoryAligned( UCE_CHUNKBYTES, 16);
+  }
+  void *pv = _apubUceChunks[_iUceChunk] + _slUceChunkUsed;
+  _slUceChunkUsed += slBytes;
+  return pv;
+}
+
+// find (or make) the cache entry for this model's current frame; NULL if it can't be cached
+static UnpackCacheEntry *UnpackCache_Find( CRenderModel &rm)
+{
+  if( !mdl_bUnpackCache) return NULL;
+  // new rendered frame or model data changed: start over
+  if( _iUceFrame!=_pGfx->gl_iFrameNumber || _ulUceGen!=_ulModelUnpackCacheGen) {
+    _iUceFrame = _pGfx->gl_iFrameNumber;
+    _ulUceGen  = _ulModelUnpackCacheGen;
+    if( _ctUceEntries>0) memset( _aiUceHash, 0, sizeof(_aiUceHash));
+    _ctUceEntries = 0;
+    _iUceChunk = 0;
+    _slUceChunkUsed = 0;
+  }
+  UnpackCacheKey key;
+  memset( &key, 0, sizeof(key));
+  if( rm.rm_pmdModelData->md_Flags & MF_COMPRESSED_16BIT) {
+    key.uck_pFrame0 = rm.rm_pFrame16_0;
+    key.uck_pFrame1 = rm.rm_pFrame16_1;
+  } else {
+    key.uck_pFrame0 = rm.rm_pFrame8_0;
+    key.uck_pFrame1 = rm.rm_pFrame8_1;
+  }
+  key.uck_pmmi = rm.rm_pmmiMip;
+  // the ratio only matters when lerping (UnpackFrame ignores it otherwise)
+  if( key.uck_pFrame0!=key.uck_pFrame1) memcpy( &key.uck_ulRatio, &rm.rm_fRatio, 4);
+  for( INDEX i=0; i<3; i++) {
+    const FLOAT fS = rm.rm_vStretch(i+1);  memcpy( &key.uck_aulStretch[i], &fS, 4);
+    const FLOAT fO = rm.rm_vOffset(i+1);   memcpy( &key.uck_aulOffset[i],  &fO, 4);
+  }
+  // hash
+  ULONG ulHash = 2166136261u;
+  const ULONG *pul = (const ULONG*)&key;
+  for( INDEX i=0; i<(INDEX)(sizeof(key)/4); i++) ulHash = (ulHash^pul[i])*16777619u;
+  ulHash ^= ulHash>>15;
+  INDEX iSlot = ulHash&(UCE_HASHSIZE-1);
+  for(;;) {
+    const INDEX iEntry = _aiUceHash[iSlot];
+    if( iEntry==0) break;
+    UnpackCacheEntry &uce = _auceEntries[iEntry-1];
+    if( memcmp( &uce.uce_key, &key, sizeof(key))==0) return &uce;
+    iSlot = (iSlot+1)&(UCE_HASHSIZE-1);
+  }
+  // not found: make a new entry if there is room
+  if( _ctUceEntries>=UCE_MAXENTRIES) return NULL;
+  const ModelMipInfo &mmi = *rm.rm_pmmiMip;
+  GFXVertex3 *pvtx = (GFXVertex3*)UnpackCache_Alloc( mmi.mmpi_ctMipVx*sizeof(GFXVertex3));
+  GFXNormal3 *pnor = (GFXNormal3*)UnpackCache_Alloc( mmi.mmpi_ctMipVx*sizeof(GFXNormal3));
+  GFXVertex4 *pvtxSrf = (GFXVertex4*)UnpackCache_Alloc( mmi.mmpi_ctSrfVx*sizeof(GFXVertex4));
+  if( pvtx==NULL || pnor==NULL || pvtxSrf==NULL) return NULL;
+  UnpackCacheEntry &uce = _auceEntries[_ctUceEntries++];
+  uce.uce_key = key;
+  uce.uce_pvtx = pvtx;
+  uce.uce_pnor = pnor;
+  uce.uce_pvtxSrf = pvtxSrf;
+  uce.uce_bFilled = FALSE;
+  uce.uce_bSrfFilled = FALSE;
+  _aiUceHash[iSlot] = _ctUceEntries;
+  return &uce;
+}
+
+
+// generate mip colors from mip shades (stored as SWORDs in the upper half of the color array)
+static void ShadesToColors(void)
+{
+  SWORD *pswMipCol = (SWORD*)&pcolMipBase[_ctAllMipVx>>1];
+  // generate colors from shades
+  for( INDEX iMipVx=0; iMipVx<_ctAllMipVx; iMipVx++) {
+    GFXColor &col = pcolMipBase[iMipVx];
+    const SLONG slShade = Clamp( (SLONG)pswMipCol[iMipVx], (SLONG)0, (SLONG)255);
+    col.ub.r = pubClipByte[_slAR + ((_slLR*slShade)>>8)];
+    col.ub.g = pubClipByte[_slAG + ((_slLG*slShade)>>8)];
+    col.ub.b = pubClipByte[_slAB + ((_slLB*slShade)>>8)];
+    col.ub.a = slShade;
+  }
+}
+
+
+// shades from already unpacked normals (unpack cache hit): the same expression as in UnpackFrame
+static void ShadesFromNormals( CRenderModel &rm)
+{
+  const FLOAT fLightObjX = rm.rm_vLightObj(1) * -255.0f;
+  const FLOAT fLightObjY = rm.rm_vLightObj(2) * -255.0f;
+  const FLOAT fLightObjZ = rm.rm_vLightObj(3) * -255.0f;
+  SWORD *pswMipCol = (SWORD*)&pcolMipBase[_ctAllMipVx>>1];
+  for( INDEX iMipVx=0; iMipVx<_ctAllMipVx; iMipVx++) {
+    const FLOAT fNX = pnorMipBase[iMipVx].nx;
+    const FLOAT fNY = pnorMipBase[iMipVx].ny;
+    const FLOAT fNZ = pnorMipBase[iMipVx].nz;
+    pswMipCol[iMipVx] = FloatToInt(fNX*fLightObjX + fNY*fLightObjY + fNZ*fLightObjZ);
+  }
+  ShadesToColors();
 }
 
 
@@ -1728,15 +1880,7 @@ colEnd:
     emms
   }
 #else
-    // generate colors from shades
-    for( INDEX iMipVx=0; iMipVx<_ctAllMipVx; iMipVx++) {
-      GFXColor &col = pcolMipBase[iMipVx];
-      const SLONG slShade = Clamp( (SLONG)pswMipCol[iMipVx], (SLONG)0, (SLONG)255);
-      col.ub.r = pubClipByte[_slAR + ((_slLR*slShade)>>8)];
-      col.ub.g = pubClipByte[_slAG + ((_slLG*slShade)>>8)];
-      col.ub.b = pubClipByte[_slAB + ((_slLB*slShade)>>8)];
-      col.ub.a = slShade;
-    }
+  ShadesToColors();
 #endif
 
   // all done
@@ -1864,11 +2008,26 @@ void CModelObject::RenderModel_View( CRenderModel &rm)
   }
 
   // unpack one model frame vertices and eventually normals (lerped or not lerped, as required)
-  pvtxMipBase = &_avtxMipBase[0];
   pcolMipBase = &_acolMipBase[0];
-  pnorMipBase = &_anorMipBase[0];
   const BOOL bNeedNormals = GFX_bTruform || (_ulMipLayerFlags&(SRF_REFLECTIONS|SRF_SPECULAR|SRF_BUMP));
-  UnpackFrame( rm, bNeedNormals);
+  // shared unpacked frame (see UnpackCache_Find)
+  UnpackCacheEntry *puce = UnpackCache_Find(rm);
+  if( puce==NULL) {
+    pvtxMipBase = &_avtxMipBase[0];
+    pnorMipBase = &_anorMipBase[0];
+    UnpackFrame( rm, bNeedNormals);
+  } else {
+    pvtxMipBase = puce->uce_pvtx;
+    pnorMipBase = puce->uce_pnor;
+    if( puce->uce_bFilled) {
+      ShadesFromNormals(rm);
+    } else {
+      UnpackFrame( rm, TRUE);  // keep normals: later hits shade from them
+      puce->uce_bFilled = TRUE;
+    }
+  }
+  _pvtxSrfArray = (puce!=NULL) ? puce->uce_pvtxSrf : &_avtxSrfBase[0];
+  const BOOL bSrfVerticesDone = (puce!=NULL) && puce->uce_bSrfFilled;
 
   // cache some more pointers and vars
   ptexMipBase = &_atexMipBase[0];
@@ -2003,7 +2162,7 @@ void CModelObject::RenderModel_View( CRenderModel &rm)
     if( (ms.ms_ulRenderingFlags&SRF_INVISIBLE) || ctSrfVx==0) break;
     //bEmpty = FALSE;
     puwSrfToMip = &mmi.mmpi_auwSrfToMip[iSrfVx0];
-    pvtxSrfBase = &_avtxSrfBase[iSrfVx0];
+    pvtxSrfBase = &_pvtxSrfArray[iSrfVx0];
     INDEX iSrfVx;
 
 #if (defined __MSVC_INLINE__)
@@ -2028,7 +2187,8 @@ srfVtxLoop:
       pop     ebx
     }
 #else
-    // setup vertex array
+    // setup vertex array (unless shared and already done)
+    if( !bSrfVerticesDone)
     for( iSrfVx=0; iSrfVx<ctSrfVx; iSrfVx++) {
       const INDEX iMipVx = puwSrfToMip[iSrfVx];
       pvtxSrfBase[iSrfVx].x = pvtxMipBase[iMipVx].x;
@@ -2047,9 +2207,10 @@ srfVtxLoop:
       }
     }
   }}
+  if( puce!=NULL) puce->uce_bSrfFilled = TRUE;
   // prepare (and lock) vertex array
   gfxEnableDepthTest();
-  gfxSetVertexArray( &_avtxSrfBase[0], _ctAllSrfVx);
+  gfxSetVertexArray( _pvtxSrfArray, _ctAllSrfVx);
   if(GFX_bTruform) gfxSetNormalArray( &_anorSrfBase[0]);
   if(CVA_bModels) gfxLockArrays();
   // cache light in object space (for reflection and/or specular mapping)
