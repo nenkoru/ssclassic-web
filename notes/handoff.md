@@ -110,6 +110,11 @@ Emscripten builds (CMake + ninja, Release, `SE1_THREADS`, `SE1_RUSTMOD`). Rebuil
 
 ## Gotchas
 
+- **`tools/test.sh` failures that are not regressions** (2026-11-24; each one fails the same way on
+  a build without lazy data): `st post-processing` (`se1gfx.capture` reads a blank buffer in the
+  single-threaded build), `st bots` "bots fight" (no bot reaches Fight in time), `mt quality
+  controller` "restores when fast" (no lower level within 90 s). `mt input` and `multiplayer
+  WebRTC` failed once and passed on rerun. Worth fixing, one at a time.
 - The browser pane in the desktop app keeps the game paused ("Click to play"). Use the headless test
   scripts (tools/*.mjs) for checks; they emulate focus and pointer lock.
 - **Bot status line format** (the tests parse it):
