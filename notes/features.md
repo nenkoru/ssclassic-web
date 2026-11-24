@@ -95,5 +95,22 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
 - `Entities/WeaponItem.es`: with `SE1_WITH_RUSTMOD`, the mod may take a weapon pickup of the local
   player as an Archipelago check (`SE1Mod_Pickup`): the item is picked up but gives nothing
   (notes/archipelago.md).
+- **Performance (2026-11-25, round 1).** Exact optimizations of the original engine code. Each one keeps
+  every simulation result (perfbench `--check`: same per-tick sync checksum as before) and the
+  frames. Details, numbers and risks are in `notes/perf/<track>.md`:
+  - `ai.md`: `PathFinding.cpp`, `EnemyBase.es`, `EntityClass.cpp` and `World.cpp`. Navigation markers
+    are cached per sector, event handlers per state, a needless visibility ray is skipped, and timers
+    are inserted from the tail.
+  - `raycast.md`: `WorldRayCasting.cpp`. Brush-only casts use a per-sector brush list, and sector and
+    polygon boxes are culled.
+  - `collision.md`: `WorldCollision.cpp` and `WorldCollisionGrid.cpp`. Brush sphere projections are
+    deferred, sectors and polygons the path can't reach are skipped (the plane skip only in flat
+    sectors), and repeated grid searches are reused.
+  - `models.md`: `RenderModel_View.cpp` and `gl1shim.c`. Unpacked frames are shared between
+    instances in the same animation frame, and lighting uses SIMD.
+  - `visibility.md`: `Rendering/` (scan line, clipping, sorts), `port/common/FastSort.h` and a
+    `CWorkingPlane` field.
+  - Shared hooks: a change counter on relation members (`Base/Relations.*`), a render-type change
+    counter (`Entity.cpp`, `EntityCopying.cpp`) and sector temp flags (`Brush.h`, `BrushSector.cpp`).
 
 Update this list when an engine change lands.
