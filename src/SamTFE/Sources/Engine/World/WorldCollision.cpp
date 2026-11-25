@@ -798,23 +798,25 @@ void CClipMove::ClipModelMoveToModel(void)
   if (ctB<=16) {
     const INDEX ctChunks = (ctB+3)/4;
     v128_t avBX[4], avBY[4], avBZ[4], avBR[4], avValid[4];
+    // (round 4) a CMovingSphere starts with its centre and radius (x, y, z, R): one load per
+    // sphere and a 4x4 transpose give the lanes, the last sphere repeated past the end
     {const CMovingSphere *pmsB = &(*cm_pamsB)[0];
     for (INDEX iChunk=0; iChunk<ctChunks; iChunk++) {
-      float afX[4], afY[4], afZ[4], afR[4]; int32_t aiValid[4];
-      for (INDEX iLane=0; iLane<4; iLane++) {
-        const INDEX iB = iChunk*4+iLane;
-        const CMovingSphere &msB = pmsB[iB<ctB ? iB : ctB-1];
-        afX[iLane] = msB.ms_vCenter(1);
-        afY[iLane] = msB.ms_vCenter(2);
-        afZ[iLane] = msB.ms_vCenter(3);
-        afR[iLane] = msB.ms_fR;
-        aiValid[iLane] = iB<ctB ? -1 : 0;
-      }
-      avBX[iChunk] = wasm_v128_load(afX);
-      avBY[iChunk] = wasm_v128_load(afY);
-      avBZ[iChunk] = wasm_v128_load(afZ);
-      avBR[iChunk] = wasm_v128_load(afR);
-      avValid[iChunk] = wasm_v128_load(aiValid);
+      const INDEX iB0 = iChunk*4;
+      const v128_t vS0 = wasm_v128_load(&pmsB[iB0].ms_vCenter(1));
+      const v128_t vS1 = wasm_v128_load(&pmsB[iB0+1<ctB ? iB0+1 : ctB-1].ms_vCenter(1));
+      const v128_t vS2 = wasm_v128_load(&pmsB[iB0+2<ctB ? iB0+2 : ctB-1].ms_vCenter(1));
+      const v128_t vS3 = wasm_v128_load(&pmsB[iB0+3<ctB ? iB0+3 : ctB-1].ms_vCenter(1));
+      const v128_t vT0 = wasm_i32x4_shuffle(vS0, vS1, 0, 4, 1, 5);  // x0 x1 y0 y1
+      const v128_t vT1 = wasm_i32x4_shuffle(vS2, vS3, 0, 4, 1, 5);  // x2 x3 y2 y3
+      const v128_t vT2 = wasm_i32x4_shuffle(vS0, vS1, 2, 6, 3, 7);  // z0 z1 R0 R1
+      const v128_t vT3 = wasm_i32x4_shuffle(vS2, vS3, 2, 6, 3, 7);  // z2 z3 R2 R3
+      avBX[iChunk] = wasm_i32x4_shuffle(vT0, vT1, 0, 1, 4, 5);
+      avBY[iChunk] = wasm_i32x4_shuffle(vT0, vT1, 2, 3, 6, 7);
+      avBZ[iChunk] = wasm_i32x4_shuffle(vT2, vT3, 0, 1, 4, 5);
+      avBR[iChunk] = wasm_i32x4_shuffle(vT2, vT3, 2, 3, 6, 7);
+      const INDEX ctLanes = ctB-iB0;
+      avValid[iChunk] = wasm_i32x4_make(-1, ctLanes>1 ? -1 : 0, ctLanes>2 ? -1 : 0, ctLanes>3 ? -1 : 0);
     }}
     const v128_t vRB = wasm_f32x4_splat(fRB);
     const v128_t vZero = wasm_f32x4_splat(0.0f);
