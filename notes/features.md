@@ -144,5 +144,8 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
     "Player Weapons" class test per class name; the delayed-model sort is skipped when the keys
     are already strictly increasing. `port/common/GpuAnim.cpp` puts a 16-entry cache in front of
     its model map.
+  - `frame4.md`: an in-place `FilterBitmap()` (`Graphics.cpp`, effect textures every tick and
+    mipmaps) does its middle pixels two at a time in wasm SIMD, lane for lane the portable ExtPix
+    code.
 
 Update this list when an engine change lands.
