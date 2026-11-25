@@ -329,6 +329,10 @@ void CModelData::Clear(void)
   INDEX i;
   md_bPreparedForRendering = FALSE;
   _ulModelUnpackCacheGen++;
+#ifdef __EMSCRIPTEN__
+  // web port (perf): the GPU animation path keeps a copy of this model's frames (port/common/GpuAnim.cpp)
+  { extern void SE1_GpuAnim_Forget(CModelData *md); SE1_GpuAnim_Forget(this); }
+#endif
 
   CAnimData::Clear();
 

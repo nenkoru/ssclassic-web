@@ -53,7 +53,7 @@ static int host_set_string(const char *name, const char *v) {
 #include <emscripten/threading.h>
 #endif
 
-#define MAX_HANDLES 2048
+#define MAX_HANDLES 16384   /* thousands of monsters (notes/perf); handle 0 means none */
  static CEntityPointer _apenHandles[MAX_HANDLES];   /* references keep the entity's memory valid */
 static std::unordered_map<ULONG, int> _mapHandleOf;   /* entity ID -> handle, for the damage hook */
 static int _iInModDamage = 0;   /* > 0 while the mod's own host.damage is in flight */
@@ -104,10 +104,13 @@ static void host_player_heal(float amount, float max)
   if (ple->GetHealth() <= 0) return;
   ple->SetHealth(Min(ple->GetHealth() + amount, Max(ple->GetHealth(), max)));
 }
+/* lowest handle that may be free: allocations scan from it instead of from 1 */
+static int _hFreeHint = 1;
 static int host_spawn(const char *cls, const float *pos)
 {
-  int h = 1;
+  int h = _hFreeHint;
   while (h < MAX_HANDLES && _apenHandles[h] != NULL) h++;
+  _hFreeHint = h;
   if (h >= MAX_HANDLES) return 0;
   try {
     CPlacement3D pl(FLOAT3D(pos[0], pos[1], pos[2]), ANGLE3D(0, 0, 0));
@@ -147,15 +150,16 @@ static int host_position(int h, float *pos)
 static void host_release(int h)
 {
   if (h > 0 && h < MAX_HANDLES && _apenHandles[h] != NULL) _mapHandleOf.erase(_apenHandles[h]->en_ulID);
-  if (h > 0 && h < MAX_HANDLES) _apenHandles[h] = NULL;
+  if (h > 0 && h < MAX_HANDLES) { _apenHandles[h] = NULL; if (h < _hFreeHint) _hFreeHint = h; }
 }
 /* ---- API 4: gameplay toolkit ---- */
 static int new_handle(CEntity *pen)
 {
-  for (int h = 1; h < MAX_HANDLES; h++) if (_apenHandles[h] == NULL) { _apenHandles[h] = pen; _mapHandleOf[pen->en_ulID] = h; return h; }
+  for (int h = _hFreeHint; h < MAX_HANDLES; h++) if (_apenHandles[h] == NULL) { _hFreeHint = h; _apenHandles[h] = pen; _mapHandleOf[pen->en_ulID] = h; return h; }
   return 0;
 }
-static int free_handles(void) { int n = 0; for (int h = 1; h < MAX_HANDLES; h++) n += _apenHandles[h] == NULL; return n; }
+/* nonzero when a handle is free (scans from the hint, not the whole table: spawns call it) */
+static int free_handles(void) { while (_hFreeHint < MAX_HANDLES && _apenHandles[_hFreeHint] != NULL) _hFreeHint++; return _hFreeHint < MAX_HANDLES; }
 static int host_spawn_enemy(const char *cls, int variant, const float *pos, float hpMul, float stretch, uint32_t glow, int boss)
 {
   if (free_handles() == 0) return 0;
@@ -214,6 +218,7 @@ static void host_destroy(int h)
    if (!(_apenHandles[h]->GetFlags() & ENF_DELETED)) _apenHandles[h]->Destroy();
   _mapHandleOf.erase(_apenHandles[h]->en_ulID);
    _apenHandles[h] = NULL;
+  if (h < _hFreeHint) _hFreeHint = h;
 }
 static int host_weapon(void) { return SE1ModEnt_Weapon(local_player()); }
 static int host_weapons_owned(void) { return SE1ModEnt_WeaponsOwned(local_player()); }

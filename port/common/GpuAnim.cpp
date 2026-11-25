@@ -130,6 +130,21 @@ static void FreeModel(GAModel *pgm)
   delete pgm;
 }
 
+// the model data is being cleared or freed (Models/Model.cpp CModelData::Clear): drop its GPU copy
+// and any queued instances, so data loaded later at the same address never draws stale frames
+void SE1_GpuAnim_Forget(CModelData *md)
+{
+  for (INDEX i = 0; i < _ctBatches; i++) {
+    GABatch &b = _batches[i];
+    if (b.md == md) { b.recs.clear(); b.md = NULL; b.pgm = NULL; }
+  }
+  if (_iLastBatch >= 0 && _iLastBatch < _ctBatches && _batches[_iLastBatch].md == NULL) _iLastBatch = -1;
+  auto it = _models.find(md);
+  if (it == _models.end()) return;
+  if (it->second) FreeModel(it->second);
+  _models.erase(it);
+}
+
 // once a frame: free uploaded blobs the replayer is done with, drop models not drawn for a while
 static void Housekeeping(void)
 {
