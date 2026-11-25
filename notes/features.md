@@ -122,5 +122,7 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
   - `gpuanim.md`: plain opaque models are animated and instanced on the GPU (WebGL2;
     `port/common/GpuAnim.cpp`, hooked from `RenderModel.cpp`; `?gpuanim=0` or `mdl_bGpuAnim=0`
     turns it off). `CModelData::Clear` (`Model.cpp`) drops the model's GPU copy.
+  - `rays2.md`: `World.cpp` `AddTimer` starts its scan from a per-bucket hint; `Entity.*` adds
+    `~CRationalEntity` to clear the hints of a destroyed entity.
 
 Update this list when an engine change lands.
