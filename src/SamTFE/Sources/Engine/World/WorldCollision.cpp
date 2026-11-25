@@ -810,9 +810,15 @@ void CClipMove::ClipModelMoveToModel(void)
         const v128_t vL1 = wasm_f32x4_add(vNegP, vSqrtD);
         const v128_t vL2 = wasm_f32x4_sub(vNegP, vSqrtD);
         const v128_t vFraction = wasm_f32x4_splat(cm_fMovementFraction);
+        // The scalar code hits only when 0 <= Min(L1, L2) < fraction. With sqrt(D) >= 0, L2 = -P-sqrt(D)
+        // <= L1 = -P+sqrt(D) after rounding too (rounding is monotonic), so Min() is L2 and a lane with
+        // L2 < 0 or L2 >= fraction can't hit; in a dense crowd that includes the many pairs whose
+        // spheres already overlap (L2 < 0 < L1). A NaN never rejects (all comparisons are false), and
+        // the one case where L1 alone is NaN (P = +inf) has L2 = -inf, a miss in the scalar code too.
+        (void)vL1;
         v128_t vMiss = wasm_f32x4_lt(vD, vZero);
-        vMiss = wasm_v128_or(vMiss, wasm_v128_and(wasm_f32x4_lt(vL1, vZero), wasm_f32x4_lt(vL2, vZero)));
-        vMiss = wasm_v128_or(vMiss, wasm_v128_and(wasm_f32x4_ge(vL1, vFraction), wasm_f32x4_ge(vL2, vFraction)));
+        vMiss = wasm_v128_or(vMiss, wasm_f32x4_lt(vL2, vZero));
+        vMiss = wasm_v128_or(vMiss, wasm_f32x4_ge(vL2, vFraction));
         vTest = wasm_v128_andnot(vTest, vMiss);
         uint32_t ulLanes = wasm_i32x4_bitmask(vTest);
         while (ulLanes!=0) {
