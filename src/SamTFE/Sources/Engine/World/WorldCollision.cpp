@@ -28,6 +28,9 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <Engine/Entities/EntityCollision.h>
 #include <Engine/Base/ErrorReporting.h>
 #include <Engine/Math/Geometry.inl>
+#if defined(__EMSCRIPTEN__) && defined(__wasm_simd128__)
+#include <wasm_simd128.h>
+#endif
 #include <Engine/Templates/StaticStackArray.cpp>
 #include <Engine/Terrain/TerrainMisc.h>
 
@@ -688,6 +691,110 @@ void CClipMove::ClipModelMoveToModel(void)
 
   // assumes that all spheres in one entity have same radius
   FLOAT fRB = (*cm_pamsB)[0].ms_fR;
+
+#if defined(__EMSCRIPTEN__) && defined(__wasm_simd128__)
+  // web port perf: in a dense crowd every mover tests ~3 neighbours of ~4 spheres each per
+  // ClipMove, and ~72% of the sphere pairs pass the box test below, but only ~2% of the
+  // ClipMovingPointToSphere() calls they make find a hit (stress500: 7M calls, 160k hits). Test 4
+  // spheres of B at once with wasm SIMD: the same IEEE single precision operations in the same order
+  // per lane as the scalar code, so each lane gets the scalar code's exact discriminant and roots.
+  // A lane goes on to the original scalar ClipMovingSphereToSphere() unless it certainly can't hit:
+  // its box is out, its discriminant is negative, or both roots are below 0 or at/above the
+  // movement fraction (which only decreases while clipping). The scalar call recomputes everything
+  // and is the only one to change state, in the original order (A outer, B inner).
+  const INDEX ctB = cm_pamsB->Count();
+  if (ctB<=16) {
+    const INDEX ctChunks = (ctB+3)/4;
+    v128_t avBX[4], avBY[4], avBZ[4], avBR[4], avValid[4];
+    {const CMovingSphere *pmsB = &(*cm_pamsB)[0];
+    for (INDEX iChunk=0; iChunk<ctChunks; iChunk++) {
+      float afX[4], afY[4], afZ[4], afR[4]; int32_t aiValid[4];
+      for (INDEX iLane=0; iLane<4; iLane++) {
+        const INDEX iB = iChunk*4+iLane;
+        const CMovingSphere &msB = pmsB[iB<ctB ? iB : ctB-1];
+        afX[iLane] = msB.ms_vCenter(1);
+        afY[iLane] = msB.ms_vCenter(2);
+        afZ[iLane] = msB.ms_vCenter(3);
+        afR[iLane] = msB.ms_fR;
+        aiValid[iLane] = iB<ctB ? -1 : 0;
+      }
+      avBX[iChunk] = wasm_v128_load(afX);
+      avBY[iChunk] = wasm_v128_load(afY);
+      avBZ[iChunk] = wasm_v128_load(afZ);
+      avBR[iChunk] = wasm_v128_load(afR);
+      avValid[iChunk] = wasm_v128_load(aiValid);
+    }}
+    const v128_t vRB = wasm_f32x4_splat(fRB);
+    const v128_t vZero = wasm_f32x4_splat(0.0f);
+    FOREACHINSTATICARRAY(*cm_pamsA, CMovingSphere, itmsA) {
+      CMovingSphere &msA = *itmsA;
+      const FLOATaabbox3D &boxMovingSphere = msA.ms_boxMovement;
+      const FLOAT3D &vStart = msA.ms_vRelativeCenter0;
+      const FLOAT3D &vEnd   = msA.ms_vRelativeCenter1;
+      // as in ClipMovingPointToSphere()
+      const FLOAT3D vStartToEnd = vEnd - vStart;
+      const FLOAT fStartToEnd2 = vStartToEnd%vStartToEnd;
+      const v128_t vDX = wasm_f32x4_splat(vStartToEnd(1));
+      const v128_t vDY = wasm_f32x4_splat(vStartToEnd(2));
+      const v128_t vDZ = wasm_f32x4_splat(vStartToEnd(3));
+      const v128_t vDD = wasm_f32x4_splat(fStartToEnd2);
+      const v128_t vSX = wasm_f32x4_splat(vStart(1));
+      const v128_t vSY = wasm_f32x4_splat(vStart(2));
+      const v128_t vSZ = wasm_f32x4_splat(vStart(3));
+      const v128_t vRA = wasm_f32x4_splat(msA.ms_fR);
+      const v128_t vMinX = wasm_f32x4_splat(boxMovingSphere.Min()(1));
+      const v128_t vMinY = wasm_f32x4_splat(boxMovingSphere.Min()(2));
+      const v128_t vMinZ = wasm_f32x4_splat(boxMovingSphere.Min()(3));
+      const v128_t vMaxX = wasm_f32x4_splat(boxMovingSphere.Max()(1));
+      const v128_t vMaxY = wasm_f32x4_splat(boxMovingSphere.Max()(2));
+      const v128_t vMaxZ = wasm_f32x4_splat(boxMovingSphere.Max()(3));
+      for (INDEX iChunk=0; iChunk<ctChunks; iChunk++) {
+        const v128_t vBX = avBX[iChunk], vBY = avBY[iChunk], vBZ = avBZ[iChunk];
+        // the box test below, per lane ("too far" when any comparison holds)
+        v128_t vFar = wasm_f32x4_gt(vMinX, wasm_f32x4_add(vBX, vRB));
+        vFar = wasm_v128_or(vFar, wasm_f32x4_lt(vMaxX, wasm_f32x4_sub(vBX, vRB)));
+        vFar = wasm_v128_or(vFar, wasm_f32x4_gt(vMinY, wasm_f32x4_add(vBY, vRB)));
+        vFar = wasm_v128_or(vFar, wasm_f32x4_lt(vMaxY, wasm_f32x4_sub(vBY, vRB)));
+        vFar = wasm_v128_or(vFar, wasm_f32x4_gt(vMinZ, wasm_f32x4_add(vBZ, vRB)));
+        vFar = wasm_v128_or(vFar, wasm_f32x4_lt(vMaxZ, wasm_f32x4_sub(vBZ, vRB)));
+        v128_t vTest = wasm_v128_andnot(avValid[iChunk], vFar);
+        if (!wasm_v128_any_true(vTest)) {
+          continue;
+        }
+        // ClipMovingPointToSphere(vStart, vEnd, msB.ms_vCenter, msA.ms_fR+msB.ms_fR), per lane
+        const v128_t vCX = wasm_f32x4_sub(vSX, vBX);
+        const v128_t vCY = wasm_f32x4_sub(vSY, vBY);
+        const v128_t vCZ = wasm_f32x4_sub(vSZ, vBZ);
+        const v128_t vDot = wasm_f32x4_add(wasm_f32x4_add(
+          wasm_f32x4_mul(vDX, vCX), wasm_f32x4_mul(vDY, vCY)), wasm_f32x4_mul(vDZ, vCZ));
+        const v128_t vCC = wasm_f32x4_add(wasm_f32x4_add(
+          wasm_f32x4_mul(vCX, vCX), wasm_f32x4_mul(vCY, vCY)), wasm_f32x4_mul(vCZ, vCZ));
+        const v128_t vR = wasm_f32x4_add(vRA, avBR[iChunk]);
+        const v128_t vP = wasm_f32x4_div(vDot, vDD);
+        const v128_t vQ = wasm_f32x4_div(wasm_f32x4_sub(vCC, wasm_f32x4_mul(vR, vR)), vDD);
+        const v128_t vD = wasm_f32x4_sub(wasm_f32x4_mul(vP, vP), vQ);
+        const v128_t vSqrtD = wasm_f32x4_sqrt(vD);
+        const v128_t vNegP = wasm_f32x4_neg(vP);
+        const v128_t vL1 = wasm_f32x4_add(vNegP, vSqrtD);
+        const v128_t vL2 = wasm_f32x4_sub(vNegP, vSqrtD);
+        const v128_t vFraction = wasm_f32x4_splat(cm_fMovementFraction);
+        v128_t vMiss = wasm_f32x4_lt(vD, vZero);
+        vMiss = wasm_v128_or(vMiss, wasm_v128_and(wasm_f32x4_lt(vL1, vZero), wasm_f32x4_lt(vL2, vZero)));
+        vMiss = wasm_v128_or(vMiss, wasm_v128_and(wasm_f32x4_ge(vL1, vFraction), wasm_f32x4_ge(vL2, vFraction)));
+        vTest = wasm_v128_andnot(vTest, vMiss);
+        uint32_t ulLanes = wasm_i32x4_bitmask(vTest);
+        while (ulLanes!=0) {
+          const INDEX iLane = __builtin_ctz(ulLanes);
+          ulLanes &= ulLanes-1;
+          // clip sphere A to sphere B
+          ClipMovingSphereToSphere(msA, (*cm_pamsB)[iChunk*4+iLane]);
+        }
+      }
+    }
+    _pfPhysicsProfile.StopTimer(CPhysicsProfile::PTI_CLIPMODELMOVETOMODEL);
+    return;
+  }
+#endif
 
   // for each sphere in entity A
   FOREACHINSTATICARRAY(*cm_pamsA, CMovingSphere, itmsA) {
