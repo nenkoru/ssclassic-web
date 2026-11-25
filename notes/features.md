@@ -124,5 +124,8 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
     turns it off). `CModelData::Clear` (`Model.cpp`) drops the model's GPU copy.
   - `rays2.md`: `World.cpp` `AddTimer` starts its scan from a per-bucket hint; `Entity.*` adds
     `~CRationalEntity` to clear the hints of a destroyed entity.
+  - `collision2.md`: `WorldCollision.cpp` pre-tests four sphere pairs at once (wasm SIMD) and skips
+    polygon edges outside the path's box; `WorldCollisionGrid.cpp` keeps one compact record per
+    entity for the movers a ClipMove can touch, in the original order.
 
 Update this list when an engine change lands.
