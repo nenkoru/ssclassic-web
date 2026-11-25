@@ -21,6 +21,9 @@
   // ?vrange=0: gl1shim copies the whole client array [0, maxIndex] for indexed draws instead of
   // just the range the indices use (A/B switch for tools/vrangetest.mjs; 1 is the default)
   if (q.get('vrange') === '0') Module['se1VRange'] = 0;
+  // ?vreuse=0: gl1shim copies static arrays (shared model vertices, element arrays) at every draw
+  // instead of once per batch (A/B switch; 1 is the default)
+  if (q.get('vreuse') === '0') Module['se1VReuse'] = 0;
   // ?scale=0.5 renders at half resolution (engine/HUD/input stay at full logical size);
   // ?scale=auto = dynamic resolution: lowers it while frames are GPU-bound, raises it with headroom
   var sc = q.get('scale');

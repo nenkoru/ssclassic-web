@@ -243,6 +243,84 @@ typedef struct { int valid, size, type, norm, stride; size_t base; } PtrCache;
 static PtrCache _ap[NSTREAMS];   /* attribute pointers recorded in this batch */
 static uint32_t _v0;             /* vertex cursor of this batch */
 static size_t _vstreamsAt;       /* word index of this batch's OP_VSTREAMS */
+
+/* ---- static arrays: copy once per batch, reference from later draws (perf round 2, models) ----
+   With many instances of a model on screen, most of their client arrays hold the same bytes: the
+   engine shares unpacked frames and texture coordinates between instances in the same animation
+   frame (Engine/Models/RenderModel_View.cpp, unpack cache), and every instance draws the model's
+   own element arrays. The shim used to copy every array, and the indices, at every draw: in
+   stress500 (500 monsters) that was about 7 MB per frame into the streams, all of it uploaded
+   again on the main thread.
+   The engine now declares such arrays static (SE1_GL1Shim_StaticArray: "these bytes won't change
+   until SE1_GL1Shim_StaticReset()"). For a static array the shim remembers where in this batch's
+   stream it copied a given vertex range (_vreuse), or where it put a given index range rebased
+   onto a given base vertex (_ireuse), and a later draw with the same source points its attribute
+   at the earlier copy (and uses the earlier indices) instead of copying again. Only the arrays
+   that differ per instance (the colours) are copied. Offsets are per batch: batch_reset forgets
+   them. The engine resets the static set whenever the memory behind it may change (new rendered
+   frame, model data changed), and so does every present. ?vreuse=0 turns it off (A/B). */
+#define STATIC_SLOTS 4096        /* power of 2 */
+#define REUSE_SLOTS 8192         /* power of 2 */
+typedef struct { const void *p; uint32_t gen; } StaticSlot;
+typedef struct { const void *p; int32_t l, first, count, size, type, sst; uint32_t gen; size_t off; } VReuse;
+typedef struct { const void *p; int32_t count, type, vBase; uint32_t gen; uint32_t v0; size_t ioff; } IReuse;
+static StaticSlot _static[STATIC_SLOTS];
+static VReuse _vreuse[REUSE_SLOTS];
+static IReuse _ireuse[REUSE_SLOTS];
+static uint32_t _staticGen = 1, _ctStatic, _reuseGen = 1, _ctVReuse, _ctIReuse;
+static int _vReuse = 1;          /* ?vreuse=0: off */
+static double _reusedBytes;      /* vertex + index bytes not copied thanks to reuse (A/B measurement) */
+#ifdef __cplusplus
+extern "C"
+#endif
+EMSCRIPTEN_KEEPALIVE double SE1_GL1Shim_ReusedBytes(void) { return _reusedBytes; }
+static inline uint32_t hash_words(const int32_t *w, int n) {
+  uint32_t h = 2166136261u;
+  for (int i = 0; i < n; i++) h = (h ^ (uint32_t)w[i]) * 16777619u;
+  return h ^ (h >> 15);
+}
+static inline uint32_t hash_ptr(const void *p) { int32_t w = (int32_t)(uintptr_t)p; return hash_words(&w, 1); }
+void SE1_GL1Shim_StaticArray(const void *p);
+void SE1_GL1Shim_StaticArray(const void *p) {
+  if (!p || !_vReuse || _ctStatic >= STATIC_SLOTS / 2) return;   /* full: the rest just isn't reused */
+  for (uint32_t i = hash_ptr(p);; i++) {
+    StaticSlot *s = &_static[i & (STATIC_SLOTS - 1)];
+    if (s->gen != _staticGen) { s->p = p; s->gen = _staticGen; _ctStatic++; return; }
+    if (s->p == p) return;
+  }
+}
+void SE1_GL1Shim_StaticReset(void);
+void SE1_GL1Shim_StaticReset(void) {
+  if (_ctStatic == 0) return;
+  _staticGen++; _ctStatic = 0;
+  _reuseGen++; _ctVReuse = _ctIReuse = 0;   /* reuse entries are only ever made for static arrays */
+}
+static int is_static(const void *p) {
+  if (_ctStatic == 0 || !p) return 0;
+  for (uint32_t i = hash_ptr(p);; i++) {
+    const StaticSlot *s = &_static[i & (STATIC_SLOTS - 1)];
+    if (s->gen != _staticGen) return 0;
+    if (s->p == p) return 1;
+  }
+}
+static void reuse_forget(void) { _reuseGen++; _ctVReuse = _ctIReuse = 0; }
+/* the slot for this key: a live entry with the key, or the empty slot where it would go (NULL: full) */
+static VReuse *vreuse_slot(const void *p, int l, int first, int count, int size, int type, int sst) {
+  int32_t k[7] = { (int32_t)(uintptr_t)p, l, first, count, size, type, sst };
+  for (uint32_t i = hash_words(k, 7);; i++) {
+    VReuse *r = &_vreuse[i & (REUSE_SLOTS - 1)];
+    if (r->gen != _reuseGen) return _ctVReuse < REUSE_SLOTS / 2 ? r : NULL;
+    if (r->p == p && r->l == l && r->first == first && r->count == count && r->size == size && r->type == type && r->sst == sst) return r;
+  }
+}
+static IReuse *ireuse_slot(const void *p, int count, int type, int vBase) {
+  int32_t k[4] = { (int32_t)(uintptr_t)p, count, type, vBase };
+  for (uint32_t i = hash_words(k, 4);; i++) {
+    IReuse *r = &_ireuse[i & (REUSE_SLOTS - 1)];
+    if (r->gen != _reuseGen) return _ctIReuse < REUSE_SLOTS / 2 ? r : NULL;
+    if (r->p == p && r->count == count && r->type == type && r->vBase == vBase) return r;
+  }
+}
 static void batch_open(void) {
   _vstreamsAt = _ncmd;
   Word *w = cmd(OP_VSTREAMS, 2 * NSTREAMS);
@@ -261,6 +339,7 @@ static void batch_reset(void) {
   _ncmd = 0; _ia.n = 0; _da.n = 0;
   for (int l = 0; l < NSTREAMS; l++) _vs[l].n = 0;
   _batchOpen = 0;
+  reuse_forget();   /* offsets into the old streams */
 }
 
 #ifdef SE1_THREADS
@@ -364,6 +443,7 @@ static void hand_off(int present) {
   /* the frame's own demo time goes along: by the time the page replays this frame, the engine
      is already simulating the next one (the ?shots= capture picks frames by demo time) */
   double tDemo = present ? SE1_DemoTime() : -1.0;
+  if (present) SE1_GL1Shim_StaticReset();   /* the engine re-declares its static arrays every frame */
   batch_close();
   emscripten_atomic_store_u32((void *)&b->busy, 1);
   MAIN_THREAD_ASYNC_EM_ASM({ Module['se1ReplayBatch']($0, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10); },
@@ -422,6 +502,7 @@ static __attribute__((noinline)) void shim_init_once(void) {
   S.curColor[0] = S.curColor[1] = S.curColor[2] = S.curColor[3] = 1.0f;
   S.capDither = 1;
   _vRange = MAIN_THREAD_EM_ASM_INT({ return Module['se1VRange'] === 0 ? 0 : 1; });
+  _vReuse = MAIN_THREAD_EM_ASM_INT({ return Module['se1VReuse'] === 0 ? 0 : 1; });
   /* VAO and stream buffers live in port/web/gfx.js */
 }
 
@@ -844,7 +925,8 @@ static void ensure_quad_capacity(int ctQuads) {
   quadCap = cap;
 }
 
-typedef struct { const uint8_t *ptr; int size; GLenum type; int norm; int stride; int compact; } VSrc;   /* stride: source */
+typedef struct { const uint8_t *ptr; int size; GLenum type; int norm; int stride; int compact; int stat; } VSrc;   /* stride: source; stat: static array (may reuse) */
+#define NO_VHINT 0xFFFFFFFFu
 /* Copy vertices [vFirst, vFirst + ctVerts) of every enabled attribute into its stream at the
    vertex cursor, record attribute pointers only where needed; returns the base vertex to add to
    this draw's indices, so vertex i of the draw reads stream vertex vFirst + i.
@@ -855,33 +937,76 @@ typedef struct { const uint8_t *ptr; int size; GLenum type; int norm; int stride
    same loop that copies them into the index arena (shim_glDrawElements) and subtracts vFirst from
    every copied index, so the rebase is one subtract in the existing loop. Non-indexed draws
    (glDrawArrays, immediate mode) keep vFirst = 0, i.e. the old behavior. ?vrange=0 (page
-   option, _vRange) forces vFirst = 0 for indexed draws to A/B the copies. */
-static uint32_t put_vertices(const VSrc *src, int vFirst, int ctVerts) {
-  int elem[NSTREAMS], dst[NSTREAMS];
+   option, _vRange) forces vFirst = 0 for indexed draws to A/B the copies.
+
+   Static sources (src[l].stat, indexed draws only) already copied in this batch are not copied
+   again: the attribute points at the earlier copy. A stream's data must then sit at
+   base + v0 * stride for the draw's base vertex v0, so the base vertex is chosen among a few
+   candidates (the cursor; the base vertex the earlier copies were made at; vHint, the base vertex
+   of reusable indices) as the one needing the fewest new attribute pointers. Every stream copied
+   into still goes at or past its end, whatever the base vertex. */
+static uint32_t put_vertices(const VSrc *src, int vFirst, int ctVerts, uint32_t vHint) {
+  int elem[NSTREAMS], dst[NSTREAMS], sst[NSTREAMS];
+  size_t reuse[NSTREAMS], end[NSTREAMS];   /* reuse: offset of an earlier copy, or SIZE_MAX */
+  VReuse *slot[NSTREAMS];
+  int nReuse = 0;
   for (int l = 0; l < NSTREAMS; l++) {
+    reuse[l] = SIZE_MAX; slot[l] = NULL;
     if (!src[l].ptr) continue;
     elem[l] = src[l].size * type_size(src[l].type);
-    int st = src[l].stride ? src[l].stride : elem[l];
-    dst[l] = src[l].compact ? elem[l] : st;           /* immediate mode: compact; arrays: one block copy */
+    sst[l] = src[l].stride ? src[l].stride : elem[l];
+    dst[l] = src[l].compact ? elem[l] : sst[l];       /* immediate mode: compact; arrays: one block copy */
     if (dst[l] & 3) dst[l] = (elem[l] + 3) & ~3;    /* keep offsets 4-aligned (WebGPU) */
+    if (src[l].stat) {
+      VReuse *r = vreuse_slot(src[l].ptr, l, vFirst, ctVerts, src[l].size, (int)src[l].type, sst[l]);
+      if (r && r->gen == _reuseGen) { reuse[l] = r->off; nReuse++; }
+      else slot[l] = r;                               /* where to remember this copy */
+    }
   }
   for (int pass = 0; pass < 2; pass++) {             /* pass 1: after restarting the vertex cursor */
     int restart = 0;
     for (int l = 0; l < NSTREAMS && !restart; l++) {
-      if (!src[l].ptr) continue;
+      if (!src[l].ptr || reuse[l] != SIZE_MAX) continue;
       PtrCache *c = &_ap[l];
       int same = c->valid && c->size == src[l].size && c->type == (int)src[l].type && c->norm == src[l].norm && c->stride == dst[l];
       if (same) continue;
-      size_t at = (size_t)_v0 * (size_t)dst[l], end = (_vs[l].n + 15) & ~(size_t)15;
-      if (at < end) continue;                        /* new pointer just below the stream's end: no gap */
-      if (at - end > (256u << 10)) restart = 1;      /* would leave a big hole: restart the cursor */
+      size_t at = (size_t)_v0 * (size_t)dst[l], e = (_vs[l].n + 15) & ~(size_t)15;
+      if (at < e) continue;                          /* new pointer just below the stream's end: no gap */
+      if (at - e > (256u << 10)) restart = 1;        /* would leave a big hole: restart the cursor */
     }
     if (_v0 > (1u << 20)) restart = 1;
     if (!restart || pass) break;
     _v0 = 0;
     for (int l = 0; l < NSTREAMS; l++) _ap[l].valid = 0;
   }
+  for (int l = 0; l < NSTREAMS; l++) end[l] = (_vs[l].n + 15) & ~(size_t)15;
+  /* the base vertex: the cursor, unless another candidate needs fewer new attribute pointers */
   uint32_t v0 = _v0;
+  if (nReuse || vHint != NO_VHINT) {
+    uint32_t cand[2 + NSTREAMS]; int nCand = 0;
+    cand[nCand++] = _v0;
+    if (vHint != NO_VHINT) cand[nCand++] = vHint;
+    for (int l = 0; l < NSTREAMS; l++) {
+      const PtrCache *c = &_ap[l];
+      if (reuse[l] == SIZE_MAX || !c->valid || reuse[l] < c->base || (reuse[l] - c->base) % (size_t)c->stride) continue;
+      cand[nCand++] = (uint32_t)((reuse[l] - c->base) / (size_t)c->stride);
+    }
+    int best = -1;
+    for (int k = 0; k < nCand; k++) {
+      uint32_t v = cand[k]; int cost = (vHint != NO_VHINT && v != vHint) ? 2 : 0;   /* 2: copying the indices */
+      for (int l = 0; l < NSTREAMS; l++) {
+        if (!src[l].ptr) continue;
+        const PtrCache *c = &_ap[l];
+        int same = c->valid && c->size == src[l].size && c->type == (int)src[l].type && c->norm == src[l].norm && c->stride == dst[l];
+        size_t at = (size_t)v * (size_t)dst[l];
+        if (reuse[l] != SIZE_MAX) {
+          if (reuse[l] < at) cost += 4;                                  /* can't point there: copy */
+          else if (!(same && c->base + at == reuse[l])) cost += 1;       /* new pointer */
+        } else if (!(same && c->base + at >= end[l])) cost += 1;
+      }
+      if (best < 0 || cost < best) { best = cost; v0 = v; }
+    }
+  }
   for (int l = 0; l < NSTREAMS; l++) {
     if (!src[l].ptr) {
       if (l == 0) { static const float zero[4] = { 0, 0, 0, 1 }; attrib_const(0, zero); }
@@ -891,45 +1016,65 @@ static uint32_t put_vertices(const VSrc *src, int vFirst, int ctVerts) {
     }
     PtrCache *c = &_ap[l];
     int st = dst[l];
-    if (!(c->valid && c->size == src[l].size && c->type == (int)src[l].type && c->norm == src[l].norm && c->stride == st)) {
-      size_t at = (size_t)v0 * (size_t)st, end = (_vs[l].n + 15) & ~(size_t)15;
-      c->base = end > at ? ((end - at + 15) & ~(size_t)15) : 0;    /* base + v0 * stride >= end */
+    size_t at = (size_t)v0 * (size_t)st;
+    int same = c->valid && c->size == src[l].size && c->type == (int)src[l].type && c->norm == src[l].norm && c->stride == st;
+    if (reuse[l] != SIZE_MAX && reuse[l] >= at) {    /* the earlier copy */
+      if (!(same && c->base + at == reuse[l])) {
+        c->base = reuse[l] - at;
+        c->valid = 1; c->size = src[l].size; c->type = (int)src[l].type; c->norm = src[l].norm; c->stride = st;
+        attrib_pointer(l, src[l].size, src[l].type, src[l].norm, st, c->base);
+      } else {
+        attrib_enable(l, 1);
+      }
+      _reusedBytes += (double)((size_t)(ctVerts - 1) * st + elem[l]);
+      continue;
+    }
+    if (!(same && c->base + at >= end[l])) {         /* data goes at or past the stream's end */
+      c->base = end[l] > at ? ((end[l] - at + 15) & ~(size_t)15) : 0;    /* base + v0 * stride >= end */
       c->valid = 1; c->size = src[l].size; c->type = (int)src[l].type; c->norm = src[l].norm; c->stride = st;
       attrib_pointer(l, src[l].size, src[l].type, src[l].norm, st, c->base);
     } else {
       attrib_enable(l, 1);
     }
-    size_t off = c->base + (size_t)v0 * (size_t)st;
-    int sst = src[l].stride ? src[l].stride : elem[l];
-    const uint8_t *sp = src[l].ptr + (size_t)vFirst * sst;
-    if (sst == st) {                                 /* same layout: one block copy */
+    size_t off = c->base + at;
+    const uint8_t *sp = src[l].ptr + (size_t)vFirst * sst[l];
+    if (sst[l] == st) {                              /* same layout: one block copy */
       size_t len = (size_t)(ctVerts - 1) * st + elem[l];
       memcpy(arena_at(&_vs[l], off, len), sp, len);
       _vertexBytes += (double)len;
     } else {                                         /* gather into the compact layout */
       uint8_t *d = arena_at(&_vs[l], off, (size_t)ctVerts * st);
-      for (int k = 0; k < ctVerts; k++) memcpy(d + (size_t)k * st, sp + (size_t)k * sst, elem[l]);
+      for (int k = 0; k < ctVerts; k++) memcpy(d + (size_t)k * st, sp + (size_t)k * sst[l], elem[l]);
       _vertexBytes += (double)ctVerts * (double)elem[l];
     }
+    if (src[l].stat) {                               /* remember the copy (also when it replaced an unusable one) */
+      VReuse *r = slot[l] ? slot[l] : vreuse_slot(src[l].ptr, l, vFirst, ctVerts, src[l].size, (int)src[l].type, sst[l]);
+      if (r) {
+        if (r->gen != _reuseGen) _ctVReuse++;
+        r->p = src[l].ptr; r->l = l; r->first = vFirst; r->count = ctVerts; r->size = src[l].size;
+        r->type = (int)src[l].type; r->sst = sst[l]; r->gen = _reuseGen; r->off = off;
+      }
+    }
   }
-  _v0 = (v0 + (uint32_t)ctVerts + 3) & ~3u;        /* quads need a base vertex that's a multiple of 4 */
+  uint32_t vNext = (v0 + (uint32_t)ctVerts + 3) & ~3u;   /* quads need a base vertex that's a multiple of 4 */
+  if (vNext > _v0) _v0 = vNext;
   return v0;
 }
 
-static uint32_t bind_client_arrays(int vFirst, int ctVerts) {
+static uint32_t bind_client_arrays(int vFirst, int ctVerts, int canReuse, uint32_t vHint) {
   VSrc src[NSTREAMS] = { { 0 } };
-  if (S.vtx.enabled) src[0] = (VSrc){ S.vtx.ptr, S.vtx.size, S.vtx.type, 0, S.vtx.stride };
-  if (S.col.enabled) src[1] = (VSrc){ S.col.ptr, S.col.size, S.col.type, S.col.type == GL_UNSIGNED_BYTE, S.col.stride };
+  if (S.vtx.enabled) src[0] = (VSrc){ S.vtx.ptr, S.vtx.size, S.vtx.type, 0, S.vtx.stride, 0, canReuse && is_static(S.vtx.ptr) };
+  if (S.col.enabled) src[1] = (VSrc){ S.col.ptr, S.col.size, S.col.type, S.col.type == GL_UNSIGNED_BYTE, S.col.stride, 0, canReuse && is_static(S.col.ptr) };
   for (int i = 0; i < MAXUNITS; i++)
-    if (S.u[i].enabled && S.u[i].tc.enabled) src[2 + i] = (VSrc){ S.u[i].tc.ptr, S.u[i].tc.size, S.u[i].tc.type, 0, S.u[i].tc.stride };
-  return put_vertices(src, vFirst, ctVerts);
+    if (S.u[i].enabled && S.u[i].tc.enabled) src[2 + i] = (VSrc){ S.u[i].tc.ptr, S.u[i].tc.size, S.u[i].tc.type, 0, S.u[i].tc.stride, 0, canReuse && is_static(S.u[i].tc.ptr) };
+  return put_vertices(src, vFirst, ctVerts, vHint);
 }
 
 static void shim_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
   shim_init();
   if (count <= 0) return;
   apply_program();
-  uint32_t v0 = bind_client_arrays(0, first + count);   /* [0, first+count): the draw offsets by first */
+  uint32_t v0 = bind_client_arrays(0, first + count, 0, NO_VHINT);   /* [0, first+count): the draw offsets by first */
   if (mode == GL1_QUADS) {
     ensure_quad_capacity((int)((v0 + first + count) / 4));
     cmd_ii(OP_DRAW_QUADS, count / 4 * 6, (int)((v0 + first) / 4 * 6 * 4));
@@ -951,13 +1096,25 @@ static void shim_glDrawElements(GLenum mode, GLsizei count, GLenum type, const v
   else { const uint8_t *ix = indices; for (int i = 0; i < count; i++) { int v = ix[i]; if (i == 0 || v < minIdx) minIdx = v; if (v > maxIdx) maxIdx = v; } }
   apply_program();
   int vBase = _vRange ? minIdx : 0;   /* ?vrange=0: the old full copy, and no rebase */
-  uint32_t v0 = bind_client_arrays(vBase, maxIdx + 1 - vBase);
-  /* indices are rebased onto the vertex cursor, always as 32-bit */
-  size_t ioff = arena_alloc(&_ia, (size_t)count * 4, 4);
-  uint32_t *o = (uint32_t *)(_ia.p + ioff);
-  if (type == GL_UNSIGNED_INT) { const uint32_t *ix = indices; for (int i = 0; i < count; i++) o[i] = ix[i] - vBase + v0; }
-  else if (type == GL_UNSIGNED_SHORT) { const uint16_t *ix = indices; for (int i = 0; i < count; i++) o[i] = ix[i] - vBase + v0; }
-  else { const uint8_t *ix = indices; for (int i = 0; i < count; i++) o[i] = ix[i] - vBase + v0; }
+  /* static indices already rebased onto some base vertex in this batch: reusable if the vertices
+     can go at that base vertex too (put_vertices weighs it) */
+  IReuse *ir = is_static(indices) ? ireuse_slot(indices, count, (int)type, vBase) : NULL;
+  int irLive = ir && ir->gen == _reuseGen;
+  uint32_t v0 = bind_client_arrays(vBase, maxIdx + 1 - vBase, 1, irLive ? ir->v0 : NO_VHINT);
+  size_t ioff;
+  if (irLive && ir->v0 == v0) { ioff = ir->ioff; _reusedBytes += (double)count * 4; }
+  else {
+    /* indices are rebased onto the vertex cursor, always as 32-bit */
+    ioff = arena_alloc(&_ia, (size_t)count * 4, 4);
+    uint32_t *o = (uint32_t *)(_ia.p + ioff);
+    if (type == GL_UNSIGNED_INT) { const uint32_t *ix = indices; for (int i = 0; i < count; i++) o[i] = ix[i] - vBase + v0; }
+    else if (type == GL_UNSIGNED_SHORT) { const uint16_t *ix = indices; for (int i = 0; i < count; i++) o[i] = ix[i] - vBase + v0; }
+    else { const uint8_t *ix = indices; for (int i = 0; i < count; i++) o[i] = ix[i] - vBase + v0; }
+    if (ir) {   /* remember the latest copy */
+      if (ir->gen != _reuseGen) _ctIReuse++;
+      ir->p = indices; ir->count = count; ir->type = (int)type; ir->vBase = vBase; ir->gen = _reuseGen; ir->v0 = v0; ir->ioff = ioff;
+    }
+  }
   cmd_iiii(OP_DRAW_ELEMENTS, (int)mode, count, GL_UNSIGNED_INT, (int)ioff);
 }
 
@@ -972,7 +1129,7 @@ static void shim_glEnd(void) {
   VSrc src[NSTREAMS];
   for (int l = 0; l < NSTREAMS; l++)   /* texcoords only for enabled units: the shader reads no others */
     src[l] = (l < 2 || S.u[l - 2].enabled) ? (VSrc){ (const uint8_t *)(S.imm + 4 * l), 4, GL_FLOAT, 0, IMM_FLOATS * 4, 1 } : (VSrc){ 0 };
-  uint32_t v0 = put_vertices(src, 0, n);
+  uint32_t v0 = put_vertices(src, 0, n, NO_VHINT);
   switch (S.beginMode) {
   case GL1_QUADS: ensure_quad_capacity((int)((v0 + n) / 4)); cmd_ii(OP_DRAW_QUADS, n / 4 * 6, (int)(v0 / 4 * 6 * 4)); break;
   case GL1_QUAD_STRIP: cmd_iii(OP_DRAW_ARRAYS, GL_TRIANGLE_STRIP, (int)v0, n); break;

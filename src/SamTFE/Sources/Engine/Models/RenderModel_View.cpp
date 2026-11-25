@@ -97,6 +97,21 @@ static FLOAT       *pooqMipShad;
 static UWORD       *puwSrfToMip;
 extern ULONG _ulModelUnpackCacheGen;
 static GFXVertex4  *_pvtxSrfArray;  // surface vertices of the model being rendered (_avtxSrfBase or the unpack cache)
+#ifdef __EMSCRIPTEN__
+// GL TRAFFIC (web port, perf round 2): gl1shim copies each client array and the indices into its
+// command stream at every draw. Arrays that are the same bytes for many instances (the shared
+// surface vertices and diffuse texcoords below, the model's element arrays) are declared static,
+// so the shim copies them once per batch and points later draws at that copy
+// (port/common/gl1shim.c, "static arrays"). Static means unchanged until SE1_GL1Shim_StaticReset(),
+// which runs whenever the unpack cache starts over or model data changes. See notes/perf/models2.md.
+extern "C" void SE1_GL1Shim_StaticArray(const void *p);
+extern "C" void SE1_GL1Shim_StaticReset(void);
+#define SHIM_STATIC(p) SE1_GL1Shim_StaticArray(p)
+#define SHIM_STATIC_RESET() SE1_GL1Shim_StaticReset()
+#else
+#define SHIM_STATIC(p)
+#define SHIM_STATIC_RESET()
+#endif
 
 // misc
 static ULONG _ulColorMask = 0;
@@ -586,6 +601,7 @@ extern void PrepareModelForRendering( CModelData &md)
   // do nothing, if the model has already been initialized for rendering
   if( md.md_bPreparedForRendering) return;
   _ulModelUnpackCacheGen++;  // mip infos are rebuilt: drop unpack cache entries
+  SHIM_STATIC_RESET();
   _pfModelProfile.StartTimer( CModelProfile::PTI_VIEW_PREPAREFORRENDERING);
   _pfWorldEditingProfile.StartTimer(CWorldEditingProfile::PTI_TRISTRIPMODELS);
   // prepare each mip model
@@ -799,6 +815,7 @@ static void FlushElements( INDEX ctElem, INDEX_T *pai)
     _pfModelProfile.StartTimer( CModelProfile::PTI_VIEW_DRAWELEMENTS);
     _pfModelProfile.IncrementTimerAveragingCounter( CModelProfile::PTI_VIEW_DRAWELEMENTS, ctElem/3);
     _pGfx->gl_ctModelTriangles += ctElem/3;
+    SHIM_STATIC(pai);  // the model's own element array (changes only with the model data)
     gfxDrawElements( ctElem, pai);
     extern INDEX mdl_bShowTriangles;
     if( _bMultiPlayer) mdl_bShowTriangles = 0; // don't allow in multiplayer mode!
@@ -1166,6 +1183,7 @@ static void UnpackCache_Check(void)
     _ctTceEntries = 0;
     _iUceChunk = 0;
     _slUceChunkUsed = 0;
+    SHIM_STATIC_RESET();  // the arena is about to be rewritten
   }
 }
 
@@ -2297,7 +2315,10 @@ srfVtxLoop:
       }
     }
   }}
-  if( puce!=NULL) puce->uce_bSrfFilled = TRUE;
+  if( puce!=NULL) {
+    puce->uce_bSrfFilled = TRUE;
+    SHIM_STATIC(_pvtxSrfArray);  // shared: same bytes for every instance this frame
+  }
   // prepare (and lock) vertex array
   gfxEnableDepthTest();
   gfxSetVertexArray( _pvtxSrfArray, _ctAllSrfVx);
@@ -2635,7 +2656,10 @@ diffColLoop:
       else AttenuateAlpha( pshdMipFogy, ctSrfVx);
     }
   }}
-  if( ptce!=NULL) ptce->tce_bFilled = TRUE;
+  if( ptce!=NULL) {
+    ptce->tce_bFilled = TRUE;
+    SHIM_STATIC(ptexDiffArray);  // shared: same bytes for every instance this frame
+  }
   // done with diffuse surfaces setup
   _pfModelProfile.StopTimer( CModelProfile::PTI_VIEW_INIT_DIFF_SURF);
 
