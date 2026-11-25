@@ -576,6 +576,9 @@ cannot be processed in this tick.
 guarantee that they are not freed from memory.
 */
 
+#ifdef SE1_CLIPPREFETCH
+#include "ClipPrefetch.h"   // web port (threads): port/common
+#endif
 // do physics for a game tick
 void CSessionState::HandleMovers(void)
 {
@@ -615,6 +618,10 @@ void CSessionState::HandleMovers(void)
     itenMover->PreMoving();
   }}
 
+#ifdef SE1_CLIPPREFETCH
+  // web port (threads): each mover's first collision test, computed ahead in parallel (?mt=N)
+  SE1Clip_BeginMoveLoop(&_pNetwork->ga_World, lhActiveMovers, ses_bPredicting);
+#endif
   // while there are some active movers
   while(!lhActiveMovers.IsEmpty()) {
     // get first one
@@ -650,6 +657,9 @@ void CSessionState::HandleMovers(void)
     // if any mover is re-added, put it to the end of active list
     lhActiveMovers.MoveList(_pNetwork->ga_World.wo_lhMovers);
   }
+#ifdef SE1_CLIPPREFETCH
+  SE1Clip_EndMoveLoop();
+#endif
 
   // for each done mover
   {FORDELETELIST(CMovableEntity, en_lnInMovers, lhDoneMovers, itenMover) {

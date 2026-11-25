@@ -17,6 +17,9 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include <Engine/World/World.h>
 #include <Engine/World/WorldCollision.h>
+#ifdef SE1_CLIPPREFETCH
+#include "ClipPrefetch.h"   // web port (threads): port/common
+#endif
 #include <Engine/Entities/InternalClasses.h>
 #include <Engine/World/PhysicsProfile.h>
 #include <Engine/Base/ListIterator.inl>
@@ -83,6 +86,10 @@ inline void CClipMove::GetPositionsOfEntity(
 
     // if moving entity is reference of this entity
     if (penMovable->en_penReference == cm_penMoving)  {
+#ifdef SE1_CLIPPREFETCH
+      // web port (threads): a prefetch job can't change the movers list; it drops this result
+      if (!SE1Clip_InJobSideEffect())
+#endif
       // add this entity to list of movers
       penMovable->AddToMoversDuringMoving();
     }
@@ -169,6 +176,13 @@ CClipMove::CClipMove(CMovableEntity *penEntity)
 // send pass if needed
 inline BOOL CClipMove::SendPassEvent(CEntity *penTested)
 {
+#ifdef SE1_CLIPPREFETCH
+  // web port (threads): a prefetch job can't send events; it drops this result (the serial code
+  // tests the model again and sends them)
+  if (((cm_ulPassMaskA|cm_ulPassMaskB)&penTested->en_ulCollisionFlags) && SE1Clip_InJobSideEffect()) {
+    return TRUE;
+  }
+#endif
   BOOL bSent = FALSE;
   if (cm_ulPassMaskA & penTested->en_ulCollisionFlags) {
 
@@ -1311,5 +1325,9 @@ void CClipMove::ClipMoveToWorld(class CWorld *pwoWorld)
  */
 void CWorld::ClipMove(CClipMove &cmMove)
 {
+#ifdef SE1_CLIPPREFETCH
+  // web port (threads): answered from the move loop's prefetch when that is still exact
+  if (SE1Clip_ClipMove(this, cmMove)) return;
+#endif
   cmMove.ClipMoveToWorld(this);
 }

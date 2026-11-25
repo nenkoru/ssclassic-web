@@ -1045,6 +1045,10 @@ void CEntity::SetPlacement_internal(const CPlacement3D &plNew, const FLOATmatrix
 
   // if this is a brush entity
   if (en_RenderType==RT_BRUSH || en_RenderType==RT_FIELDBRUSH) {
+#ifdef SE1_CLIPPREFETCH
+    // web port (threads): brush geometry and sector links change; prefetched clips are stale
+    { extern void SE1Clip_WorldChanged(void); SE1Clip_WorldChanged(); }
+#endif
     _pfPhysicsProfile.StartTimer(CPhysicsProfile::PTI_SETPLACEMENT_BRUSHUPDATE);
     // recalculate all bounding boxes relative to new position
     _bDontDiscardLinks = TRUE;
@@ -1243,6 +1247,13 @@ void CEntity::Destroy(void)
     // do nothing
     return;
   }
+#ifdef SE1_CLIPPREFETCH
+  // web port (threads): a brush leaves its sectors; prefetched brush clips are stale
+  if (en_RenderType!=RT_MODEL && en_RenderType!=RT_EDITORMODEL && en_RenderType!=RT_SKAMODEL
+    && en_RenderType!=RT_SKAEDITORMODEL) {
+    extern void SE1Clip_WorldChanged(void); SE1Clip_WorldChanged();
+  }
+#endif
   // if it is a light source
   {CLightSource *pls = GetLightSource();
   if (pls!=NULL) {
@@ -1680,6 +1691,14 @@ FLOAT CCollisionInfo::GetMaxFloorRadius(void)
 /* Find and remember collision info for this entity. */
 void CEntity::FindCollisionInfo(void)
 {
+#ifdef SE1_CLIPPREFETCH
+  // web port (threads): a brush's collision flags or info change; prefetched brush clips are
+  // stale (a model's state is checked model by model)
+  if (en_RenderType!=RT_MODEL && en_RenderType!=RT_EDITORMODEL && en_RenderType!=RT_SKAMODEL
+    && en_RenderType!=RT_SKAEDITORMODEL) {
+    extern void SE1Clip_WorldChanged(void); SE1Clip_WorldChanged();
+  }
+#endif
   ASSERT(GetFPUPrecision()==FPT_24BIT);
 
   // discard eventual collision info

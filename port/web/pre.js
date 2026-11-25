@@ -9,6 +9,11 @@
   if (args.length) Module['arguments'] = args;
   if (q.get('uncapped') === '1') Module['se1Uncapped'] = true;
   if (q.get('spin') === '0' || q.get('spin') === '1') Module['se1Spin'] = +q.get('spin');   // threaded vsync wait (WebFrame.cpp)   // timedemo: no vsync wait (port/common/WebFrame.cpp)
+  // ?mt=N: spread parallel engine sections (port/common/Se1Jobs.cpp) over N threads in all; threaded build only
+  if (q.get('mt')) Module['se1Mt'] = Math.min(16, Math.max(1, +q.get('mt') || 1));
+  if (q.get('mtstats')) Module['se1MtStats'] = 1;   // ClipPrefetch use counts in the console
+  if (q.get('mtverify')) Module['se1MtVerify'] = 1;   // ClipPrefetch answers checked against the serial ones (tests)
+  if (q.get('mtmin') != null) Module['se1MtMin'] = +q.get('mtmin') || 0;   // ClipPrefetch below N movers stays serial (tests)
   // ?quality=auto: the Rust mod layer lowers rendering cvars while frames keep missing
   if (q.get('quality') === 'auto') Module['se1QualityAuto'] = 1;
   // ?bots=N: N AI co-op bots on the host (rust/se1-mod/src/bots); ?botskill=0..1 their skill

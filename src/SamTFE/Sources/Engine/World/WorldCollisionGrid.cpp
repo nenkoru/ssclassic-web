@@ -510,6 +510,28 @@ void CWorld::FindEntitiesNearBox(const FLOATaabbox3D &boxNear,
 
 
 
+#ifdef SE1_CLIPPREFETCH
+// web port (threads): FindEntitiesNearBox()'s scan for a helper thread (port/common/ClipPrefetch.cpp):
+// the same cells in the same order, but it writes nothing shared (no found flags, no result cache),
+// so an entity in several cells appears several times and the caller keeps the first occurrence
+void SE1Clip_GridEntitiesNearBox(CWorld *pwo, const FLOATaabbox3D &boxNear, CStaticStackArray<CEntity*> &apen)
+{
+  INDEX iMinX, iMaxX, iMinZ, iMaxZ;
+  BoxToGrid(boxNear, iMinX, iMaxX, iMinZ, iMaxZ);
+  CCollisionGrid *pcg = pwo->wo_pcgCollisionGrid;
+  for (INDEX iX=iMinX; iX<=iMaxX; iX++) {
+    for (INDEX iZ=iMinZ; iZ<=iMaxZ; iZ++) {
+      INDEX igc = pcg->FindCell(iX, iZ, FALSE);
+      if (igc<0) continue;
+      for (INDEX iEntry = pcg->cg_agcCells[igc].gc_iFirstEntry; iEntry>=0;
+          iEntry = pcg->cg_ageEntries[iEntry].ge_iNextEntry) {
+        apen.Push() = pcg->cg_ageEntries[iEntry].ge_penEntity;
+      }
+    }
+  }
+}
+#endif
+
 // get amount of memory used by this object
 extern SLONG GetCollisionGridMemory( CCollisionGrid *pcg)
 {
