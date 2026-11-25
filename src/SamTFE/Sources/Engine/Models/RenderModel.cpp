@@ -90,6 +90,11 @@ void EndModelRenderingView( BOOL bRestoreOrtho/*=TRUE*/)
   // assure that FPU precision was low all the model rendering time, then revert to old FPU precision
   ASSERT( GetFPUPrecision()==FPT_24BIT);
   SetFPUPrecision(_fpuOldPrecision);
+#ifdef __EMSCRIPTEN__
+  // web port: draw the models GpuAnim_RenderModel queued (port/common/GpuAnim.cpp)
+  extern void GpuAnim_Flush(void);
+  GpuAnim_Flush();
+#endif
   // restore front face direction
   gfxFrontFace(GFX_CCW);
   // render all batched shadows
@@ -597,8 +602,17 @@ void CModelObject::RenderModel( CRenderModel &rm)
     // eventually calculate projection model bounding box in object space (needed for fog/haze trivial rejection)
     if( rm.rm_ulFlags&(RMF_FOG|RMF_HAZE)) CalculateBoundingBox( this, rm);
     // render complete model
-    rm.SetModelView();
-    RenderModel_View(rm);
+#ifdef __EMSCRIPTEN__
+    // web port: plain opaque models are queued and drawn instanced, animated in the vertex shader
+    // (port/common/GpuAnim.cpp, ?gpuanim / mdl_bGpuAnim); everything else renders here. With 2000
+    // monsters: engine worker 31 -> 21 ms, main thread 5.3 -> 0.6 ms per frame (notes/perf/gpuanim.md)
+    extern BOOL GpuAnim_RenderModel( CModelObject &mo, CRenderModel &rm);
+    if( !GpuAnim_RenderModel( *this, rm))
+#endif
+    {
+      rm.SetModelView();
+      RenderModel_View(rm);
+    }
   }
 
   // if we should draw current frame bounding box

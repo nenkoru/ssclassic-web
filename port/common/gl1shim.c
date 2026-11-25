@@ -176,7 +176,9 @@ enum {
   OP_ATTRIB_ON = 27, OP_ATTRIB_OFF = 28, OP_ATTRIB_CONST = 29, OP_ATTRIB_PTR = 30,
   OP_DRAW_ELEMENTS = 31, OP_DRAW_QUADS = 32, OP_DRAW_ARRAYS = 33,
   OP_TEXIMAGE = 34, OP_PIXELSTORE = 35, OP_VSTREAMS = 36, OP_DEPTHPROBE = 37,
-  OP_NEWPROG = 38, OP_NEWULOC = 39
+  OP_NEWPROG = 38, OP_NEWULOC = 39,
+  /* GPU model animation (port/common/GpuAnim.cpp, ?gpuanim): WebGL2 replayer only */
+  OP_GA_TABLES = 40, OP_GA_FRAMES = 41, OP_GA_MESH = 42, OP_GA_DRAW = 43, OP_GA_FREE = 44
 };
 typedef union { int32_t i; float f; } Word;
 static Word *_cmd; static size_t _ncmd, _capcmd;
@@ -1141,4 +1143,54 @@ void SE1_GL1Shim_DepthProbesEnd(void) {
     w[2 + 4 * i].i = _probeQ[i].slot; w[3 + 4 * i].i = _probeQ[i].x; w[4 + 4 * i].i = _probeQ[i].y; w[5 + 4 * i].f = _probeQ[i].depth;
   }
   _probeQN = 0;
+}
+
+/* ---- GPU model animation (port/common/GpuAnim.cpp): model frames uploaded once, instanced draws.
+   Blobs (tables, frames, meshes) live in memory GpuAnim owns and keeps until the replayer is done
+   with them; instance records go into the data arena of the current batch. The replayer's draw
+   uses its own program/VAO and restores the shim's, so the shim's caches stay valid; fixed-function
+   state (depth, blend, cull, texture on unit 0) is set by the engine through the shim before. */
+void SE1_GL1Shim_GATables(const void *p, int len);
+void SE1_GL1Shim_GATables(const void *p, int len) {
+  shim_init();
+  Word *w = cmd(OP_GA_TABLES, 2); w[0].i = (int32_t)(uintptr_t)p; w[1].i = len;
+}
+void SE1_GL1Shim_GAFrames(int h, const void *p, int len, int texW, int texH);
+void SE1_GL1Shim_GAFrames(int h, const void *p, int len, int texW, int texH) {
+  shim_init();
+  Word *w = cmd(OP_GA_FRAMES, 5); w[0].i = h; w[1].i = (int32_t)(uintptr_t)p; w[2].i = len; w[3].i = texW; w[4].i = texH;
+}
+void SE1_GL1Shim_GAMesh(int h, int hFrames, const void *verts, int vertsLen, const void *idx, int idxLen);
+void SE1_GL1Shim_GAMesh(int h, int hFrames, const void *verts, int vertsLen, const void *idx, int idxLen) {
+  shim_init();
+  Word *w = cmd(OP_GA_MESH, 6);
+  w[0].i = h; w[1].i = hFrames; w[2].i = (int32_t)(uintptr_t)verts; w[3].i = vertsLen; w[4].i = (int32_t)(uintptr_t)idx; w[5].i = idxLen;
+}
+void SE1_GL1Shim_GAFree(int h);
+void SE1_GL1Shim_GAFree(int h) { shim_init(); cmd_i(OP_GA_FREE, h); }
+/* room for n bytes of instance data in this batch's data arena; *off = its offset there. The
+   pointer is valid until the next allocation in the arena (fill it right away). */
+void *SE1_GL1Shim_GAAlloc(int n, int *off);
+void *SE1_GL1Shim_GAAlloc(int n, int *off) {
+  shim_init();
+  if (!_batchOpen) { _batchOpen = 1; batch_open(); }
+  size_t o = arena_alloc(&_da, (size_t)n, 16);
+  *off = (int)o;
+  return _da.p + o;
+}
+/* instanced draw of mesh h: ctInst records at data-arena offset instOff, elements
+   [elemFirst, elemFirst+ctElem) of the mesh; flags: 1 = 16-bit frames, 2 = overbright,
+   4 = back-side pass. The projection and alpha reference come from the shim's state. */
+void SE1_GL1Shim_GADraw(int h, int instOff, int ctInst, int elemFirst, int ctElem, int flags,
+                        const float *texCorr, const float *offset, int ctSrf, const uint32_t *srf);
+void SE1_GL1Shim_GADraw(int h, int instOff, int ctInst, int elemFirst, int ctElem, int flags,
+                        const float *texCorr, const float *offset, int ctSrf, const uint32_t *srf) {
+  shim_init();
+  Word *w = cmd(OP_GA_DRAW, 29 + 4 * ctSrf);
+  w[0].i = h; w[1].i = instOff; w[2].i = ctInst; w[3].i = elemFirst; w[4].i = ctElem; w[5].i = flags;
+  w[6].f = S.alphaRef; w[7].f = texCorr[0]; w[8].f = texCorr[1];
+  w[9].f = offset[0]; w[10].f = offset[1]; w[11].f = offset[2];
+  for (int i = 0; i < 16; i++) w[12 + i].f = S.projection.m[i];
+  w[28].i = ctSrf;
+  for (int i = 0; i < 4 * ctSrf; i++) w[29 + i].i = (int32_t)srf[i];
 }
