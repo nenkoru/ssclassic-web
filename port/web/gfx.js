@@ -330,9 +330,169 @@ Module['se1gfx'] = (function () {
     return new TextDecoder().decode(b);
   }
 
+
+  // ---- GPU model animation (OP_GA_*, port/common/GpuAnim.cpp, ?gpuanim) ----
+  // Model frames are uploaded once (RGBA16I texture: x, y, z, normal code per model vertex per
+  // frame); per mip a static mesh (model vertex + surface index + texcoord per surface vertex,
+  // u32 elements); per frame only instance records (frame bases, lerp ratio, colour mask,
+  // modelview, stretch, model colour, light) and one instanced draw per model/texture. The vertex
+  // shader does the unpack, lerp and the integer shading of RenderModel_View.cpp's UnpackFrame /
+  // ShadesToColors / diffuse colour setup. The draw keeps the shim's GL state: its own program
+  // and VAO, the texture units 6/7 the shim never uses, then back to the replayer's bindings.
+  var GA_REC = 112;        // bytes per instance record (7 x uvec4), GpuAnim.cpp GARecord
+  var GA_MAXSRF = 64;
+  var gaProg = null, gaU = null, gaIbuf = null, gaNorm = null, gaFrames = [], gaMeshes = [];
+  var gaInstKey = -1, curProg = null, curUnit = 0x84C0;
+  var gaStats = { draws: 0, inst: 0, meshes: 0, frames: 0 };   // ?gpuanim counters (se1gfx.gaStats)
+  var GA_VS = '#version 300 es\n' +
+    'precision highp float; precision highp int; precision highp isampler2D;\n' +
+    'layout(location=0) in uvec4 aV;\n' +
+    'layout(location=1) in uvec4 i0; layout(location=2) in uvec4 i1; layout(location=3) in uvec4 i2;\n' +
+    'layout(location=4) in uvec4 i3; layout(location=5) in uvec4 i4; layout(location=6) in uvec4 i5;\n' +
+    'layout(location=7) in uvec4 i6;\n' +
+    'uniform isampler2D uFrames; uniform sampler2D uNorm; uniform mat4 uProj; uniform vec3 uOffset;\n' +
+    'uniform vec2 uTexCorr; uniform int uFW; uniform uint uFlags; uniform uvec4 uSrf[' + GA_MAXSRF + '];\n' +
+    'out vec4 vCol; out vec2 vTex; flat out uint vAT;\n' +
+    // Lerp() of Math/Functions.h: exact ends
+    'vec3 lerp3(vec3 a, vec3 b, float r) { return r == 0.0 ? a : (r == 1.0 ? b : a + (b - a) * r); }\n' +
+    'ivec4 fr(uint i) { int k = int(i); return texelFetch(uFrames, ivec2(k % uFW, k / uFW), 0); }\n' +
+    'vec3 nrm(int c) {\n' +
+    '  if ((uFlags & 1u) == 0u) return texelFetch(uNorm, ivec2(c & 255, 1), 0).xyz;\n' +   // avGouraudNormals
+    '  vec2 h = texelFetch(uNorm, ivec2(c & 255, 0), 0).xy, p = texelFetch(uNorm, ivec2((c >> 8) & 255, 0), 0).xy;\n' +
+    '  return vec3(-h.x * p.y, p.x, -h.y * p.y); }\n' +                                      // (sin, cos) of H and P
+    'uvec4 rgba(uint c) { return uvec4(c & 255u, (c >> 8) & 255u, (c >> 16) & 255u, c >> 24); }\n' +
+    'void main() {\n' +
+    '  uint vx = aV.x & 65535u; uvec4 s = uSrf[aV.x >> 16]; uint m = i0.w;\n' +
+    // surface not in the diffuse layer, switched off by the colour mask, or single-sided on the
+    // back-side pass: off-screen, so its triangles are clipped away
+    '  if ((s.y & 1u) == 0u || (m & s.z) == 0u || (m & s.w) != 0u || ((uFlags & 4u) != 0u && (s.y & 2u) == 0u)) {\n' +
+    '    gl_Position = vec4(2.0, 2.0, 2.0, 1.0); vCol = vec4(0.0); vTex = vec2(0.0); vAT = 0u; return; }\n' +
+    '  float r = uintBitsToFloat(i0.z);\n' +
+    '  ivec4 f0 = fr(i0.x + vx), f1 = fr(i0.y + vx);\n' +
+    '  vec3 p = (lerp3(vec3(f0.xyz), vec3(f1.xyz), r) - uOffset) * uintBitsToFloat(i4.xyz);\n' +
+    '  vec3 n = lerp3(nrm(f0.w & 65535), nrm(f1.w & 65535), r);\n' +
+    '  vec3 L = uintBitsToFloat(i5.xyz);\n' +
+    '  float d = n.x * L.x + n.y * L.y + n.z * L.z;\n' +
+    '  int sh = clamp(int(d + (d < 0.0 ? -0.5 : 0.5)), 0, 255);\n' +                        // FloatToInt, clamp
+    '  ivec3 Lc = ivec3(int(i5.w & 1023u), int((i5.w >> 10) & 1023u), int((i5.w >> 20) & 1023u));\n' +
+    '  ivec3 Ac = ivec3(int(i6.x & 1023u), int((i6.x >> 10) & 1023u), int((i6.x >> 20) & 1023u));\n' +
+    '  uvec3 mc = uvec3(clamp(Ac + ((Lc * sh) >> 8), 0, 255));\n' +                          // ShadesToColors
+    '  uvec4 cs = (rgba(s.x) * rgba(i4.w)) >> 8;\n' +                                        // MultiplyRGBA(srf, model)
+    '  uvec4 c;\n' +
+    '  if ((s.y & 4u) != 0u) { c = cs; if ((uFlags & 2u) != 0u) c.rgb >>= 1; }\n' +           // fullbright
+    '  else c = uvec4((cs.rgb * mc) >> 8, cs.a);\n' +                                         // MultiplyRGBCopyA1
+    '  vCol = vec4(c) / 255.0;\n' +
+    '  vTex = vec2(uintBitsToFloat(aV.y) * uTexCorr.x, uintBitsToFloat(aV.z) * uTexCorr.y);\n' +
+    '  vAT = (s.y >> 3) & 1u;\n' +
+    '  vec4 q = vec4(p, 1.0);\n' +
+    '  gl_Position = uProj * vec4(dot(uintBitsToFloat(i1), q), dot(uintBitsToFloat(i2), q), dot(uintBitsToFloat(i3), q), 1.0);\n' +
+    '}\n';
+  var GA_FS = '#version 300 es\nprecision highp float; precision highp int;\n' +
+    'uniform sampler2D uTex; uniform float uAlphaRef; uniform uint uFlags;\n' +
+    'in vec4 vCol; in vec2 vTex; flat in uint vAT; out vec4 o;\n' +
+    'void main() { vec4 c = vCol; vec4 t = texture(uTex, vTex);\n' +
+    '  if ((uFlags & 2u) != 0u) { c.rgb = min(c.rgb * t.rgb * 2.0, 1.0); c.a *= t.a; } else c *= t;\n' +   // overbright: COMBINE x2
+    '  if (vAT != 0u && !(c.a >= uAlphaRef)) discard;\n' +                                               // alpha test (GEQUAL)
+    '  o = c; }\n';
+  function gaInit() {
+    gaProg = buildProgram(-1, 0, GA_VS, GA_FS);
+    if (!gaProg) { gaProg = false; return; }
+    gaU = {};
+    ['uFrames', 'uNorm', 'uProj', 'uOffset', 'uTexCorr', 'uFW', 'uFlags', 'uSrf', 'uTex', 'uAlphaRef'].forEach(function (n) {
+      gaU[n] = gl.getUniformLocation(gaProg, n);
+    });
+    gl.useProgram(gaProg);
+    gl.uniform1i(gaU.uTex, 0); gl.uniform1i(gaU.uFrames, 6); gl.uniform1i(gaU.uNorm, 7);
+    gl.useProgram(curProg);
+    gaIbuf = gl.createBuffer();
+  }
+  function gaTex(unit, internal, w, h, fmt, type, data) {
+    var t = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, fmt, type, data);   // rows are 8n bytes: any UNPACK_ALIGNMENT
+    gl.activeTexture(curUnit);
+    return t;
+  }
+  function gaOp(I, F, c, dp) {   // returns the number of words the op takes
+    switch (I[c]) {
+    case 40: {                   // GA_TABLES ptr len: 256x2 RGBA32F (sin/cos of normal codes; gouraud normals)
+      if (gaProg === null) gaInit();
+      if (gaNorm) gl.deleteTexture(gaNorm);
+      var tp = I[c + 1] >>> 0;
+      gaNorm = gaTex(7, gl.RGBA32F, 256, 2, gl.RGBA, gl.FLOAT, new Float32Array(HEAPU8.buffer, tp, 256 * 2 * 4));
+      return 3; }
+    case 41: {                   // GA_FRAMES h ptr len w h: RGBA16I
+      var fp = I[c + 2] >>> 0, fw = I[c + 4], fh = I[c + 5];
+      if (gaFrames[I[c + 1]]) gl.deleteTexture(gaFrames[I[c + 1]].tex);
+      gaStats.frames++;
+      gaFrames[I[c + 1]] = { tex: gaTex(6, gl.RGBA16I, fw, fh, gl.RGBA_INTEGER, gl.SHORT, new Int16Array(HEAPU8.buffer, fp, fw * fh * 4)), w: fw };
+      return 6; }
+    case 42: {                   // GA_MESH h hFrames vptr vlen iptr ilen
+      if (gaProg === null) gaInit();
+      var mvao = gl.createVertexArray(), mv = gl.createBuffer(), mi = gl.createBuffer();
+      gl.bindVertexArray(mvao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, mv);
+      var vp = I[c + 3] >>> 0, ip = I[c + 5] >>> 0;
+      gl.bufferData(gl.ARRAY_BUFFER, HEAPU8.subarray(vp, vp + I[c + 4]), gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0); gl.vertexAttribIPointer(0, 4, gl.UNSIGNED_INT, 16, 0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, gaIbuf);
+      for (var a = 1; a <= 7; a++) {
+        gl.enableVertexAttribArray(a); gl.vertexAttribIPointer(a, 4, gl.UNSIGNED_INT, GA_REC, (a - 1) * 16);
+        gl.vertexAttribDivisor(a, 1);
+      }
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, mi);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, HEAPU8.subarray(ip, ip + I[c + 6]), gl.STATIC_DRAW);
+      gl.bindVertexArray(vao); gl.bindBuffer(gl.ARRAY_BUFFER, vbuf);
+      gaMeshes[I[c + 1]] = { vao: mvao, vb: mv, ib: mi, frames: I[c + 2] };
+      gaStats.meshes++;
+      return 7; }
+    case 43: {                   // GA_DRAW h instOff ctInst elemFirst ctElem flags aref tcU tcV off3 proj16 ctSrf srf4*n
+      var nsrf = I[c + 29], words = 30 + 4 * nsrf;
+      var me = gaMeshes[I[c + 1]], fr = me && gaFrames[me.frames];
+      if (!gaProg || !fr || !gaNorm || nsrf > GA_MAXSRF) return words;
+      gl.useProgram(gaProg);
+      gl.bindVertexArray(me.vao);
+      var io = dp + I[c + 2], ct = I[c + 3];
+      if (gaInstKey !== io) {   // the back- and front-side passes share their records
+        gl.bindBuffer(gl.ARRAY_BUFFER, gaIbuf);
+        gl.bufferData(gl.ARRAY_BUFFER, HEAPU8.subarray(io, io + ct * GA_REC), gl.STREAM_DRAW);
+        gl.bindBuffer(gl.ARRAY_BUFFER, vbuf);
+        gaInstKey = io;
+      }
+      gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, fr.tex);
+      gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, gaNorm);
+      gl.activeTexture(curUnit);
+      gl.uniform1ui(gaU.uFlags, I[c + 6]);
+      gl.uniform1f(gaU.uAlphaRef, F[c + 7]);
+      gl.uniform2f(gaU.uTexCorr, F[c + 8], F[c + 9]);
+      gl.uniform3f(gaU.uOffset, F[c + 10], F[c + 11], F[c + 12]);
+      gl.uniformMatrix4fv(gaU.uProj, false, F.subarray(c + 13, c + 29));
+      gl.uniform1i(gaU.uFW, fr.w);
+      if (nsrf) gl.uniform4uiv(gaU.uSrf, new Uint32Array(HEAP32.buffer, (c + 30) << 2, 4 * nsrf));
+      gl.drawElementsInstanced(gl.TRIANGLES, I[c + 5], gl.UNSIGNED_INT, I[c + 4] * 4, ct);
+      gaStats.draws++; gaStats.inst += ct;
+      gl.bindVertexArray(vao);
+      gl.useProgram(curProg);
+      return words; }
+    case 44: {                   // GA_FREE h (a mesh, or frames)
+      var h = I[c + 1], m = gaMeshes[h];
+      if (m) { gl.deleteVertexArray(m.vao); gl.deleteBuffer(m.vb); gl.deleteBuffer(m.ib); gaMeshes[h] = null; }
+      var f = gaFrames[h];
+      if (f) { gl.deleteTexture(f.tex); gaFrames[h] = null; }
+      return 2; }
+    }
+    return 0;
+  }
+
   var api = {
     backend: 'webgl2',
-    get gl() { return gl; },   // the replayer's context (?glstats=1 in port/web/bench.js)
+    get gl() { return gl; },
+    get gaStats() { return gaStats; },   // the replayer's context (?glstats=1 in port/web/bench.js)
     createProgram: function (vs, fs, key) {   // key: used by the WebGPU replayer only
       sync.createProgram++;
       init();
@@ -424,6 +584,7 @@ Module['se1gfx'] = (function () {
       if (postOn) { gl.bindFramebuffer(gl.FRAMEBUFFER, postFbo[0]); postDirty = true; }   // render into the offscreen FBO
       var I = HEAP32, F = HEAPF32, c = cp >> 2, end = c + n;
       if (probeRes) probePoll();
+      gaInstKey = -1;
       if (vn) gl.bufferData(gl.ARRAY_BUFFER, HEAPU8.subarray(vp, vp + vn), gl.STREAM_DRAW);
       if (inn) gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, HEAPU8.subarray(ip, ip + inn), gl.STREAM_DRAW);
       while (c < end) {
@@ -446,14 +607,14 @@ Module['se1gfx'] = (function () {
         case 14: gl.clearStencil(I[c + 1]); c += 2; break;
         case 15: gl.clear(I[c + 1]); c += 2; break;
         case 16: gl.depthRange(F[c + 1], F[c + 2]); c += 3; break;
-        case 17: gl.activeTexture(I[c + 1]); c += 2; break;                            // ACTIVETEX enum
+        case 17: gl.activeTexture(curUnit = I[c + 1]); c += 2; break;                  // ACTIVETEX enum
         case 18: { var th = I[c + 2];                                                   // BINDTEX target handle
           if (th && !texs[th]) texs[th] = gl.createTexture();                             // first use of a handle
           gl.bindTexture(I[c + 1], th ? texs[th] : null); c += 3; break; }
         case 19: gl.texParameteri(I[c + 1], I[c + 2], I[c + 3]); c += 4; break;
         case 20: gl.texParameterf(I[c + 1], I[c + 2], F[c + 3]); c += 4; break;
         case 21: if (texs[I[c + 1]]) gl.deleteTexture(texs[I[c + 1]]); texs[I[c + 1]] = null; c += 2; break;
-        case 22: gl.useProgram(progs[I[c + 1]] || null); c += 2; break;
+        case 22: gl.useProgram(curProg = progs[I[c + 1]] || null); c += 2; break;
         case 23: if (ulocs[I[c + 1]] !== -1) gl.uniform1i(ulocs[I[c + 1]], I[c + 2]); c += 3; break;
         case 24: if (ulocs[I[c + 1]] !== -1) gl.uniform1f(ulocs[I[c + 1]], F[c + 2]); c += 3; break;
         case 25: if (ulocs[I[c + 1]] !== -1) gl.uniform4f(ulocs[I[c + 1]], F[c + 2], F[c + 3], F[c + 4], F[c + 5]); c += 6; break;
@@ -493,6 +654,7 @@ Module['se1gfx'] = (function () {
           c += 5; break; }
         case 37:                                                                        // DEPTHPROBE n res (slot x y depth) x n
           probeRes = I[c + 2]; depthProbes(I, F, c + 3, I[c + 1]); c += 3 + 4 * I[c + 1]; break;
+        case 40: case 41: case 42: case 43: case 44: c += gaOp(I, F, c, dp); break;   // GPU model animation
         case 36: {                                                                      // VSTREAMS (ptr len) x6
           var tot = 0, k;
           for (k = 0; k < 6; k++) { sb[k] = tot; tot += (I[c + 2 + 2 * k] + 15) & ~15; }

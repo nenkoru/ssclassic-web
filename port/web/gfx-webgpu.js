@@ -640,6 +640,13 @@
             for (var pk = 0; pk < pn; pk++) HEAP32[pr + I[c + 3 + 4 * pk]] = 1;
             c += 3 + 4 * pn; break;
           }
+          // GPU model animation (OP_GA_*): WebGL2 only; GpuAnim.cpp doesn't record them for this
+          // replayer (the CPU path draws the models), skipped here just in case
+          case 40: c += 3; break;
+          case 41: c += 6; break;
+          case 42: c += 7; break;
+          case 43: c += 30 + 4 * I[c + 29]; break;
+          case 44: c += 2; break;
           case 36: {                                                           // VSTREAMS (ptr len) x6
             var tot = 0, k;
             for (k = 0; k < 6; k++) { sb[k] = tot; tot += (I[c + 2 + 2 * k] + 15) & ~15; }

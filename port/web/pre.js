@@ -21,6 +21,9 @@
   // ?vrange=0: gl1shim copies the whole client array [0, maxIndex] for indexed draws instead of
   // just the range the indices use (A/B switch for tools/vrangetest.mjs; 1 is the default)
   if (q.get('vrange') === '0') Module['se1VRange'] = 0;
+  // ?gpuanim=0|1: model animation + lighting in the vertex shader, instanced draws (WebGL2 only;
+  // port/common/GpuAnim.cpp). Console: mdl_bGpuAnim. Unset: GpuAnim.cpp's default.
+  if (q.get('gpuanim') === '0' || q.get('gpuanim') === '1') Module['se1GpuAnim'] = +q.get('gpuanim');
   // ?scale=0.5 renders at half resolution (engine/HUD/input stay at full logical size);
   // ?scale=auto = dynamic resolution: lowers it while frames are GPU-bound, raises it with headroom
   var sc = q.get('scale');
