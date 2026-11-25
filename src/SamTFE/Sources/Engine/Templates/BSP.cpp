@@ -1230,10 +1230,20 @@ void BSPCutter<Type, iDimensions>::SplitEdge(const Vector<Type, iDimensions> &vP
 /*
  * Default constructor.
  */
+#ifdef __EMSCRIPTEN__
+// Web port (perf, notes/perf/frame4.md): every tree change takes a new stamp from this counter, so
+// a FindLineMinMax() result remembered under a stamp is the result for that tree's current nodes.
+static ULONG _ulBSPStamps = 0;
+#define BSP_NEWSTAMP() (bt_ulStamp = ++_ulBSPStamps)
+#else
+#define BSP_NEWSTAMP() ((void)0)
+#endif
+
 template<class Type, int iDimensions>
 BSPTree<Type, iDimensions>::BSPTree(void)
 {
   bt_pbnRoot = NULL;
+  BSP_NEWSTAMP();
 }
 
 /*
@@ -1252,6 +1262,7 @@ template<class Type, int iDimensions>
 BSPTree<Type, iDimensions>::BSPTree(CDynamicArray<BSPPolygon<Type, iDimensions> > &abpoPolygons)
 {
   bt_pbnRoot = NULL;
+  BSP_NEWSTAMP();
   Create(abpoPolygons);
 }
 
@@ -1354,6 +1365,7 @@ void BSPTree<Type, iDimensions>::Create(CDynamicArray<BSPPolygon<Type, iDimensio
   bt_pbnRoot = CreateSubTree(abpoPolygons);
   // move the tree to array
   MoveNodesToArray();
+  BSP_NEWSTAMP();
 }
 
 /*
@@ -1362,6 +1374,7 @@ void BSPTree<Type, iDimensions>::Create(CDynamicArray<BSPPolygon<Type, iDimensio
 template<class Type, int iDimensions>
 void BSPTree<Type, iDimensions>::Destroy(void)
 {
+  BSP_NEWSTAMP();
   // if tree is in array
   if (bt_abnNodes.Count()>0) {
     // clear array
@@ -1400,6 +1413,35 @@ void BSPTree<Type, iDimensions>::FindLineMinMax(
   Type &tMin,
   Type &tMax) const
 {
+#ifdef __EMSCRIPTEN__
+  // Web port (perf, notes/perf/frame4.md): CMovableEntity::TestFields() asks this for every mover
+  // and sector each tick, and a mover that stands still asks with the same points again (about 78%
+  // of the calls at stress500). The answer depends only on the tree's nodes and the points, so it
+  // is remembered per (tree, stamp, points), compared bit for bit; a miss runs the original code.
+  struct LineMemo {
+    const BSPTree *lm_pbt;
+    ULONG lm_ulStamp;
+    Vector<Type, iDimensions> lm_v0, lm_v1;
+    Type lm_tMin, lm_tMax;
+  };
+  enum { LINEMEMO_SLOTS = 16384 };  // a power of two
+  static LineMemo *_alm = NULL;
+  if (_alm==NULL) {
+    _alm = (LineMemo *)calloc(LINEMEMO_SLOTS, sizeof(LineMemo));
+  }
+  ULONG ulHash = (ULONG)(size_t)this * 2654435761UL;
+  {
+    const ULONG *pul = (const ULONG *)&v0;
+    for (size_t i = 0; i < sizeof(v0)/sizeof(ULONG); i++) { ulHash = (ulHash ^ pul[i]) * 16777619UL; }
+  }
+  LineMemo *plm = (_alm!=NULL) ? &_alm[(ulHash ^ (ulHash>>15)) & (LINEMEMO_SLOTS-1)] : NULL;
+  if (plm!=NULL && plm->lm_pbt==this && plm->lm_ulStamp==bt_ulStamp
+   && memcmp(&plm->lm_v0, &v0, sizeof(v0))==0 && memcmp(&plm->lm_v1, &v1, sizeof(v1))==0) {
+    tMin = plm->lm_tMin;
+    tMax = plm->lm_tMax;
+    return;
+  }
+#endif
   // init line
   BSPLine<Type, iDimensions> bl;
   bl.bl_tMin = UpperLimit(Type(0));
@@ -1411,6 +1453,16 @@ void BSPTree<Type, iDimensions>::FindLineMinMax(
   // return the min/max
   tMin = bl.bl_tMin;
   tMax = bl.bl_tMax;
+#ifdef __EMSCRIPTEN__
+  if (plm!=NULL) {
+    plm->lm_pbt = this;
+    plm->lm_ulStamp = bt_ulStamp;
+    plm->lm_v0 = v0;
+    plm->lm_v1 = v1;
+    plm->lm_tMin = tMin;
+    plm->lm_tMax = tMax;
+  }
+#endif
 }
 
 static INDEX _ctNextIndex;
@@ -1545,6 +1597,7 @@ void BSPTree<Type, iDimensions>::Read_t(CTStream &strm) // throw char *
   } else {
     bt_pbnRoot = NULL;
   }
+  BSP_NEWSTAMP();
 }
 
 template<class Type, int iDimensions>

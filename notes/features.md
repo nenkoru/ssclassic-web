@@ -146,6 +146,8 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
     its model map.
   - `frame4.md`: an in-place `FilterBitmap()` (`Graphics.cpp`, effect textures every tick and
     mipmaps) does its middle pixels two at a time in wasm SIMD, lane for lane the portable ExtPix
-    code.
+    code. `EntityEvent.h` / `Entity.cpp`: `CEntityEvent` has its own `operator new` / `delete` that
+    keep freed event copies on a free list per size. `BSP.h` / `BSP.cpp`: a `BSPTree` takes a new
+    stamp on every change, and `FindLineMinMax()` remembers its answers per (tree, stamp, points).
 
 Update this list when an engine change lands.
