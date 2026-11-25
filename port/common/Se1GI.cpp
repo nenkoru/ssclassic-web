@@ -33,6 +33,8 @@
 #include <vector>
 #include <unordered_map>
 #include <algorithm>
+#include <atomic>
+#include <thread>
 
 INDEX gi_bEnable = TRUE;      // apply the baked result (GI_Refresh() after changing)
 INDEX gi_iRays = 64;          // rays per cell per bounce
@@ -43,6 +45,9 @@ FLOAT gi_fAmbient = 1.0f;     // scale of the sector ambient when GI is applied
 FLOAT gi_fFullbright = 0.5f;  // emission of full-bright polygons (sky, lava): albedo x this
 FLOAT gi_fAlbedo = 1.0f;      // albedo scale (gamma-space albedo is high; < 1 tames bleeding)
 INDEX gi_bVerbose = FALSE;
+INDEX gi_iThreads = 4;        // gather threads (wasm pthreads; 1 = on the engine thread only)
+FLOAT gi_fSky = 0.0f;         // light from rays that escape the level (sky), x gi_colSky
+INDEX gi_colSky = (INDEX)0x8CA8D0FF;  // sky colour (RGBA)
 
 namespace {
 
@@ -70,6 +75,7 @@ static std::vector<Tri> _tris;
 static std::vector<Node> _nodes;
 static CWorld *_pwoBaked = NULL;
 static BOOL _bComputing = FALSE;
+static float _afSky[3];
 
 // ---------- BVH ----------
 
@@ -360,6 +366,60 @@ static void UncacheAll(void)
   for (size_t ip = 0; ip < _polys.size(); ip++) _polys[ip].pbpo->bpo_smShadowMap.Uncache();
 }
 
+// gather one bounce for every cell of polygon ip; returns the number of rays
+static long long GatherPoly(int ip, int iB, int sq, const std::vector<float> &eTot, std::vector<float> &indNew)
+{
+  const GIPoly &gp = _polys[ip];
+  if (!gp.receiver) return 0;
+  const int ctR = sq * sq;
+  // tangent frame
+  FLOAT3D n = gp.vN;
+  FLOAT3D t = gp.vSU; t = t - n * (t % n);
+  FLOAT tl = t.Length();
+  if (tl < 1e-6f) { t = (fabsf(n(1)) < 0.9f) ? FLOAT3D(1, 0, 0) : FLOAT3D(0, 1, 0); t = t - n * (t % n); tl = t.Length(); }
+  t /= tl;
+  FLOAT3D bt = n * t;
+  for (int y = 0; y < gp.h; y++) for (int x = 0; x < gp.w; x++) {
+    const int ic = gp.iFirst + y * gp.w + x;
+    FLOAT3D p = gp.vO + gp.vSU * (FLOAT)x + gp.vSV * (FLOAT)y + n * 0.05f;
+    const float o[3] = { p(1), p(2), p(3) };
+    uint32_t h = Hash((uint32_t)ic * 9781u + (uint32_t)iB * 6271u + 1u);
+    const float ou = (h & 0xFFFF) / 65536.0f, ov = (h >> 16) / 65536.0f;
+    float acc[3] = {0, 0, 0};
+    int ctBack = 0;
+    for (int k = 0; k < ctR; k++) {
+      float r1 = ((k % sq) + ou) / sq, r2 = ((k / sq) + ov) / sq;
+      if (r1 >= 1.0f) r1 -= 1.0f;
+      if (r2 >= 1.0f) r2 -= 1.0f;
+      const float rr = sqrtf(r1), phi = 6.2831853f * r2;
+      const float lx = rr * cosf(phi), ly = rr * sinf(phi), lz = sqrtf(std::max(0.0f, 1.0f - r1));
+      FLOAT3D dv = t * lx + bt * ly + n * lz;
+      const float d[3] = { dv(1), dv(2), dv(3) };
+      float th;
+      const int iHit = Trace(o, d, &th, ip);
+      if (iHit < 0) {  // sky / void
+        for (int c = 0; c < 3; c++) acc[c] += _afSky[c];
+        continue;
+      }
+      const GIPoly &hp = _polys[iHit];
+      const float cosH = d[0] * hp.vN(1) + d[1] * hp.vN(2) + d[2] * hp.vN(3);
+      if (cosH > 0.0f) { ctBack++; continue; }  // back face
+      if (hp.emit > 0.0f) {
+        for (int c = 0; c < 3; c++) acc[c] += hp.alb[c] * hp.emit;
+      } else if (hp.receiver) {
+        FLOAT3D ph(o[0] + d[0] * th, o[1] + d[1] * th, o[2] + d[2] * th);
+        FLOAT3D rel = ph - hp.vO;
+        float e[3];
+        Bilinear(eTot, hp, rel % hp.vDU, rel % hp.vDV, e);
+        for (int c = 0; c < 3; c++) acc[c] += hp.alb[c] * e[c];
+      }
+    }
+    for (int c = 0; c < 3; c++) indNew[ic * 3 + c] = acc[c] / ctR;
+    if (iB == 0) _valid[ic] = (ctBack * 4 < ctR) ? 1 : 0;
+  }
+  return (long long)gp.w * gp.h * ctR;
+}
+
 }  // namespace
 
 // ---------- console ----------
@@ -518,55 +578,31 @@ void GI_Compute(void)
   const int ctR = sq * sq;
   long long ctTraced = 0;
   const int ctBounces = Clamp(gi_iBounces, (INDEX)1, (INDEX)4);
+  { UBYTE r, g, b; ColorToRGB((COLOR)gi_colSky, r, g, b);
+    _afSky[0] = r / 255.0f * gi_fSky; _afSky[1] = g / 255.0f * gi_fSky; _afSky[2] = b / 255.0f * gi_fSky; }
+  int ctThreadsUsed = 1;
   for (int iB = 0; iB < ctBounces; iB++) {
     for (int i = 0; i < ctCells * 3; i++) eTot[i] = _dir[i] + _ind[i];
-    for (size_t ip = 0; ip < _polys.size(); ip++) {
-      const GIPoly &gp = _polys[ip];
-      if (!gp.receiver) continue;
-      // tangent frame
-      FLOAT3D n = gp.vN;
-      FLOAT3D t = gp.vSU; t = t - n * (t % n);
-      FLOAT tl = t.Length();
-      if (tl < 1e-6f) { t = (fabsf(n(1)) < 0.9f) ? FLOAT3D(1, 0, 0) : FLOAT3D(0, 1, 0); t = t - n * (t % n); tl = t.Length(); }
-      t /= tl;
-      FLOAT3D bt = n * t;
-      for (int y = 0; y < gp.h; y++) for (int x = 0; x < gp.w; x++) {
-        const int ic = gp.iFirst + y * gp.w + x;
-        FLOAT3D p = gp.vO + gp.vSU * (FLOAT)x + gp.vSV * (FLOAT)y + n * 0.05f;
-        const float o[3] = { p(1), p(2), p(3) };
-        uint32_t h = Hash((uint32_t)ic * 9781u + (uint32_t)iB * 6271u + 1u);
-        const float ou = (h & 0xFFFF) / 65536.0f, ov = (h >> 16) / 65536.0f;
-        float acc[3] = {0, 0, 0};
-        int ctBack = 0;
-        for (int k = 0; k < ctR; k++) {
-          float r1 = ((k % sq) + ou) / sq, r2 = ((k / sq) + ov) / sq;
-          if (r1 >= 1.0f) r1 -= 1.0f;
-          if (r2 >= 1.0f) r2 -= 1.0f;
-          const float rr = sqrtf(r1), phi = 6.2831853f * r2;
-          const float lx = rr * cosf(phi), ly = rr * sinf(phi), lz = sqrtf(std::max(0.0f, 1.0f - r1));
-          FLOAT3D dv = t * lx + bt * ly + n * lz;
-          const float d[3] = { dv(1), dv(2), dv(3) };
-          float th;
-          const int iHit = Trace(o, d, &th, (int)ip);
-          if (iHit < 0) continue;  // sky / void: no light for now
-          const GIPoly &hp = _polys[iHit];
-          const float cosH = d[0] * hp.vN(1) + d[1] * hp.vN(2) + d[2] * hp.vN(3);
-          if (cosH > 0.0f) { ctBack++; continue; }  // back face
-          if (hp.emit > 0.0f) {
-            for (int c = 0; c < 3; c++) acc[c] += hp.alb[c] * hp.emit;
-          } else if (hp.receiver) {
-            FLOAT3D ph(o[0] + d[0] * th, o[1] + d[1] * th, o[2] + d[2] * th);
-            FLOAT3D rel = ph - hp.vO;
-            float e[3];
-            Bilinear(eTot, hp, rel % hp.vDU, rel % hp.vDV, e);
-            for (int c = 0; c < 3; c++) acc[c] += hp.alb[c] * e[c];
-          }
-        }
-        ctTraced += ctR;
-        for (int c = 0; c < 3; c++) indNew[ic * 3 + c] = acc[c] / ctR;
-        if (iB == 0) _valid[ic] = (ctBack * 4 < ctR) ? 1 : 0;
+    std::atomic<int> next(0);
+    std::atomic<long long> traced(0);
+    auto work = [&]() {
+      long long myTraced = 0;
+      for (;;) {
+        const int ip = next.fetch_add(1);
+        if (ip >= (int)_polys.size()) break;
+        myTraced += GatherPoly(ip, iB, sq, eTot, indNew);
       }
+      traced += myTraced;
+    };
+    const int ctThreads = Clamp(gi_iThreads, (INDEX)1, (INDEX)16);
+    std::vector<std::thread> threads;
+    for (int i = 1; i < ctThreads; i++) {
+      try { threads.push_back(std::thread(work)); } catch (...) { break; }
     }
+    ctThreadsUsed = (int)threads.size() + 1;
+    work();
+    for (size_t i = 0; i < threads.size(); i++) threads[i].join();
+    ctTraced += traced;
     _ind.swap(indNew);
     Dilate();
   }
@@ -590,8 +626,8 @@ void GI_Compute(void)
           ctLightmapTexels, ctUsedTexels, ctCells, ctInvalid, ctR, ctBounces, ctTraced);
   CPrintF("GI: mean direct %.3f, mean indirect %.3f (1.0 = shadow byte 128)\n",
           ctCells ? sumD / ctCells : 0.0, ctCells ? sumE / ctCells : 0.0);
-  CPrintF("GI: time setup %.0f ms, direct %.0f ms, bvh %.0f ms, gather %.0f ms (%.2f Mrays/s), total %.0f ms\n",
-          t1 - t0, t2 - t1, t3 - t2, t4 - t3, ctTraced / std::max(1.0, (t4 - t3) * 1000.0), t4 - t0);
+  CPrintF("GI: time setup %.0f ms, direct %.0f ms, bvh %.0f ms, gather %.0f ms on %d threads (%.2f Mrays/s), total %.0f ms\n",
+          t1 - t0, t2 - t1, t3 - t2, t4 - t3, ctThreadsUsed, ctTraced / std::max(1.0, (t4 - t3) * 1000.0), t4 - t0);
 }
 
 // ---------- engine hooks ----------
@@ -661,6 +697,33 @@ void SE1GI_AddModelAmbient(CBrushPolygon *pbpo, FLOAT fpixU, FLOAT fpixV, SLONG 
   slR += (SLONG)(e[0] * k); slG += (SLONG)(e[1] * k); slB += (SLONG)(e[2] * k);
 }
 
+// viewpoints for before/after screenshots: GI_Where() prints the local player's placement,
+// GI_Pose(x, y, z, heading) puts it there (as Se1ModHost's debug teleport)
+static CEntity *LocalPlayer(void)
+{
+  FOREACHINDYNAMICCONTAINER(_pNetwork->ga_World.wo_cenEntities, CEntity, iten) {
+    CEntity *pen = &*iten;
+    if (!(pen->GetFlags() & ENF_DELETED) && (pen->GetFlags() & ENF_ALIVE) && IsDerivedFromClass(pen, "Player")) return pen;
+  }
+  return NULL;
+}
+
+void GI_Where(void)
+{
+  CEntity *pen = LocalPlayer();
+  if (pen == NULL) { CPrintF("GI: no player\n"); return; }
+  const CPlacement3D &pl = pen->GetPlacement();
+  CPrintF("GI: player at %.2f %.2f %.2f heading %.1f\n", pl.pl_PositionVector(1), pl.pl_PositionVector(2),
+          pl.pl_PositionVector(3), pl.pl_OrientationAngle(1));
+}
+
+void GI_Pose(FLOAT fX, FLOAT fY, FLOAT fZ, FLOAT fHeading)
+{
+  CEntity *pen = LocalPlayer();
+  if (pen == NULL) return;
+  pen->Teleport(CPlacement3D(FLOAT3D(fX, fY, fZ), ANGLE3D(fHeading, 0, 0)), FALSE);
+}
+
 void SE1GI_DeclareSymbols(void)
 {
   _pShell->DeclareSymbol("user INDEX gi_bEnable;", &gi_bEnable);
@@ -672,7 +735,12 @@ void SE1GI_DeclareSymbols(void)
   _pShell->DeclareSymbol("user FLOAT gi_fFullbright;", &gi_fFullbright);
   _pShell->DeclareSymbol("user FLOAT gi_fAlbedo;", &gi_fAlbedo);
   _pShell->DeclareSymbol("user INDEX gi_bVerbose;", &gi_bVerbose);
+  _pShell->DeclareSymbol("user INDEX gi_iThreads;", &gi_iThreads);
+  _pShell->DeclareSymbol("user FLOAT gi_fSky;", &gi_fSky);
+  _pShell->DeclareSymbol("user INDEX gi_colSky;", &gi_colSky);
   _pShell->DeclareSymbol("user void GI_Compute(void);", (void *)&GI_Compute);
   _pShell->DeclareSymbol("user void GI_Clear(void);", (void *)&GI_Clear);
   _pShell->DeclareSymbol("user void GI_Refresh(void);", (void *)&GI_Refresh);
+  _pShell->DeclareSymbol("user void GI_Where(void);", (void *)&GI_Where);
+  _pShell->DeclareSymbol("user void GI_Pose(FLOAT, FLOAT, FLOAT, FLOAT);", (void *)&GI_Pose);
 }
