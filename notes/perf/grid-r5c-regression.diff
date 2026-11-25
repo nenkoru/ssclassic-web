@@ -1,0 +1,207 @@
+diff --git a/src/SamTFE/Sources/Engine/World/WorldCollision.cpp b/src/SamTFE/Sources/Engine/World/WorldCollision.cpp
+index 05944ee..1062347 100644
+--- a/src/SamTFE/Sources/Engine/World/WorldCollision.cpp
++++ b/src/SamTFE/Sources/Engine/World/WorldCollision.cpp
+@@ -798,6 +798,9 @@ void CClipMove::ClipModelMoveToModel(void)
+   if (ctB<=16) {
+     const INDEX ctChunks = (ctB+3)/4;
+     v128_t avBX[4], avBY[4], avBZ[4], avBR[4], avValid[4];
++    // the box edges of B's spheres (centre +- fRB), the same for every sphere of A
++    v128_t avBXp[4], avBXm[4], avBYp[4], avBYm[4], avBZp[4], avBZm[4];
++    const v128_t vRB = wasm_f32x4_splat(fRB);
+     // (round 4) a CMovingSphere starts with its centre and radius (x, y, z, R): one load per
+     // sphere and a 4x4 transpose give the lanes, the last sphere repeated past the end
+     {const CMovingSphere *pmsB = &(*cm_pamsB)[0];
+@@ -817,8 +820,10 @@ void CClipMove::ClipModelMoveToModel(void)
+       avBR[iChunk] = wasm_i32x4_shuffle(vT2, vT3, 2, 3, 6, 7);
+       const INDEX ctLanes = ctB-iB0;
+       avValid[iChunk] = wasm_i32x4_make(-1, ctLanes>1 ? -1 : 0, ctLanes>2 ? -1 : 0, ctLanes>3 ? -1 : 0);
++      avBXp[iChunk] = wasm_f32x4_add(avBX[iChunk], vRB);  avBXm[iChunk] = wasm_f32x4_sub(avBX[iChunk], vRB);
++      avBYp[iChunk] = wasm_f32x4_add(avBY[iChunk], vRB);  avBYm[iChunk] = wasm_f32x4_sub(avBY[iChunk], vRB);
++      avBZp[iChunk] = wasm_f32x4_add(avBZ[iChunk], vRB);  avBZm[iChunk] = wasm_f32x4_sub(avBZ[iChunk], vRB);
+     }}
+-    const v128_t vRB = wasm_f32x4_splat(fRB);
+     const v128_t vZero = wasm_f32x4_splat(0.0f);
+     FOREACHINSTATICARRAY(*cm_pamsA, CMovingSphere, itmsA) {
+       CMovingSphere &msA = *itmsA;
+@@ -845,12 +850,12 @@ void CClipMove::ClipModelMoveToModel(void)
+       for (INDEX iChunk=0; iChunk<ctChunks; iChunk++) {
+         const v128_t vBX = avBX[iChunk], vBY = avBY[iChunk], vBZ = avBZ[iChunk];
+         // the box test below, per lane ("too far" when any comparison holds)
+-        v128_t vFar = wasm_f32x4_gt(vMinX, wasm_f32x4_add(vBX, vRB));
+-        vFar = wasm_v128_or(vFar, wasm_f32x4_lt(vMaxX, wasm_f32x4_sub(vBX, vRB)));
+-        vFar = wasm_v128_or(vFar, wasm_f32x4_gt(vMinY, wasm_f32x4_add(vBY, vRB)));
+-        vFar = wasm_v128_or(vFar, wasm_f32x4_lt(vMaxY, wasm_f32x4_sub(vBY, vRB)));
+-        vFar = wasm_v128_or(vFar, wasm_f32x4_gt(vMinZ, wasm_f32x4_add(vBZ, vRB)));
+-        vFar = wasm_v128_or(vFar, wasm_f32x4_lt(vMaxZ, wasm_f32x4_sub(vBZ, vRB)));
++        v128_t vFar = wasm_f32x4_gt(vMinX, avBXp[iChunk]);
++        vFar = wasm_v128_or(vFar, wasm_f32x4_lt(vMaxX, avBXm[iChunk]));
++        vFar = wasm_v128_or(vFar, wasm_f32x4_gt(vMinY, avBYp[iChunk]));
++        vFar = wasm_v128_or(vFar, wasm_f32x4_lt(vMaxY, avBYm[iChunk]));
++        vFar = wasm_v128_or(vFar, wasm_f32x4_gt(vMinZ, avBZp[iChunk]));
++        vFar = wasm_v128_or(vFar, wasm_f32x4_lt(vMaxZ, avBZm[iChunk]));
+         v128_t vTest = wasm_v128_andnot(avValid[iChunk], vFar);
+         if (!wasm_v128_any_true(vTest)) {
+           continue;
+diff --git a/src/SamTFE/Sources/Engine/World/WorldCollisionGrid.cpp b/src/SamTFE/Sources/Engine/World/WorldCollisionGrid.cpp
+index 94a3473..b3352e8 100644
+--- a/src/SamTFE/Sources/Engine/World/WorldCollisionGrid.cpp
++++ b/src/SamTFE/Sources/Engine/World/WorldCollisionGrid.cpp
+@@ -187,6 +187,23 @@ public:
+   // collision searches then use the original algorithm until the next Clear()
+   BOOL cg_bInconsistent;
+   INDEX cg_igoAdding;   // record for the entries AddEntry() creates
++  // round 5: each cell's entries as their records, oldest first (the cell's list read backwards:
++  // AddEntry() links at the head and RemoveEntry() unlinks the first match), and each record's
++  // first cell, so the search scans two dense arrays instead of following the entry links and
++  // loading the records
++  struct CGridMin { INDEX gm_iMinX, gm_iMinZ; };
++  std::vector<std::vector<INDEX> > cg_aaigoCells; // by cell index
++  std::vector<CGridMin> cg_agmMins;               // by record index
++  std::vector<FLOATaabbox3D> cg_aboxBoxes;        // go_box by record index, for the box test
++  inline void SetObjectMin(INDEX igo, INDEX iMinX, INDEX iMinZ, const FLOATaabbox3D &box) {
++    if ((size_t)igo>=cg_agmMins.size()) {
++      cg_agmMins.resize(igo+256);
++      cg_aboxBoxes.resize(igo+256);
++    }
++    cg_agmMins[igo].gm_iMinX = iMinX;
++    cg_agmMins[igo].gm_iMinZ = iMinZ;
++    cg_aboxBoxes[igo] = box;
++  }
+   INDEX NewObject(CEntity *pen, const FLOATaabbox3D &box, INDEX iMinX, INDEX iMinZ);
+   INDEX GetObject(CEntity *pen, const FLOATaabbox3D &boxOld);
+ #endif
+@@ -217,6 +234,7 @@ void CCollisionGrid::Clear(void)
+   cg_mapObjects.clear();
+   cg_bInconsistent = FALSE;
+   cg_igoAdding = -1;
++  for (size_t i=0; i<cg_aaigoCells.size(); i++) cg_aaigoCells[i].clear();
+ #endif
+ 
+   cg_aiFirstCells.New(GRID_HASHTABLESIZE);
+@@ -239,6 +257,10 @@ INDEX CCollisionGrid::CreateCell(INDEX iKey, ULONG ulCode)
+   // set up the cell
+   gc.gc_ulCode = ulCode;
+   gc.gc_iFirstEntry = -1;
++#ifdef __EMSCRIPTEN__
++  if ((size_t)igc>=cg_aaigoCells.size()) cg_aaigoCells.resize(igc+1024);
++  cg_aaigoCells[igc].clear();
++#endif
+ 
+   // link it by hash key
+   gc.gc_iNextCell = cg_aiFirstCells[iKey];
+@@ -264,6 +286,9 @@ void CCollisionGrid::RemoveCell(INDEX igc)
+       gc.gc_iNextCell = -2;
+       gc.gc_iFirstEntry = -1;
+       gc.gc_ulCode = 0x12345678;
++#ifdef __EMSCRIPTEN__
++      cg_aaigoCells[igc].clear();
++#endif
+       cg_agcCells.Free(igc);
+       return;
+     }
+@@ -321,6 +346,7 @@ void CCollisionGrid::AddEntry(INDEX igc, CEntity *pen)
+   ge.ge_penEntity = pen;
+ #ifdef __EMSCRIPTEN__
+   ge.ge_iObject = cg_igoAdding;
++  cg_aaigoCells[igc].push_back(cg_igoAdding);
+ #endif
+   CGridCell &gc = cg_agcCells[igc];
+   ge.ge_iNextEntry = gc.gc_iFirstEntry;
+@@ -339,6 +365,14 @@ void CCollisionGrid::RemoveEntry(INDEX igc, CEntity *pen)
+     CGridEntry &ge = cg_ageEntries[*pige];
+     if (ge.ge_penEntity==pen) {
+       GRID_CHANGED();
++#ifdef __EMSCRIPTEN__
++      // the same entry in the dense copy: the last one of its record (the first in the list)
++      {std::vector<INDEX> &aigo = cg_aaigoCells[igc];
++      INDEX i = (INDEX)aigo.size()-1;
++      while (i>=0 && aigo[i]!=ge.ge_iObject) i--;
++      if (i>=0) aigo.erase(aigo.begin()+i);
++      else cg_bInconsistent = TRUE;}
++#endif
+       // remove the entry from the list
+       cg_ageEntries.Free(*pige);
+       *pige = ge.ge_iNextEntry;
+@@ -370,6 +404,7 @@ INDEX CCollisionGrid::NewObject(CEntity *pen, const FLOATaabbox3D &box, INDEX iM
+   go.go_box = box;
+   go.go_iMinX = iMinX;
+   go.go_iMinZ = iMinZ;
++  SetObjectMin(igo, iMinX, iMinZ, box);
+   std::pair<std::unordered_map<CEntity*, INDEX>::iterator, bool> res =
+     cg_mapObjects.insert(std::make_pair(pen, igo));
+   if (!res.second) {
+@@ -492,6 +527,7 @@ void CWorld::MoveEntityInCollisionGrid(CEntity *pen,
+     go.go_box = boxNew;
+     go.go_iMinX = iNewMinX;
+     go.go_iMinZ = iNewMinZ;
++    pcg->SetObjectMin(igo, iNewMinX, iNewMinZ, boxNew);
+   }
+   pcg->cg_igoAdding = igo;}
+ #endif
+@@ -685,14 +721,42 @@ void SE1_FindEntitiesTouchingBox(CWorld *pwo, const FLOATaabbox3D &boxNear,
+         if (igc<0) {
+           continue;
+         }
++        // round 5: the cell's records newest first, as its entry list (see cg_aaigoCells)
++        const std::vector<INDEX> &aigoCell = pcg->cg_aaigoCells[igc];
++        const INDEX *pigo = aigoCell.data();
++        const CCollisionGrid::CGridMin *agm = pcg->cg_agmMins.data();
++        for (INDEX i=(INDEX)aigoCell.size()-1; i>=0; i--) {
++          const INDEX igo = pigo[i];
++          if (Max(agm[igo].gm_iMinX, iMinX)==iX && Max(agm[igo].gm_iMinZ, iMinZ)==iZ) {
++            aigoLast.Push() = igo;
++          }
++        }
++#ifdef SE1_VERIFYDENSE
++        {static INDEX _ctScans=0, _ctBad=0, _ctEntries=0;
++        INDEX iOut = aigoLast.Count();
++        INDEX iCheck = iOut;
++        {INDEX ctThis=0;
++        for (INDEX i=(INDEX)aigoCell.size()-1; i>=0; i--) {
++          const INDEX igo = pigo[i];
++          if (Max(agm[igo].gm_iMinX, iMinX)==iX && Max(agm[igo].gm_iMinZ, iMinZ)==iZ) ctThis++;
++        }
++        iCheck = iOut-ctThis;}
++        INDEX ctEnt = 0;
+         for(INDEX iEntry = pcg->cg_agcCells[igc].gc_iFirstEntry; iEntry>=0;
+             iEntry = pcg->cg_ageEntries[iEntry].ge_iNextEntry) {
+           const CGridEntry &ge = pcg->cg_ageEntries[iEntry];
+           const CGridObject &go = pcg->cg_agoObjects[ge.ge_iObject];
++          if (ctEnt>=(INDEX)aigoCell.size() || pigo[aigoCell.size()-1-ctEnt]!=ge.ge_iObject) _ctBad++;
++          ctEnt++;
+           if (Max(go.go_iMinX, iMinX)==iX && Max(go.go_iMinZ, iMinZ)==iZ) {
+-            aigoLast.Push() = ge.ge_iObject;
++            if (iCheck>=iOut || aigoLast[iCheck]!=ge.ge_iObject) _ctBad++;
++            iCheck++;
+           }
+         }
++        if (ctEnt!=(INDEX)aigoCell.size() || iCheck!=iOut) _ctBad++;
++        _ctEntries += ctEnt;
++        if ((++_ctScans & 0xFFFFF)==0) CPrintF("VERIFYDENSE cellscans %d MISMATCH %d entries %d\n", _ctScans, _ctBad, _ctEntries);}
++#endif
+       }
+     }
+     pcgLast = pcg;
+@@ -717,9 +781,10 @@ void SE1_FindEntitiesTouchingBox(CWorld *pwo, const FLOATaabbox3D &boxNear,
+     const v128_t vQMinX = wasm_f32x4_make(fNaN, fNaN, fNaN, pfQ[0]);
+     // ... or the box's max y, z < the query's min y, z (lanes 2, 3 of the second load)
+     const v128_t vQMinYZ = wasm_f32x4_make(fNaN, fNaN, pfQ[1], pfQ[2]);
++    const FLOATaabbox3D *aboxBoxes = pcg->cg_aboxBoxes.data();
+     for(INDEX i=0; i<ct; i++) {
+-      const CGridObject &go = pcg->cg_agoObjects[aigoLast[i]];
+-      const FLOAT *pfB = &go.go_box.Min()(1);
++      const INDEX igo = aigoLast[i];
++      const FLOAT *pfB = &aboxBoxes[igo].Min()(1);
+       const v128_t v0 = wasm_v128_load(pfB);
+       const v128_t v1 = wasm_v128_load(pfB+2);
+       const v128_t vOut = wasm_v128_or(wasm_v128_or(
+@@ -727,7 +792,7 @@ void SE1_FindEntitiesTouchingBox(CWorld *pwo, const FLOATaabbox3D &boxNear,
+       if (wasm_v128_any_true(vOut)) {
+         continue;
+       }
+-      apenNearEntities.Push() = go.go_penEntity;
++      apenNearEntities.Push() = pcg->cg_agoObjects[igo].go_penEntity;
+     }
+   }
+   if (0)

@@ -27,6 +27,79 @@ What's next, in rough priority order. Details and measurements live in notes/ren
      import?).
 4. **CI** (branch `ci-workflow`): when the user says so; it needs a token with the `workflow` scope.
 
+### Engine speed push (2026-11-23 to 2026-11-25): where it stopped
+Goal: 10x faster than the original engine for big crowds (thousands of monsters, hundreds of
+players), with the simulation unchanged bit for bit. Not reached yet.
+
+**The bench.**
+- `tools/perfbench.mjs --check` replays the demo. "SAME simulation, 384 ticks" is the behaviour
+  oracle, and every perf change must pass it.
+- `tools/optbuild.sh` builds the perf build in any worktree, and `tools/perfsnap.py` serves copies
+  of builds side by side.
+- `--profile` gives self-time profiles. To keep inlined functions apart in a profile, add a dummy
+  second call site guarded by `extern volatile int _se1never`.
+- Each nontrivial change was proven with a temporary verify build that runs the old code next to
+  the new one and counts mismatches. The counts are in the notes.
+
+**Results.** Mean engine ms per frame against the reference engine (main at 02a890b):
+
+| Scenario | Reference | Now | Speedup |
+|---|---|---|---|
+| demo | 0.32 | 0.33 | 1.0x |
+| stress300 | 4.22 | 2.67 | 1.6x |
+| stress500 | 5.95 | 3.13 | 1.9x |
+| stress1000 | 37.3 | 4.09 | 9.1x |
+| stress2000 | 45.2 | 10.1 | 4.5x |
+| stress4000 | can't run (2047 entity handles) | ~37–40 | |
+
+- The details are in `notes/perf/` (collision, collision2, collision3, rays2, rays3, models,
+  models2, render3, gpuanim, visibility, ai, players) and the list is in `notes/features.md`.
+- The changes merged after 02a890b (model lights per polygon, the sphere gather) add a few percent
+  on top. They have not been benched against the reference engine yet.
+
+**Next, in order:**
+1. **Collision grid scan from dense arrays** (`WorldCollisionGrid.cpp`).
+   - At stress4000, the scan that rebuilds the candidate list takes 16.3% of the frame, and the
+     box tests 10.3%.
+   - A dense copy of each cell's entry list (record indices oldest first; read backwards it is the
+     list order) and a packed array of each record's first cell measured 1.11x at stress4000,
+     1.15x at stress2000 and 1.13x at stress1000, with "SAME" on the demo.
+   - It is on the local branch `perf/grid-dense-scan` (ac241f2), not on main: the verify build
+     (`#define SE1_VERIFYDENSE`, which compares each cell scan with the linked-list walk) printed no
+     counts before the session ended. Take the counts, then merge.
+2. **The r5c regression.** Two changes on top of the dense scan made stress2000 4x slower
+   (37 ms against 8 ms), though the demo stayed SAME:
+   - a dense array of record boxes for the grid's box test;
+   - B's sphere box edges hoisted out of the A loop in `ClipModelMoveToModel()`.
+   Find which one does it before trying either again. The patch (both changes on top of the dense
+   scan) is `notes/perf/grid-r5c-regression.diff`.
+3. **Per-pair collision cost**, about 33% at stress4000: `ClipModelMoveToModel()` 22% and
+   `PrepareProjectionsAndSpheres()` 10%. Only ~11% of the pairs could be rejected early (pair
+   counters in collision3.md), so what's left is the arithmetic.
+4. **Small crowds** (stress300 and stress500, only 1.6–1.9x). Track O (branch
+   `t3/optimize-crowd-frame-time`) profiled the whole frame there. It was stopped at the end of the
+   session, unreviewed and unbenched. It left:
+   - 4 commits: FilterBitmap in SIMD, mod page options cached, freed event copies on a free list,
+     and perfbench saving the raw `.cpuprofile`;
+   - uncommitted BSP.cpp/.h work;
+   - a draft `notes/perf/frame4.md` in its worktree.
+   Review and bench it before merging.
+5. **Leads not taken:**
+   - `FilterBitmap` takes 0.8% of the frame, which suggests a texture is uploaded again every frame
+     (render3.md). Track O made it faster, but didn't find why it runs every frame.
+   - `PrepareRayModelHits` takes 6% at stress4000.
+   - `ClipMoveToBrushes` takes 2–6%.
+6. **Rejected, with numbers in the notes:**
+   - threaded collision prefetch (track L);
+   - the grid box test on copied box arrays (collision3.md);
+   - caching `GetLightStrength`, and a radix sort for delayed models (render3.md).
+
+**Tooling gotchas.**
+- `se1d` runs one daemon on port 9230 for all worktrees: give each track its own `SE1D_PORT`.
+- `se1d open` fails with "fetch failed" when it waits on the Chrome lock longer than its fetch
+  timeout.
+- `tools/bottest.mjs` is timing-flaky: it passes and fails on the same build.
+
 ### Later: bot nav maps
 - **Bot nav for every level** (on hold, the user said not yet).
    - Bake the 14 other TFE levels and the demo's KarnakDemo, one Chrome at a time (`navbake.mjs --jobs 1`).
