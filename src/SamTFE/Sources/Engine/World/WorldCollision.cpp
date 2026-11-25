@@ -446,6 +446,25 @@ void CClipMove::ClipMovingSphereToBrushPolygon(const CMovingSphere &msMoving,
     }
   }
 
+#ifdef __EMSCRIPTEN__
+  // web port perf: the edge cylinder and vertex sphere calls below change state only for a hit at
+  // a fraction in [0, cm_fMovementFraction), at a point of the path that lies on the cylinder or
+  // the sphere, i.e. within ms_fR of the edge. The fraction only decreases, so the points of the
+  // path up to its current value, grown by ms_fR and a margin, bound every such hit: an edge whose
+  // box misses that box can't be hit and is skipped. A sphere on a floor polygon tests every edge
+  // of the polygon but is near few of them. The margin (as in the plane skip above) is orders of
+  // magnitude above the rounding of the quadratic solves; a NaN never skips. Measured: 89% of the
+  // edges skipped, the edge cylinder test 3.6% -> 0.5% of the stress1000 profile.
+  FLOAT fPathMinX, fPathMinY, fPathMinZ, fPathMaxX, fPathMaxY, fPathMaxZ;
+  {
+    const FLOAT3D &v0 = msMoving.ms_vRelativeCenter0;
+    const FLOAT3D vFar = v0+(msMoving.ms_vRelativeCenter1-v0)*cm_fMovementFraction;
+    const FLOAT fGrow = msMoving.ms_fR+0.1f;
+    fPathMinX = Min(v0(1), vFar(1))-fGrow; fPathMaxX = Max(v0(1), vFar(1))+fGrow;
+    fPathMinY = Min(v0(2), vFar(2))-fGrow; fPathMaxY = Max(v0(2), vFar(2))+fGrow;
+    fPathMinZ = Min(v0(3), vFar(3))-fGrow; fPathMaxZ = Max(v0(3), vFar(3))+fGrow;
+  }
+#endif
   // for each edge in polygon
   //FOREACHINSTATICARRAY(pbpoPolygon->bpo_abpePolygonEdges, CBrushPolygonEdge, itbpe) {
   CBrushPolygonEdge *itbpe = pbpoPolygon->bpo_abpePolygonEdges.sa_Array;
@@ -455,6 +474,13 @@ void CClipMove::ClipMovingSphereToBrushPolygon(const CMovingSphere &msMoving,
     // get edge vertices (edge direction is important here!)
     FLOAT3D vVertex0, vVertex1;
     itbpe->GetVertexCoordinatesRelative(vVertex0, vVertex1);
+#ifdef __EMSCRIPTEN__
+    if ((vVertex0(1)>fPathMaxX && vVertex1(1)>fPathMaxX) || (vVertex0(1)<fPathMinX && vVertex1(1)<fPathMinX)
+      ||(vVertex0(2)>fPathMaxY && vVertex1(2)>fPathMaxY) || (vVertex0(2)<fPathMinY && vVertex1(2)<fPathMinY)
+      ||(vVertex0(3)>fPathMaxZ && vVertex1(3)>fPathMaxZ) || (vVertex0(3)<fPathMinZ && vVertex1(3)<fPathMinZ)) {
+      continue;
+    }
+#endif
 
     // clip moving sphere to the edge (moving point to the edge cylinder)
     ClipMovingPointToCylinder(
