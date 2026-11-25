@@ -4643,7 +4643,10 @@ void TeleportPlayer(enum WorldLinkType EwltType)
     m_fMaxHealth = TopHealth();
 
     // if in singleplayer mode
-    if (GetSP()->sp_bSinglePlayer && GetSP()->sp_gmGameMode!=CSessionProperties::GM_FLYOVER) {
+    // (web port: not when a bot joins, a server-side virtual player: each join saved the whole game,
+    // 255 saves in a row with 255 bots, notes/perf/players.md)
+    if (GetSP()->sp_bSinglePlayer && GetSP()->sp_gmGameMode!=CSessionProperties::GM_FLYOVER
+      && !(_pNetwork->IsServer() && _pNetwork->ga_srvServer.IsVirtualPlayer(GetMyPlayerIndex()))) {
       // save quick savegame
       _pShell->Execute("gam_bQuickSave=1;");
     }
