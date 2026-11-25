@@ -3733,6 +3733,13 @@ void CLiveEntity::ReceiveDamage(CEntity *penInflictor, enum DamageType dmtType,
 CRationalEntity::CRationalEntity(void)
 {
 }
+#if defined(__EMSCRIPTEN__)
+extern void SE1_TimerEntityGone(CRationalEntity *pen);   // World/World.cpp
+CRationalEntity::~CRationalEntity(void)
+{
+  SE1_TimerEntityGone(this);
+}
+#endif
 
 /* Calculate physics for moving. */
 void CRationalEntity::ClearMovingTemp(void)
