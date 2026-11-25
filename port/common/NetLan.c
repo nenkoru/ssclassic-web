@@ -95,7 +95,8 @@ int __wrap_bind(int fd, const struct sockaddr *addr, socklen_t len) {
 
 ssize_t __wrap_sendto(int fd, const void *buf, size_t len, int flags, const struct sockaddr *addr, socklen_t alen) {
   if (fd != LAN_FD) return __real_sendto(fd, buf, len, flags, addr, alen);
-  if (!addr || len > 4096) { errno = EINVAL; return -1; }
+  /* 16 KiB + header: the engine sends a whole unreliable message in one packet (CPacket.h) */
+  if (!addr || len > 16384 + 64) { errno = EINVAL; return -1; }
   const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
   if (!_myPort) _myPort = 40000 + (uint16_t)(_myIp & 0xff);
   uint32_t total = HDR + (uint32_t)len, w = rd(0), r = rd(1);

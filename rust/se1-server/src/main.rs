@@ -31,9 +31,12 @@ use std::time::Duration;
 use tungstenite::handshake::server::{Request, Response};
 use tungstenite::{accept_hdr, Message};
 
-const MAX_PEERS: usize = 128;
+// a room is one /24: the host at .1 and up to 253 others at .2..=.254 (the engine takes 256
+// computers, notes/perf/players.md)
+const MAX_PEERS: usize = 254;
 const NET: [u8; 3] = [10, 77, 0];
-const MAX_PACKET: usize = 8 + 4096;
+// the engine's biggest packet: a 16 KiB message plus its header (CPacket.h MAX_UDP_BLOCK_SIZE)
+const MAX_PACKET: usize = 8 + 16384 + 64;
 const MAX_SIGNAL: usize = 64 * 1024;
 
 struct Peer {

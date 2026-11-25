@@ -75,7 +75,7 @@
   // Wire a data channel (ours or the offerer's, via ondatachannel). Packets arrive in the switch's
   // frame format; the sender address is stamped here from the link, like the switch does, so a
   // peer cannot pretend to be someone else, and sizes are checked the way the switch checks them.
-  var MAX_FRAME = 8 + 4096;
+  var MAX_FRAME = 8 + 16384 + 64;   // the engine's biggest packet (CPacket.h), as in rust/se1-server
   function wireChannel(peerId, link, dc) {
     link.dc = dc;
     dc.binaryType = 'arraybuffer';

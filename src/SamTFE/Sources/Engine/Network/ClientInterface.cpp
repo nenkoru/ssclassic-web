@@ -29,7 +29,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <Engine/Base/ListIterator.inl>
 
 // how many acknowledges can fit into one UDP packet
-#define MAX_ACKS_PER_PACKET (MAX_UDP_BLOCK_SIZE/sizeof(ULONG))
+#define MAX_ACKS_PER_PACKET (MAX_RELIABLE_BLOCK_SIZE/sizeof(ULONG))
 
 extern FLOAT net_fDropPackets;
 extern INDEX net_bReportPackets;
@@ -97,7 +97,7 @@ void CClientInterface::Send(const void *pvSend, SLONG slSize,BOOL bReliable)
 	//if the message is reliable, make sure the first packet is marked as a head of the message
 	if (bReliable) {
 		ubPacketReliable = UDP_PACKET_RELIABLE | UDP_PACKET_RELIABLE_HEAD;
-		if (slSize <= MAX_UDP_BLOCK_SIZE) {
+		if (slSize <= MAX_RELIABLE_BLOCK_SIZE) {
 			ubPacketReliable |= UDP_PACKET_RELIABLE_TAIL;
 		}
 	} else {
@@ -110,12 +110,14 @@ void CClientInterface::Send(const void *pvSend, SLONG slSize,BOOL bReliable)
 	
 	
 	// split large reliable messages into packets, and put them in the output buffer
-	while (slSizeToSend>MAX_UDP_BLOCK_SIZE) {
+	// (web port: an unreliable message is never split, see MAX_UDP_BLOCK_SIZE)
+	const SLONG slPiece = bReliable ? MAX_RELIABLE_BLOCK_SIZE : MAX_UDP_BLOCK_SIZE;
+	while (slSizeToSend>slPiece) {
 		ppaNewPacket = new CPacket;
 
 		// for each packet, increment the sequence (very important)
 		ulSequence = (++ci_ulSequence);
-		ppaNewPacket->WriteToPacket(pubData,MAX_UDP_BLOCK_SIZE,ubPacketReliable,ulSequence,ci_adrAddress.adr_uwID,slTransferSize);
+		ppaNewPacket->WriteToPacket(pubData,slPiece,ubPacketReliable,ulSequence,ci_adrAddress.adr_uwID,slTransferSize);
 		ppaNewPacket->pa_adrAddress.adr_ulAddress = ci_adrAddress.adr_ulAddress;
 		ppaNewPacket->pa_adrAddress.adr_uwPort = ci_adrAddress.adr_uwPort;
 		ppaNewPacket->pa_adrAddress.adr_uwID = ci_adrAddress.adr_uwID;
@@ -125,8 +127,8 @@ void CClientInterface::Send(const void *pvSend, SLONG slSize,BOOL bReliable)
 		// packet cannot be the head
 		ubPacketReliable &= UDP_PACKET_RELIABLE;
 
-		slSizeToSend -=  MAX_UDP_BLOCK_SIZE;
-		pubData += MAX_UDP_BLOCK_SIZE;
+		slSizeToSend -=  slPiece;
+		pubData += slPiece;
 	}
 
 	// what remains is a tail of a reliable message, or an unreliable packet
@@ -165,7 +167,7 @@ void CClientInterface::SendTo(const void *pvSend, SLONG slSize,const CAddress ad
 	//if the message is reliable, make sure the first packet is marked as a head of the message
 	if (bReliable) {
 		ubPacketReliable = UDP_PACKET_RELIABLE | UDP_PACKET_RELIABLE_HEAD;
-		if (slSize <= MAX_UDP_BLOCK_SIZE) {
+		if (slSize <= MAX_RELIABLE_BLOCK_SIZE) {
 			ubPacketReliable |= UDP_PACKET_RELIABLE_TAIL;
 		}
 	} else {
@@ -178,12 +180,14 @@ void CClientInterface::SendTo(const void *pvSend, SLONG slSize,const CAddress ad
 	
 
 	// split large reliable messages into packets, and put them in the output buffer
-	while (slSizeToSend>MAX_UDP_BLOCK_SIZE) {
+	// (web port: an unreliable message is never split, see MAX_UDP_BLOCK_SIZE)
+	const SLONG slPiece = bReliable ? MAX_RELIABLE_BLOCK_SIZE : MAX_UDP_BLOCK_SIZE;
+	while (slSizeToSend>slPiece) {
 		ppaNewPacket = new CPacket;
 
 		// for each packet, increment the sequence (very important)
 		ulSequence = (++ci_ulSequence);
-		ppaNewPacket->WriteToPacket(pubData,MAX_UDP_BLOCK_SIZE,ubPacketReliable,ulSequence,adrAdress.adr_uwID,slTransferSize);
+		ppaNewPacket->WriteToPacket(pubData,slPiece,ubPacketReliable,ulSequence,adrAdress.adr_uwID,slTransferSize);
 		ppaNewPacket->pa_adrAddress.adr_ulAddress = adrAdress.adr_ulAddress;
 		ppaNewPacket->pa_adrAddress.adr_uwPort = adrAdress.adr_uwPort;
 		ppaNewPacket->pa_adrAddress.adr_uwID = adrAdress.adr_uwID;
@@ -193,8 +197,8 @@ void CClientInterface::SendTo(const void *pvSend, SLONG slSize,const CAddress ad
 		// packet cannot be the head
 		ubPacketReliable &= UDP_PACKET_RELIABLE;
 
-		slSizeToSend -=  MAX_UDP_BLOCK_SIZE;
-		pubData += MAX_UDP_BLOCK_SIZE;
+		slSizeToSend -=  slPiece;
+		pubData += slPiece;
 	}
 
 	// what remains is a tail of a reliable message, or an unreliable packet
