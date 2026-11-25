@@ -11,6 +11,8 @@
 // or cached again.
 //
 //   ?lazycache=0       no OPFS: every chunk from the network (tests, comparisons)
+//   ?hd=0              leave the HD texture archives (ZZ_HD_*.gro, tools/hdtex.py) out, for an
+//                      A/B in the HD build: the engine then sees only the retail textures
 //   Module.se1LazyBase base URL of the lazy files (default: gamedata/ next to the page)
 //   Module.se1LazyStats()  counters (network/OPFS bytes and requests, time waited)
 //   Module.se1LazyClear()  empty the OPFS cache
@@ -222,4 +224,15 @@
     try { await root.removeEntry('se1-lazy', { recursive: true }); } catch (e) {}
     dirP = null;
   };
+  // ?hd=0 (notes/hd-textures.md): remove the HD archives before the engine lists *.gro. WASMFS
+  // creates the preloaded files only when the runtime starts, hence onRuntimeInitialized.
+  if (q.get('hd') === '0') {
+    var prevInit = Module['onRuntimeInitialized'];
+    Module['onRuntimeInitialized'] = function () {
+      ['/ZZ_HD_Textures.gro', '/ZZ_HD_Maps.gro'].forEach(function (p) {
+        try { FS.unlink(p); console.log('hd=0: left out ' + p.slice(1)); } catch (e) {}
+      });
+      if (prevInit) prevInit.apply(this, arguments);
+    };
+  }
 })();
