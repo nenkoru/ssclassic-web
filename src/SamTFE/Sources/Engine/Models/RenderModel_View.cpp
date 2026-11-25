@@ -97,6 +97,21 @@ static FLOAT       *pooqMipShad;
 static UWORD       *puwSrfToMip;
 extern ULONG _ulModelUnpackCacheGen;
 static GFXVertex4  *_pvtxSrfArray;  // surface vertices of the model being rendered (_avtxSrfBase or the unpack cache)
+#ifdef __EMSCRIPTEN__
+// GL TRAFFIC (web port, perf round 2): gl1shim copies each client array and the indices into its
+// command stream at every draw. Arrays that are the same bytes for many instances (the shared
+// surface vertices and diffuse texcoords below, the model's element arrays) are declared static,
+// so the shim copies them once per batch and points later draws at that copy
+// (port/common/gl1shim.c, "static arrays"). Static means unchanged until SE1_GL1Shim_StaticReset(),
+// which runs whenever the unpack cache starts over or model data changes. See notes/perf/models2.md.
+extern "C" void SE1_GL1Shim_StaticArray(const void *p);
+extern "C" void SE1_GL1Shim_StaticReset(void);
+#define SHIM_STATIC(p) SE1_GL1Shim_StaticArray(p)
+#define SHIM_STATIC_RESET() SE1_GL1Shim_StaticReset()
+#else
+#define SHIM_STATIC(p)
+#define SHIM_STATIC_RESET()
+#endif
 
 // misc
 static ULONG _ulColorMask = 0;
@@ -586,6 +601,7 @@ extern void PrepareModelForRendering( CModelData &md)
   // do nothing, if the model has already been initialized for rendering
   if( md.md_bPreparedForRendering) return;
   _ulModelUnpackCacheGen++;  // mip infos are rebuilt: drop unpack cache entries
+  SHIM_STATIC_RESET();
   _pfModelProfile.StartTimer( CModelProfile::PTI_VIEW_PREPAREFORRENDERING);
   _pfWorldEditingProfile.StartTimer(CWorldEditingProfile::PTI_TRISTRIPMODELS);
   // prepare each mip model
@@ -799,6 +815,7 @@ static void FlushElements( INDEX ctElem, INDEX_T *pai)
     _pfModelProfile.StartTimer( CModelProfile::PTI_VIEW_DRAWELEMENTS);
     _pfModelProfile.IncrementTimerAveragingCounter( CModelProfile::PTI_VIEW_DRAWELEMENTS, ctElem/3);
     _pGfx->gl_ctModelTriangles += ctElem/3;
+    SHIM_STATIC(pai);  // the model's own element array (changes only with the model data)
     gfxDrawElements( ctElem, pai);
     extern INDEX mdl_bShowTriangles;
     if( _bMultiPlayer) mdl_bShowTriangles = 0; // don't allow in multiplayer mode!
@@ -1166,6 +1183,7 @@ static void UnpackCache_Check(void)
     _ctTceEntries = 0;
     _iUceChunk = 0;
     _slUceChunkUsed = 0;
+    SHIM_STATIC_RESET();  // the arena is about to be rewritten
   }
 }
 
@@ -1259,6 +1277,58 @@ static void ShadesToColors(void)
 }
 
 
+#if defined(__wasm_simd128__)
+// shade and color of 4 mip vertices from their normals, as UnpackFrame + ShadesToColors do per vertex:
+// the same float ops in the same order, FloatToInt as f+copysign(0.5,f) truncated, the SWORD store,
+// the clamp and the pubClipByte clamp (indices stay within its -512..1023 range), so the colors are
+// bit-identical
+struct ShadeLanes {
+  v128_t vLX, vLY, vLZ, vSign, vHalf, vZero, v255, vLR, vLG, vLB, vAR, vAG, vAB;
+  ShadeLanes( FLOAT fLightObjX, FLOAT fLightObjY, FLOAT fLightObjZ) {
+    vLX = wasm_f32x4_splat(fLightObjX);
+    vLY = wasm_f32x4_splat(fLightObjY);
+    vLZ = wasm_f32x4_splat(fLightObjZ);
+    vSign = wasm_i32x4_splat(0x80000000);
+    vHalf = wasm_f32x4_splat(0.5f);
+    vZero = wasm_i32x4_splat(0);
+    v255  = wasm_i32x4_splat(255);
+    vLR = wasm_i32x4_splat(_slLR); vLG = wasm_i32x4_splat(_slLG); vLB = wasm_i32x4_splat(_slLB);
+    vAR = wasm_i32x4_splat(_slAR); vAG = wasm_i32x4_splat(_slAG); vAB = wasm_i32x4_splat(_slAB);
+  }
+  inline v128_t Colors( v128_t vNX, v128_t vNY, v128_t vNZ) const {
+    const v128_t vDot = wasm_f32x4_add( wasm_f32x4_add( wasm_f32x4_mul(vNX,vLX), wasm_f32x4_mul(vNY,vLY)), wasm_f32x4_mul(vNZ,vLZ));
+    const v128_t vRound = wasm_v128_or( vHalf, wasm_v128_and( vDot, vSign));  // copysignf(0.5f, f)
+    v128_t vShade = wasm_i32x4_trunc_sat_f32x4( wasm_f32x4_add( vDot, vRound));
+    vShade = wasm_i32x4_shr( wasm_i32x4_shl( vShade, 16), 16);  // stored as SWORD
+    vShade = wasm_i32x4_min( wasm_i32x4_max( vShade, vZero), v255);
+    const v128_t vR = wasm_i32x4_min( wasm_i32x4_max( wasm_i32x4_add( vAR, wasm_i32x4_shr( wasm_i32x4_mul( vLR, vShade), 8)), vZero), v255);
+    const v128_t vG = wasm_i32x4_min( wasm_i32x4_max( wasm_i32x4_add( vAG, wasm_i32x4_shr( wasm_i32x4_mul( vLG, vShade), 8)), vZero), v255);
+    const v128_t vB = wasm_i32x4_min( wasm_i32x4_max( wasm_i32x4_add( vAB, wasm_i32x4_shr( wasm_i32x4_mul( vLB, vShade), 8)), vZero), v255);
+    return wasm_v128_or( wasm_v128_or( vR, wasm_i32x4_shl( vG, 8)), wasm_v128_or( wasm_i32x4_shl( vB, 16), wasm_i32x4_shl( vShade, 24)));
+  }
+};
+// the same for one vertex
+static inline void ShadeColor1( GFXColor &col, FLOAT fNX, FLOAT fNY, FLOAT fNZ, FLOAT fLightObjX, FLOAT fLightObjY, FLOAT fLightObjZ)
+{
+  const SLONG slShade = Clamp( (SLONG)(SWORD)FloatToInt(fNX*fLightObjX + fNY*fLightObjY + fNZ*fLightObjZ), (SLONG)0, (SLONG)255);
+  col.ub.r = pubClipByte[_slAR + ((_slLR*slShade)>>8)];
+  col.ub.g = pubClipByte[_slAG + ((_slLG*slShade)>>8)];
+  col.ub.b = pubClipByte[_slAB + ((_slLB*slShade)>>8)];
+  col.ub.a = slShade;
+}
+// x,y,z lanes of 4 vertices -> 4 packed {x,y,z} (GFXVertex3, GFXNormal3) at pf
+static inline void Store3x4( FLOAT *pf, v128_t vX, v128_t vY, v128_t vZ)
+{
+  const v128_t t0 = wasm_i32x4_shuffle( vX, vY, 0, 4, 1, 5);  // x0 y0 x1 y1
+  const v128_t t1 = wasm_i32x4_shuffle( vX, vY, 2, 6, 3, 7);  // x2 y2 x3 y3
+  const v128_t u  = wasm_i32x4_shuffle( vY, vZ, 1, 5, 2, 6);  // y1 z1 y2 z2
+  const v128_t v  = wasm_i32x4_shuffle( t1, vZ, 2, 3, 6, 7);  // x3 y3 z2 z3
+  wasm_v128_store( pf+0, wasm_i32x4_shuffle( t0, vZ, 0, 1, 4, 2));  // x0 y0 z0 x1
+  wasm_v128_store( pf+4, wasm_i32x4_shuffle( u,  t1, 0, 1, 4, 5));  // y1 z1 x2 y2
+  wasm_v128_store( pf+8, wasm_i32x4_shuffle( v,  v,  2, 0, 1, 3));  // z2 x3 y3 z3
+}
+#endif
+
 // shades from already unpacked normals (unpack cache hit): the same expression as in UnpackFrame
 static void ShadesFromNormals( CRenderModel &rm)
 {
@@ -1266,19 +1336,8 @@ static void ShadesFromNormals( CRenderModel &rm)
   const FLOAT fLightObjY = rm.rm_vLightObj(2) * -255.0f;
   const FLOAT fLightObjZ = rm.rm_vLightObj(3) * -255.0f;
 #if defined(__wasm_simd128__)
-  // 4 vertices at a time, then ShadesToColors() per lane: the same float ops in the same order,
-  // FloatToInt as f+copysign(0.5,f) truncated, the SWORD store, the clamp and the pubClipByte
-  // clamp (indices stay within its -512..1023 range), so the colors are bit-identical
   {
-    const v128_t vLX = wasm_f32x4_splat(fLightObjX);
-    const v128_t vLY = wasm_f32x4_splat(fLightObjY);
-    const v128_t vLZ = wasm_f32x4_splat(fLightObjZ);
-    const v128_t vSign = wasm_i32x4_splat(0x80000000);
-    const v128_t vHalf = wasm_f32x4_splat(0.5f);
-    const v128_t vZero = wasm_i32x4_splat(0);
-    const v128_t v255  = wasm_i32x4_splat(255);
-    const v128_t vLR = wasm_i32x4_splat(_slLR), vLG = wasm_i32x4_splat(_slLG), vLB = wasm_i32x4_splat(_slLB);
-    const v128_t vAR = wasm_i32x4_splat(_slAR), vAG = wasm_i32x4_splat(_slAG), vAB = wasm_i32x4_splat(_slAB);
+    const ShadeLanes sl( fLightObjX, fLightObjY, fLightObjZ);
     const FLOAT *pfNor = &pnorMipBase[0].nx;
     INDEX iMipVx=0;
     for( ; iMipVx+4<=_ctAllMipVx; iMipVx+=4) {
@@ -1288,28 +1347,12 @@ static void ShadesFromNormals( CRenderModel &rm)
       const v128_t vNX = wasm_i32x4_shuffle( wasm_i32x4_shuffle( a, b, 0, 3, 6, 6), c, 0, 1, 2, 5);
       const v128_t vNY = wasm_i32x4_shuffle( wasm_i32x4_shuffle( a, b, 1, 4, 7, 7), c, 0, 1, 2, 6);
       const v128_t vNZ = wasm_i32x4_shuffle( wasm_i32x4_shuffle( a, b, 2, 5, 5, 5), c, 0, 1, 4, 7);
-      const v128_t vDot = wasm_f32x4_add( wasm_f32x4_add( wasm_f32x4_mul(vNX,vLX), wasm_f32x4_mul(vNY,vLY)), wasm_f32x4_mul(vNZ,vLZ));
-      const v128_t vRound = wasm_v128_or( vHalf, wasm_v128_and( vDot, vSign));  // copysignf(0.5f, f)
-      v128_t vShade = wasm_i32x4_trunc_sat_f32x4( wasm_f32x4_add( vDot, vRound));
-      vShade = wasm_i32x4_shr( wasm_i32x4_shl( vShade, 16), 16);  // stored as SWORD
-      vShade = wasm_i32x4_min( wasm_i32x4_max( vShade, vZero), v255);
-      const v128_t vR = wasm_i32x4_min( wasm_i32x4_max( wasm_i32x4_add( vAR, wasm_i32x4_shr( wasm_i32x4_mul( vLR, vShade), 8)), vZero), v255);
-      const v128_t vG = wasm_i32x4_min( wasm_i32x4_max( wasm_i32x4_add( vAG, wasm_i32x4_shr( wasm_i32x4_mul( vLG, vShade), 8)), vZero), v255);
-      const v128_t vB = wasm_i32x4_min( wasm_i32x4_max( wasm_i32x4_add( vAB, wasm_i32x4_shr( wasm_i32x4_mul( vLB, vShade), 8)), vZero), v255);
-      const v128_t vCol = wasm_v128_or( wasm_v128_or( vR, wasm_i32x4_shl( vG, 8)), wasm_v128_or( wasm_i32x4_shl( vB, 16), wasm_i32x4_shl( vShade, 24)));
-      wasm_v128_store( &pcolMipBase[iMipVx], vCol);
+      wasm_v128_store( &pcolMipBase[iMipVx], sl.Colors( vNX, vNY, vNZ));
     }
     // the rest one by one
     for( ; iMipVx<_ctAllMipVx; iMipVx++) {
-      const FLOAT fNX = pnorMipBase[iMipVx].nx;
-      const FLOAT fNY = pnorMipBase[iMipVx].ny;
-      const FLOAT fNZ = pnorMipBase[iMipVx].nz;
-      const SLONG slShade = Clamp( (SLONG)(SWORD)FloatToInt(fNX*fLightObjX + fNY*fLightObjY + fNZ*fLightObjZ), (SLONG)0, (SLONG)255);
-      GFXColor &col = pcolMipBase[iMipVx];
-      col.ub.r = pubClipByte[_slAR + ((_slLR*slShade)>>8)];
-      col.ub.g = pubClipByte[_slAG + ((_slLG*slShade)>>8)];
-      col.ub.b = pubClipByte[_slAB + ((_slLB*slShade)>>8)];
-      col.ub.a = slShade;
+      ShadeColor1( pcolMipBase[iMipVx], pnorMipBase[iMipVx].nx, pnorMipBase[iMipVx].ny, pnorMipBase[iMipVx].nz,
+                   fLightObjX, fLightObjY, fLightObjZ);
     }
     return;
   }
@@ -1325,11 +1368,157 @@ static void ShadesFromNormals( CRenderModel &rm)
 }
 
 
+#if defined(__wasm_simd128__)
+// UnpackFrame 4 vertices at a time (web port, perf round 2). The scalar loops below gather each
+// vertex through the mip->model index and two sin/cos table lookups, then shade it in a second pass
+// (ShadesToColors); on a cache fill (500 monsters: ~80 fills of ~200 vertices per rendered frame)
+// that was 6.4% of the stress500 frame. Here the gathered values go into lanes and positions,
+// normals, shades and colors are computed with the same float ops in the same order per lane, and
+// colors directly (ShadeLanes), so every output is bit-identical. Lerp() returns an end point
+// exactly when the ratio is 0 or 1; those cases unpack that frame alone, which gives the same values.
+static void UnpackFrame_SIMD( CRenderModel &rm, BOOL bKeepNormals)
+{
+  const FLOAT fLerpRatio = rm.rm_fRatio;
+  const FLOAT fLightObjX = rm.rm_vLightObj(1) * -255.0f;
+  const FLOAT fLightObjY = rm.rm_vLightObj(2) * -255.0f;
+  const FLOAT fLightObjZ = rm.rm_vLightObj(3) * -255.0f;
+  const FLOAT fOffsetX = rm.rm_vOffset(1), fOffsetY = rm.rm_vOffset(2), fOffsetZ = rm.rm_vOffset(3);
+  const FLOAT fStretchX = rm.rm_vStretch(1), fStretchY = rm.rm_vStretch(2), fStretchZ = rm.rm_vStretch(3);
+  const UWORD *puw = (const UWORD*)&rm.rm_pmmiMip->mmpi_auwMipToMdl[0];
+  const INDEX ctVx = _ctAllMipVx;
+  GFXVertex3 *pvtx = pvtxMipBase;
+  GFXNormal3 *pnor = pnorMipBase;
+  GFXColor   *pcol = pcolMipBase;
+  const ShadeLanes sl( fLightObjX, fLightObjY, fLightObjZ);
+  const v128_t vOX = wasm_f32x4_splat(fOffsetX),  vOY = wasm_f32x4_splat(fOffsetY),  vOZ = wasm_f32x4_splat(fOffsetZ);
+  const v128_t vSX = wasm_f32x4_splat(fStretchX), vSY = wasm_f32x4_splat(fStretchY), vSZ = wasm_f32x4_splat(fStretchZ);
+  const v128_t vR  = wasm_f32x4_splat(fLerpRatio);
+  const BOOL b16 = rm.rm_pmdModelData->md_Flags & MF_COMPRESSED_16BIT;
+  const void *pF0 = b16 ? (const void*)rm.rm_pFrame16_0 : (const void*)rm.rm_pFrame8_0;
+  const void *pF1 = b16 ? (const void*)rm.rm_pFrame16_1 : (const void*)rm.rm_pFrame8_1;
+  BOOL bLerp = pF0!=pF1;
+  if( bLerp && fLerpRatio==0) { bLerp = FALSE; }
+  if( bLerp && fLerpRatio==1) { bLerp = FALSE;  pF0 = pF1; }
+  // the end of each vertex: lanes -> stored position, normal and color
+#define UF_STORE( i, vX, vY, vZ, vNX, vNY, vNZ) { \
+    Store3x4( &pvtx[i].x, wasm_f32x4_mul( wasm_f32x4_sub( vX, vOX), vSX), \
+                          wasm_f32x4_mul( wasm_f32x4_sub( vY, vOY), vSY), \
+                          wasm_f32x4_mul( wasm_f32x4_sub( vZ, vOZ), vSZ)); \
+    if( bKeepNormals) Store3x4( &pnor[i].nx, vNX, vNY, vNZ); \
+    wasm_v128_store( &pcol[i], sl.Colors( vNX, vNY, vNZ)); }
+#define UF_LERP( a, b) wasm_f32x4_add( a, wasm_f32x4_mul( wasm_f32x4_sub( b, a), vR))
+  INDEX i=0;
+  if( b16) {
+    const ModelFrameVertex16 *pFrame0 = (const ModelFrameVertex16*)pF0;
+    const ModelFrameVertex16 *pFrame1 = (const ModelFrameVertex16*)pF1;
+#define UF_POS16( F, c) wasm_f32x4_convert_i32x4( wasm_i32x4_make( F[i0].mfv_SWPoint(c), F[i1].mfv_SWPoint(c), F[i2].mfv_SWPoint(c), F[i3].mfv_SWPoint(c)))
+#define UF_TAB16( T, F, m) wasm_f32x4_make( T[F[i0].m], T[F[i1].m], T[F[i2].m], T[F[i3].m])
+    for( ; i+4<=ctVx; i+=4) {
+      const INDEX i0 = puw[i+0], i1 = puw[i+1], i2 = puw[i+2], i3 = puw[i+3];
+      v128_t vX = UF_POS16( pFrame0, 1), vY = UF_POS16( pFrame0, 2), vZ = UF_POS16( pFrame0, 3);
+      const v128_t vCP0 = UF_TAB16( pfCosTable, pFrame0, mfv_ubNormP);
+      v128_t vNX = wasm_f32x4_mul( wasm_f32x4_neg( UF_TAB16( pfSinTable, pFrame0, mfv_ubNormH)), vCP0);
+      v128_t vNY = UF_TAB16( pfSinTable, pFrame0, mfv_ubNormP);
+      v128_t vNZ = wasm_f32x4_mul( wasm_f32x4_neg( UF_TAB16( pfCosTable, pFrame0, mfv_ubNormH)), vCP0);
+      if( bLerp) {
+        vX = UF_LERP( vX, UF_POS16( pFrame1, 1));
+        vY = UF_LERP( vY, UF_POS16( pFrame1, 2));
+        vZ = UF_LERP( vZ, UF_POS16( pFrame1, 3));
+        const v128_t vCP1 = UF_TAB16( pfCosTable, pFrame1, mfv_ubNormP);
+        vNX = UF_LERP( vNX, wasm_f32x4_mul( wasm_f32x4_neg( UF_TAB16( pfSinTable, pFrame1, mfv_ubNormH)), vCP1));
+        vNY = UF_LERP( vNY, UF_TAB16( pfSinTable, pFrame1, mfv_ubNormP));
+        vNZ = UF_LERP( vNZ, wasm_f32x4_mul( wasm_f32x4_neg( UF_TAB16( pfCosTable, pFrame1, mfv_ubNormH)), vCP1));
+      }
+      UF_STORE( i, vX, vY, vZ, vNX, vNY, vNZ);
+    }
+#undef UF_POS16
+#undef UF_TAB16
+    // the rest one by one
+    for( ; i<ctVx; i++) {
+      const ModelFrameVertex16 &mfv0 = pFrame0[puw[i]];
+      const ModelFrameVertex16 &mfv1 = pFrame1[puw[i]];
+      FLOAT fX = (FLOAT)mfv0.mfv_SWPoint(1), fY = (FLOAT)mfv0.mfv_SWPoint(2), fZ = (FLOAT)mfv0.mfv_SWPoint(3);
+      FLOAT fNX = -pfSinTable[mfv0.mfv_ubNormH]*pfCosTable[mfv0.mfv_ubNormP];
+      FLOAT fNY = +pfSinTable[mfv0.mfv_ubNormP];
+      FLOAT fNZ = -pfCosTable[mfv0.mfv_ubNormH]*pfCosTable[mfv0.mfv_ubNormP];
+      if( bLerp) {
+        fX = fX + ((FLOAT)mfv1.mfv_SWPoint(1)-fX)*fLerpRatio;
+        fY = fY + ((FLOAT)mfv1.mfv_SWPoint(2)-fY)*fLerpRatio;
+        fZ = fZ + ((FLOAT)mfv1.mfv_SWPoint(3)-fZ)*fLerpRatio;
+        const FLOAT fNX1 = -pfSinTable[mfv1.mfv_ubNormH]*pfCosTable[mfv1.mfv_ubNormP];
+        const FLOAT fNY1 = +pfSinTable[mfv1.mfv_ubNormP];
+        const FLOAT fNZ1 = -pfCosTable[mfv1.mfv_ubNormH]*pfCosTable[mfv1.mfv_ubNormP];
+        fNX = fNX + (fNX1-fNX)*fLerpRatio;
+        fNY = fNY + (fNY1-fNY)*fLerpRatio;
+        fNZ = fNZ + (fNZ1-fNZ)*fLerpRatio;
+      }
+      pvtx[i].x = (fX-fOffsetX)*fStretchX;
+      pvtx[i].y = (fY-fOffsetY)*fStretchY;
+      pvtx[i].z = (fZ-fOffsetZ)*fStretchZ;
+      if( bKeepNormals) { pnor[i].nx = fNX;  pnor[i].ny = fNY;  pnor[i].nz = fNZ; }
+      ShadeColor1( pcol[i], fNX, fNY, fNZ, fLightObjX, fLightObjY, fLightObjZ);
+    }
+  } else {
+    const ModelFrameVertex8 *pFrame0 = (const ModelFrameVertex8*)pF0;
+    const ModelFrameVertex8 *pFrame1 = (const ModelFrameVertex8*)pF1;
+#define UF_POS8( F, c) wasm_f32x4_convert_i32x4( wasm_i32x4_make( F[i0].mfv_SBPoint(c), F[i1].mfv_SBPoint(c), F[i2].mfv_SBPoint(c), F[i3].mfv_SBPoint(c)))
+#define UF_NOR8( F, c) wasm_f32x4_make( avGouraudNormals[F[i0].mfv_NormIndex](c), avGouraudNormals[F[i1].mfv_NormIndex](c), \
+                                        avGouraudNormals[F[i2].mfv_NormIndex](c), avGouraudNormals[F[i3].mfv_NormIndex](c))
+    for( ; i+4<=ctVx; i+=4) {
+      const INDEX i0 = puw[i+0], i1 = puw[i+1], i2 = puw[i+2], i3 = puw[i+3];
+      v128_t vX = UF_POS8( pFrame0, 1), vY = UF_POS8( pFrame0, 2), vZ = UF_POS8( pFrame0, 3);
+      v128_t vNX = UF_NOR8( pFrame0, 1), vNY = UF_NOR8( pFrame0, 2), vNZ = UF_NOR8( pFrame0, 3);
+      if( bLerp) {
+        vX = UF_LERP( vX, UF_POS8( pFrame1, 1));
+        vY = UF_LERP( vY, UF_POS8( pFrame1, 2));
+        vZ = UF_LERP( vZ, UF_POS8( pFrame1, 3));
+        vNX = UF_LERP( vNX, UF_NOR8( pFrame1, 1));
+        vNY = UF_LERP( vNY, UF_NOR8( pFrame1, 2));
+        vNZ = UF_LERP( vNZ, UF_NOR8( pFrame1, 3));
+      }
+      UF_STORE( i, vX, vY, vZ, vNX, vNY, vNZ);
+    }
+#undef UF_POS8
+#undef UF_NOR8
+    // the rest one by one
+    for( ; i<ctVx; i++) {
+      const ModelFrameVertex8 &mfv0 = pFrame0[puw[i]];
+      const ModelFrameVertex8 &mfv1 = pFrame1[puw[i]];
+      const FLOAT3D &vNormal0 = avGouraudNormals[mfv0.mfv_NormIndex];
+      const FLOAT3D &vNormal1 = avGouraudNormals[mfv1.mfv_NormIndex];
+      FLOAT fX = (FLOAT)mfv0.mfv_SBPoint(1), fY = (FLOAT)mfv0.mfv_SBPoint(2), fZ = (FLOAT)mfv0.mfv_SBPoint(3);
+      FLOAT fNX = vNormal0(1), fNY = vNormal0(2), fNZ = vNormal0(3);
+      if( bLerp) {
+        fX = fX + ((FLOAT)mfv1.mfv_SBPoint(1)-fX)*fLerpRatio;
+        fY = fY + ((FLOAT)mfv1.mfv_SBPoint(2)-fY)*fLerpRatio;
+        fZ = fZ + ((FLOAT)mfv1.mfv_SBPoint(3)-fZ)*fLerpRatio;
+        fNX = fNX + (vNormal1(1)-fNX)*fLerpRatio;
+        fNY = fNY + (vNormal1(2)-fNY)*fLerpRatio;
+        fNZ = fNZ + (vNormal1(3)-fNZ)*fLerpRatio;
+      }
+      pvtx[i].x = (fX-fOffsetX)*fStretchX;
+      pvtx[i].y = (fY-fOffsetY)*fStretchY;
+      pvtx[i].z = (fZ-fOffsetZ)*fStretchZ;
+      if( bKeepNormals) { pnor[i].nx = fNX;  pnor[i].ny = fNY;  pnor[i].nz = fNZ; }
+      ShadeColor1( pcol[i], fNX, fNY, fNZ, fLightObjX, fLightObjY, fLightObjZ);
+    }
+  }
+#undef UF_STORE
+#undef UF_LERP
+}
+#endif
+
+
 // unpack vertices (and eventually normals) of one frame
 static void UnpackFrame( CRenderModel &rm, BOOL bKeepNormals)
 {
   _pfModelProfile.StartTimer( CModelProfile::PTI_VIEW_INIT_UNPACK);
   _pfModelProfile.IncrementTimerAveragingCounter( CModelProfile::PTI_VIEW_INIT_UNPACK, _ctAllMipVx);
+#if defined(__wasm_simd128__)
+  UnpackFrame_SIMD( rm, bKeepNormals);
+  _pfModelProfile.StopTimer( CModelProfile::PTI_VIEW_INIT_UNPACK);
+  return;
+#endif
 
   // cache lerp ratio, compression, stretch and light factors
   FLOAT fStretchX = rm.rm_vStretch(1);
@@ -2297,7 +2486,10 @@ srfVtxLoop:
       }
     }
   }}
-  if( puce!=NULL) puce->uce_bSrfFilled = TRUE;
+  if( puce!=NULL) {
+    puce->uce_bSrfFilled = TRUE;
+    SHIM_STATIC(_pvtxSrfArray);  // shared: same bytes for every instance this frame
+  }
   // prepare (and lock) vertex array
   gfxEnableDepthTest();
   gfxSetVertexArray( _pvtxSrfArray, _ctAllSrfVx);
@@ -2635,7 +2827,10 @@ diffColLoop:
       else AttenuateAlpha( pshdMipFogy, ctSrfVx);
     }
   }}
-  if( ptce!=NULL) ptce->tce_bFilled = TRUE;
+  if( ptce!=NULL) {
+    ptce->tce_bFilled = TRUE;
+    SHIM_STATIC(ptexDiffArray);  // shared: same bytes for every instance this frame
+  }
   // done with diffuse surfaces setup
   _pfModelProfile.StopTimer( CModelProfile::PTI_VIEW_INIT_DIFF_SURF);
 

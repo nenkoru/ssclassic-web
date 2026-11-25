@@ -323,12 +323,19 @@ CModelData::CModelData()
  */
 // bumped whenever frame vertices or mip infos may change: invalidates the unpack cache (RenderModel_View.cpp)
 extern ULONG _ulModelUnpackCacheGen;
+#ifdef __EMSCRIPTEN__
+// ... and the arrays declared static to gl1shim (port/common/gl1shim.c), which may live in that data
+extern "C" void SE1_GL1Shim_StaticReset(void);
+#define MODEL_DATA_CHANGED() { _ulModelUnpackCacheGen++; SE1_GL1Shim_StaticReset(); }
+#else
+#define MODEL_DATA_CHANGED() { _ulModelUnpackCacheGen++; }
+#endif
 
 void CModelData::Clear(void)
 {
   INDEX i;
   md_bPreparedForRendering = FALSE;
-  _ulModelUnpackCacheGen++;
+  MODEL_DATA_CHANGED();
 #ifdef __EMSCRIPTEN__
   // web port (perf): the GPU animation path keeps a copy of this model's frames (port/common/GpuAnim.cpp)
   { extern void SE1_GpuAnim_Forget(CModelData *md); SE1_GpuAnim_Forget(this); }
@@ -386,7 +393,7 @@ BOOL CModelData::IsAutoFreed(void)
 
 void CModelData::ClearAnimations(void)
 {
-  _ulModelUnpackCacheGen++;
+  MODEL_DATA_CHANGED();
   CAnimData::Clear();
 
   md_FrameVertices16.Clear();
