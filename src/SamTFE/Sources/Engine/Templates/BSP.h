@@ -41,6 +41,9 @@ public:
 
 public:
   BSPNode<Type, iDimensions> *bt_pbnRoot;                  // root node of BSP-tree
+#ifdef __EMSCRIPTEN__
+  ULONG bt_ulStamp;  // web port: new on every change of the tree (FindLineMinMax() memo, BSP.cpp)
+#endif
 
   /* Default constructor. */
   BSPTree(void);

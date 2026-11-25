@@ -22,6 +22,9 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <Engine/Graphics/Texture.h>
 #include <Engine/Graphics/GfxProfile.h>
 
+#if defined(__EMSCRIPTEN__) && defined(__wasm_simd128__)
+#include <wasm_simd128.h>
+#endif
 #if USE_MMX_INTRINSICS
 #include <mmintrin.h>
 #endif
@@ -1341,6 +1344,45 @@ static inline void extpix_mulhi(ExtPix &p1, const ExtPix &p2)
 #endif
 
 
+#if defined(__EMSCRIPTEN__) && defined(__wasm_simd128__) && !(defined USE_MMX_INTRINSICS) && !(defined __MSVC_INLINE__) && !(defined __GNU_INLINE_X86_32__)
+// Web port (perf, notes/perf/frame4.md): two middle pixels of an in-place FilterBitmap() at once.
+// Each 16-bit lane does what the ExtPix code above does for its channel: wrapping adds and
+// multiplies (i16x8.add/mul keep the low 16 bits, as the (SWORD) casts do), then the saturating add
+// (add_sat), the signed high multiply ((a*b)>>16 in 32 bits) and the clamp to 0..255 (the unsigned
+// saturating narrow). Wrapping sums don't depend on their order, so the results are the same bits.
+// In place, the scalar loop has already written the filtered value of the row above at the pixel
+// left of the one it does (dst[-W] = *rowptr), so the second pixel's upper-left neighbour is that
+// filtered value: rowptr[0], which holds it until this call replaces it.
+static inline void FilterMiddlePairInPlace(ULONG *src, ULONG *rowptr, PIX pixCanvasWidth,
+  v128_t vMc, v128_t vMe, v128_t vMm, v128_t vAdd, v128_t vInvDiv)
+{
+  const v128_t vUp  = wasm_v128_load(src-pixCanvasWidth-1);
+  const v128_t vMid = wasm_v128_load(src-1);
+  const v128_t vLow = wasm_v128_load(src+pixCanvasWidth-1);
+  const v128_t vUpL = wasm_u16x8_extend_low_u8x16(vUp),   vUpR = wasm_u16x8_extend_high_u8x16(vUp);
+  const v128_t vMidL = wasm_u16x8_extend_low_u8x16(vMid), vMidR = wasm_u16x8_extend_high_u8x16(vMid);
+  const v128_t vLowL = wasm_u16x8_extend_low_u8x16(vLow), vLowR = wasm_u16x8_extend_high_u8x16(vLow);
+  // the row above at the first pixel, as filtered (see above), for the second pixel's upper left
+  const v128_t vRow = wasm_u16x8_load8x8(rowptr);
+  const v128_t vUL = wasm_i16x8_shuffle(vUpL, vRow, 0,1,2,3, 8,9,10,11);
+  const v128_t vU  = wasm_i16x8_shuffle(vUpL, vUpR, 4,5,6,7, 8,9,10,11);
+  const v128_t vM  = wasm_i16x8_shuffle(vMidL, vMidR, 4,5,6,7, 8,9,10,11);
+  const v128_t vL  = wasm_i16x8_shuffle(vLowL, vLowR, 4,5,6,7, 8,9,10,11);
+  // corners: upper left, upper right, lower left, lower right; edges: up, left, right, down
+  v128_t v1 = wasm_i16x8_add(wasm_i16x8_add(vUL, vUpR), wasm_i16x8_add(vLowL, vLowR));
+  v128_t v2 = wasm_i16x8_add(wasm_i16x8_add(vU, vMidL), wasm_i16x8_add(vMidR, vL));
+  v1 = wasm_i16x8_add(wasm_i16x8_mul(v1, vMc), wasm_i16x8_add(wasm_i16x8_mul(v2, vMe), wasm_i16x8_mul(vM, vMm)));
+  v1 = wasm_i16x8_add_sat(v1, vAdd);
+  const v128_t vLo = wasm_i32x4_shr(wasm_i32x4_extmul_low_i16x8(v1, vInvDiv), 16);
+  const v128_t vHi = wasm_i32x4_shr(wasm_i32x4_extmul_high_i16x8(v1, vInvDiv), 16);
+  const v128_t vRes = wasm_u8x16_narrow_i16x8(wasm_i16x8_narrow_i32x4(vLo, vHi), wasm_i16x8_splat(0));
+  // the row above gets its two filtered pixels, the row buffer this row's
+  wasm_v128_store64_lane(src-pixCanvasWidth, wasm_v128_load64_zero(rowptr), 0);
+  wasm_v128_store64_lane(rowptr, vRes, 0);
+}
+#define SE1_FILTER_SIMD 1
+#endif
+
 // applies filter to bitmap
 void FilterBitmap( INDEX iFilter, ULONG *pulSrc, ULONG *pulDst, PIX pixWidth, PIX pixHeight,
                    PIX pixCanvasWidth, PIX pixCanvasHeight)
@@ -2306,6 +2348,12 @@ lowerLoop:
     EXTPIXFROMINT64(mmAdd);
     EXTPIXFROMINT64(mmInvDiv);
     #undef EXTPIXFROMINT64
+#ifdef SE1_FILTER_SIMD
+    #define SIMDFROMEXTPIX(x) wasm_i16x8_make(x[0], x[1], x[2], x[3], x[0], x[1], x[2], x[3])
+    const v128_t vSimdMc = SIMDFROMEXTPIX(rmmMc), vSimdMe = SIMDFROMEXTPIX(rmmMe), vSimdMm = SIMDFROMEXTPIX(rmmMm);
+    const v128_t vSimdAdd = SIMDFROMEXTPIX(rmmAdd), vSimdInvDiv = SIMDFROMEXTPIX(rmmInvDiv);
+    #undef SIMDFROMEXTPIX
+#endif
 
     // ----------------------- process upper left corner
     extend_pixel(src[0], rmm1);
@@ -2402,7 +2450,19 @@ lowerLoop:
         dst++;
 
         // for each pixel in current row
-        for (size_t j = pixWidth-2; j != 0; j--)  // pixLoop
+        size_t ctMiddle = pixWidth-2;
+#ifdef SE1_FILTER_SIMD
+        // web port: two pixels at a time (FilterMiddlePairInPlace())
+        if (pulSrc==pulDst) {
+          for (; ctMiddle>=2; ctMiddle-=2) {
+            FilterMiddlePairInPlace(src, rowptr, pixCanvasWidth, vSimdMc, vSimdMe, vSimdMm, vSimdAdd, vSimdInvDiv);
+            src += 2;
+            dst += 2;
+            rowptr += 2;
+          }
+        }
+#endif
+        for (size_t j = ctMiddle; j != 0; j--)  // pixLoop
         {
             // prepare upper convolution row
             extend_pixel(src[(-pixCanvasWidth)-1], rmm1);

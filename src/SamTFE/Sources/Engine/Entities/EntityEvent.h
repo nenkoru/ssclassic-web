@@ -36,6 +36,11 @@ public:
 
   CEntityEvent(SLONG slEventCode) : ee_slEvent(slEventCode) {};
   virtual ~CEntityEvent(void) {}; // destructor must be virtual
+#ifdef __EMSCRIPTEN__
+  // web port (perf): event copies come from a free list (Entity.cpp)
+  static void *operator new(size_t size);
+  static void operator delete(void *p, size_t size);
+#endif
   // used for copying events for later delivery
   virtual CEntityEvent *MakeCopy(void) {
     CEntityEvent *peeCopy = new CEntityEvent(*this);
