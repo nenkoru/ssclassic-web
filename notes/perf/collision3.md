@@ -101,3 +101,35 @@ stress4000: it is capped at 2047 entity handles.
 Track L (branch `t3/69e5b341`) prefetched the movers' collision candidates on a job pool. It
 measured 2-7% slower than the single thread, and it duplicated the brush collision code. Its job
 pool may still serve model rendering later.
+
+## 5. PrepareProjectionsAndSpheres() in SIMD (round 4)
+
+After track M (`rays3.md`), a profile with the collision functions kept apart (stress4000, main
+51645f2) shows `SE1_FindEntitiesTouchingBox` 25.7%, `ClipModelMoveToModel` 23.1%,
+`PrepareProjectionsAndSpheres` 11.6%, `PrepareRayModelHits` 6.1%, `ClipMoveToBrushes` 5.8%.
+Counters over 4M pairs: in 10.8% of the pairs no sphere box of A touches a sphere of B, and in
+81.5% none reaches the scalar clip. So a pair-level reject could skip at most ~11% of the pairs;
+the per-pair arithmetic is the cost.
+
+`PrepareProjectionsAndSpheres()` builds `mAToB = MatrixMulT(mB, mA)` and
+`vAToB = VectMulT(mB, vA-vB)` for both ends of the move, per pair. Column j of
+`MatrixMulT(mB, mA)` is `(row1(mB)*mA(1,j) + row2(mB)*mA(2,j)) + row3(mB)*mA(3,j)`, and
+`VectMulT(mB, v)` is `(v1*row1(mB) + v2*row2(mB)) + v3*row3(mB)`. These are the scalar code's
+products and sums per lane in its order (multiplication commutes exactly). The columns go straight
+into the sphere projection (part 4), and the matrices and vectors are still stored for the code
+that reads them.
+
+- Verify build (stress4000): 61,865,984 prepares with 0 mismatches in the matrices and vectors,
+  and 247,428,191 projected spheres with 0 mismatches.
+- Bench, mean ms, 2 reps, against r4a (main 51645f2), "SAME simulation" on the demo:
+  1.10x at stress4000 (41.84 to 37.89) in one run and 1.04x (43.52 to 41.84) in another, under
+  load from a parallel track; stress2000 1.01x.
+
+### Not taken: the grid's box test on copied box arrays
+
+The record list that `SE1_FindEntitiesTouchingBox()` keeps between searches (about 122 records per
+search at stress4000) had its boxes copied into one array per edge, so that the test takes 4
+records per comparison. Records whose box `MoveEntityInCollisionGrid()` changed were copied again
+before the test. The verify build had 4,194,304 searches and 0 mismatches. It was no faster
+(0.99x at stress4000): 27% of the searches make the list again, and copying the boxes then costs
+what the test saves.

@@ -133,7 +133,8 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
   - `collision3.md`: the SIMD pre-test in `WorldCollision.cpp` also rejects pairs that already
     overlap, as the scalar test does; `WorldCollisionGrid.cpp` doesn't scan the last row and column
     when they hold only records that the box test rejects, and box-tests the records without
-    branches; `ProjectASpheresToB()` (`WorldCollision.cpp`) runs in wasm SIMD.
+    branches; `ProjectASpheresToB()` and `PrepareProjectionsAndSpheres()` (`WorldCollision.cpp`)
+    run in wasm SIMD.
   - `rays3.md`: a `TT_COLLISIONBOX` cast in `WorldRayCasting.cpp` takes the models it can hit from
     the collision grid (`WorldCollisionGrid.cpp` `SE1_FindEntitiesNearSegment`) and decides each
     sector's model hit from them; a sector with a terrain or a tie runs the original loop.

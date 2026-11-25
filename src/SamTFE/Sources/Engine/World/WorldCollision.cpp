@@ -648,6 +648,38 @@ void CClipMove::ClipMoveToBrushPolygon(CBrushPolygon *pbpoPolygon)
 #if defined(__EMSCRIPTEN__) && defined(__wasm_simd128__)
 static_assert(sizeof(CMovingSphere)==16*sizeof(FLOAT), "CMovingSphere layout");
 #endif
+#if defined(__EMSCRIPTEN__) && defined(__wasm_simd128__)
+// web port perf: ProjectASpheresToB() for the projection columns av[0..2] (mAToB0's columns, lane 3
+// zero), av[3] (vAToB0), av[4..6] and av[7] (the same at the end of the movement)
+static inline void SE1_ProjectSpheres(CStaticArray<CMovingSphere> &ams, const v128_t av[8])
+{
+    const INDEX ct = ams.Count();
+    CMovingSphere *pms = ct>0 ? &ams[0] : NULL;
+    for (INDEX i=0; i<ct; i++) {
+      FLOAT *pf = (FLOAT *)&pms[i];
+      const v128_t vX = wasm_f32x4_splat(pf[0]);
+      const v128_t vY = wasm_f32x4_splat(pf[1]);
+      const v128_t vZ = wasm_f32x4_splat(pf[2]);
+      const v128_t vR = wasm_f32x4_splat(pf[3]);
+      const v128_t vP0 = wasm_f32x4_add(wasm_f32x4_add(wasm_f32x4_add(
+        wasm_f32x4_mul(av[0], vX), wasm_f32x4_mul(av[1], vY)), wasm_f32x4_mul(av[2], vZ)), av[3]);
+      const v128_t vP1 = wasm_f32x4_add(wasm_f32x4_add(wasm_f32x4_add(
+        wasm_f32x4_mul(av[4], vX), wasm_f32x4_mul(av[5], vY)), wasm_f32x4_mul(av[6], vZ)), av[7]);
+      const v128_t vMin = wasm_f32x4_sub(wasm_f32x4_pmin(vP0, vP1), vR);
+      const v128_t vMax = wasm_f32x4_add(wasm_f32x4_pmax(vP0, vP1), vR);
+      wasm_v128_store(pf+4, vP0);    // ms_vRelativeCenter0 (lane 3 -> centre 1 x)
+      wasm_v128_store(pf+7, vP1);    // ms_vRelativeCenter1 (lane 3 -> box min x)
+      wasm_v128_store(pf+10, vMin);  // box min (lane 3 -> box max x)
+      wasm_v128_store(pf+12, wasm_i32x4_shuffle(vMin, vMax, 2, 4, 5, 6)); // min z, box max
+    }
+}
+
+// 3 floats into lanes 0..2, lane 3 zero (reads only the 3 floats)
+static inline v128_t SE1_Load3(const FLOAT *pf)
+{
+  return wasm_v128_load32_lane(pf+2, wasm_v128_load64_zero(pf), 2);
+}
+#endif
 void CClipMove::ProjectASpheresToB(void)
 {
   _pfPhysicsProfile.StartTimer(CPhysicsProfile::PTI_PROJECTASPHERESTOB);
@@ -662,33 +694,16 @@ void CClipMove::ProjectASpheresToB(void)
   // struct's last float.
   {
     const FLOATmatrix3D &m0 = cm_mAToB0, &m1 = cm_mAToB1;
-    const v128_t vC01 = wasm_f32x4_make(m0(1,1), m0(2,1), m0(3,1), 0.0f);
-    const v128_t vC02 = wasm_f32x4_make(m0(1,2), m0(2,2), m0(3,2), 0.0f);
-    const v128_t vC03 = wasm_f32x4_make(m0(1,3), m0(2,3), m0(3,3), 0.0f);
-    const v128_t vT0  = wasm_f32x4_make(cm_vAToB0(1), cm_vAToB0(2), cm_vAToB0(3), 0.0f);
-    const v128_t vC11 = wasm_f32x4_make(m1(1,1), m1(2,1), m1(3,1), 0.0f);
-    const v128_t vC12 = wasm_f32x4_make(m1(1,2), m1(2,2), m1(3,2), 0.0f);
-    const v128_t vC13 = wasm_f32x4_make(m1(1,3), m1(2,3), m1(3,3), 0.0f);
-    const v128_t vT1  = wasm_f32x4_make(cm_vAToB1(1), cm_vAToB1(2), cm_vAToB1(3), 0.0f);
-    const INDEX ct = cm_pamsA->Count();
-    CMovingSphere *pms = ct>0 ? &(*cm_pamsA)[0] : NULL;
-    for (INDEX i=0; i<ct; i++) {
-      FLOAT *pf = (FLOAT *)&pms[i];
-      const v128_t vX = wasm_f32x4_splat(pf[0]);
-      const v128_t vY = wasm_f32x4_splat(pf[1]);
-      const v128_t vZ = wasm_f32x4_splat(pf[2]);
-      const v128_t vR = wasm_f32x4_splat(pf[3]);
-      const v128_t vP0 = wasm_f32x4_add(wasm_f32x4_add(wasm_f32x4_add(
-        wasm_f32x4_mul(vC01, vX), wasm_f32x4_mul(vC02, vY)), wasm_f32x4_mul(vC03, vZ)), vT0);
-      const v128_t vP1 = wasm_f32x4_add(wasm_f32x4_add(wasm_f32x4_add(
-        wasm_f32x4_mul(vC11, vX), wasm_f32x4_mul(vC12, vY)), wasm_f32x4_mul(vC13, vZ)), vT1);
-      const v128_t vMin = wasm_f32x4_sub(wasm_f32x4_pmin(vP0, vP1), vR);
-      const v128_t vMax = wasm_f32x4_add(wasm_f32x4_pmax(vP0, vP1), vR);
-      wasm_v128_store(pf+4, vP0);    // ms_vRelativeCenter0 (lane 3 -> centre 1 x)
-      wasm_v128_store(pf+7, vP1);    // ms_vRelativeCenter1 (lane 3 -> box min x)
-      wasm_v128_store(pf+10, vMin);  // box min (lane 3 -> box max x)
-      wasm_v128_store(pf+12, wasm_i32x4_shuffle(vMin, vMax, 2, 4, 5, 6)); // min z, box max
-    }
+    v128_t av[8];
+    av[0] = wasm_f32x4_make(m0(1,1), m0(2,1), m0(3,1), 0.0f);
+    av[1] = wasm_f32x4_make(m0(1,2), m0(2,2), m0(3,2), 0.0f);
+    av[2] = wasm_f32x4_make(m0(1,3), m0(2,3), m0(3,3), 0.0f);
+    av[3] = wasm_f32x4_make(cm_vAToB0(1), cm_vAToB0(2), cm_vAToB0(3), 0.0f);
+    av[4] = wasm_f32x4_make(m1(1,1), m1(2,1), m1(3,1), 0.0f);
+    av[5] = wasm_f32x4_make(m1(1,2), m1(2,2), m1(3,2), 0.0f);
+    av[6] = wasm_f32x4_make(m1(1,3), m1(2,3), m1(3,3), 0.0f);
+    av[7] = wasm_f32x4_make(cm_vAToB1(1), cm_vAToB1(2), cm_vAToB1(3), 0.0f);
+    SE1_ProjectSpheres(*cm_pamsA, av);
   }
   _pfPhysicsProfile.StopTimer(CPhysicsProfile::PTI_PROJECTASPHERESTOB);
   return;
@@ -944,6 +959,55 @@ void CClipMove::PrepareProjectionsAndSpheres(void)
  // Formula: C=AxB --> Cij=Sum(s=1..k)(Ais*Bsj)
 
   _pfPhysicsProfile.StartTimer(CPhysicsProfile::PTI_PREPAREPROJECTIONSANDSPHERES);
+#if defined(__EMSCRIPTEN__) && defined(__wasm_simd128__)
+  // web port perf (round 4): MatrixMulT() and VectMulT() below, a column (or the vector) per wasm
+  // SIMD op, with the scalar code's operations per lane in its order. MatrixMulT(mB, mA, mC):
+  // mC(i,j) = (mB(1,i)*mA(1,j) + mB(2,i)*mA(2,j)) + mB(3,i)*mA(3,j), so column j is
+  // (row 1 of mB * mA(1,j) + row 2 of mB * mA(2,j)) + row 3 of mB * mA(3,j). VectMulT(mB, v, w):
+  // w(j) = (v(1)*mB(1,j) + v(2)*mB(2,j)) + v(3)*mB(3,j), so w is (v(1)*row 1 + v(2)*row 2) +
+  // v(3)*row 3. The columns then go straight to the projection (ProjectASpheresToB()).
+  {
+    v128_t av[8];
+    const FLOATmatrix3D *apmA[2] = { &cm_mA0, &cm_mA1 };
+    const FLOATmatrix3D *apmB[2] = { &cm_mB0, &cm_mB1 };
+    const FLOAT3D *apvA[2] = { &cm_vA0, &cm_vA1 };
+    const FLOAT3D *apvB[2] = { &cm_vB0, &cm_vB1 };
+    FLOATmatrix3D *apmC[2] = { &cm_mAToB0, &cm_mAToB1 };
+    FLOAT3D *apvC[2] = { &cm_vAToB0, &cm_vAToB1 };
+    for (INDEX iEnd=0; iEnd<2; iEnd++) {
+      const FLOATmatrix3D &mA = *apmA[iEnd], &mB = *apmB[iEnd];
+      const v128_t vB1 = SE1_Load3(&mB(1,1)), vB2 = SE1_Load3(&mB(2,1)), vB3 = SE1_Load3(&mB(3,1));
+      FLOATmatrix3D &mC = *apmC[iEnd];
+      for (INDEX j=1; j<=3; j++) {
+        const v128_t vCol = wasm_f32x4_add(wasm_f32x4_add(
+          wasm_f32x4_mul(vB1, wasm_f32x4_splat(mA(1,j))),
+          wasm_f32x4_mul(vB2, wasm_f32x4_splat(mA(2,j)))),
+          wasm_f32x4_mul(vB3, wasm_f32x4_splat(mA(3,j))));
+        mC(1,j) = wasm_f32x4_extract_lane(vCol, 0);
+        mC(2,j) = wasm_f32x4_extract_lane(vCol, 1);
+        mC(3,j) = wasm_f32x4_extract_lane(vCol, 2);
+        av[iEnd*4+j-1] = vCol;
+      }
+      const v128_t vD = wasm_f32x4_sub(SE1_Load3(&(*apvA[iEnd])(1)), SE1_Load3(&(*apvB[iEnd])(1)));
+      const v128_t vW = wasm_f32x4_add(wasm_f32x4_add(
+        wasm_f32x4_mul(wasm_i32x4_shuffle(vD, vD, 0, 0, 0, 0), vB1),
+        wasm_f32x4_mul(wasm_i32x4_shuffle(vD, vD, 1, 1, 1, 1), vB2)),
+        wasm_f32x4_mul(wasm_i32x4_shuffle(vD, vD, 2, 2, 2, 2), vB3));
+      FLOAT3D &vC = *apvC[iEnd];
+      vC(1) = wasm_f32x4_extract_lane(vW, 0);
+      vC(2) = wasm_f32x4_extract_lane(vW, 1);
+      vC(3) = wasm_f32x4_extract_lane(vW, 2);
+      av[iEnd*4+3] = vW;
+    }
+    cm_mBToAbsolute = cm_mB0;
+    cm_vBToAbsolute = cm_vB0;
+    _pfPhysicsProfile.StartTimer(CPhysicsProfile::PTI_PROJECTASPHERESTOB);
+    SE1_ProjectSpheres(*cm_pamsA, av);
+    _pfPhysicsProfile.StopTimer(CPhysicsProfile::PTI_PROJECTASPHERESTOB);
+  }
+  _pfPhysicsProfile.StopTimer(CPhysicsProfile::PTI_PREPAREPROJECTIONSANDSPHERES);
+  return;
+#endif
   // make projections for converting from A space to B space
   MatrixMulT(cm_mB0, cm_mA0, cm_mAToB0);
   VectMulT(cm_mB0, cm_vA0-cm_vB0, cm_vAToB0);
