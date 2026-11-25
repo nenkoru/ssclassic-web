@@ -41,7 +41,8 @@ INDEX gi_iRays = 64;          // rays per cell per bounce
 INDEX gi_iBounces = 2;        // gather passes
 FLOAT gi_fCellSize = 1.0f;    // target cell size in metres (rounded to a shadow-map mip)
 FLOAT gi_fStrength = 1.0f;    // scale of the indirect term when applied
-FLOAT gi_fAmbient = 1.0f;     // scale of the sector ambient when GI is applied
+FLOAT gi_fAmbient = 0.5f;     // scale of the sector ambient when GI is applied (the mappers' flat
+                              // ambient stood in for bounce; at 1.0 sunlit outdoor areas wash out)
 FLOAT gi_fFullbright = 0.5f;  // emission of full-bright polygons (sky, lava): albedo x this
 FLOAT gi_fAlbedo = 1.0f;      // albedo scale (gamma-space albedo is high; < 1 tames bleeding)
 INDEX gi_bVerbose = FALSE;
