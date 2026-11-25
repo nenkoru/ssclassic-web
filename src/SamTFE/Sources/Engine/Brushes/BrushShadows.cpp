@@ -607,6 +607,11 @@ BOOL CBrushShadowMap::IsShadowFlat( COLOR &colFlat)
   SLONG slR=0,slG=0,slB=0;
   //INDEX ctPointLights=0;
   CBrushPolygon *pbpo = GetBrushPolygon();
+#ifdef __EMSCRIPTEN__
+  // baked indirect light (port/common/Se1GI.cpp) varies over the polygon
+  extern BOOL SE1GI_PreventsFlat(CBrushPolygon *pbpo);
+  if( SE1GI_PreventsFlat(pbpo)) return FALSE;
+#endif
 
   // if the shadowmap is not using the shading mode
   if (pbpo->bpo_bppProperties.bpp_ubShadowBlend != BPT_BLEND_SHADE) {

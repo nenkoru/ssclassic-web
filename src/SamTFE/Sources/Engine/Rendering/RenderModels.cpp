@@ -559,6 +559,13 @@ BOOL CRenderer::FindModelLights( CEntity &en, const CPlacement3D &plModel,
           else             { slSAR+=ubGR;  slSAG+=ubGG;  slSAB+=ubGB; }
         }
       }
+#ifdef __EMSCRIPTEN__
+      // baked indirect light under the model (port/common/Se1GI.cpp) joins its ambient
+      { extern void SE1GI_AddModelAmbient(CBrushPolygon *pbpo, FLOAT fpixU, FLOAT fpixV, SLONG &slR, SLONG &slG, SLONG &slB);
+        const CShadingInfo &si = *en.en_psiShadingInfo;
+        SE1GI_AddModelAmbient( si.si_pbpoPolygon, si.si_pixShadowU+si.si_fUDRatio, si.si_pixShadowV+si.si_fLRRatio,
+                               slSAR, slSAG, slSAB); }
+#endif
       // clamp ambient component
       slSAR = Clamp( slSAR, (SLONG)0, (SLONG)255);
       slSAG = Clamp( slSAG, (SLONG)0, (SLONG)255);
