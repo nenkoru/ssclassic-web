@@ -63,6 +63,7 @@ struct GIPoly {
   float alb[3];          // albedo
   float emit;            // > 0 for full-bright polygons: radiance = alb*emit, no grid
   bool receiver;         // has a grid (lit by a shading shadow map)
+  ULONG key[3];          // brush entity ID, sector (first brush mip), polygon index: the bake file's key
 };
 
 struct Tri { float v0[3], e1[3], e2[3]; int poly; };
@@ -76,6 +77,8 @@ static std::vector<Tri> _tris;
 static std::vector<Node> _nodes;
 static CWorld *_pwoBaked = NULL;
 static BOOL _bComputing = FALSE;
+static BOOL _bLoadPending = FALSE;   // a world was (re)loaded: look for its bake on the next lookup
+static std::vector<unsigned char> _blob;   // GI_Save() output, read by the page (SE1GI_Blob*)
 static float _afSky[3];
 
 // ---------- BVH ----------
@@ -425,6 +428,8 @@ static long long GatherPoly(int ip, int iB, int sq, const std::vector<float> &eT
 
 // ---------- console ----------
 
+static FLOAT _fBakeCell = 0; static int _iBakeRays = 0, _iBakeBounces = 0;   // last bake's settings
+
 void GI_Clear(void)
 {
   UncacheAll();
@@ -458,8 +463,12 @@ void GI_Compute(void)
     if (pen->en_ulFlags & ENF_HIDDEN) continue;
     CBrushMip *pbm = itbr->GetFirstMip();
     if (pbm == NULL) continue;
+    int iKeyS = -1;
     FOREACHINDYNAMICARRAY(pbm->bm_abscSectors, CBrushSector, itbsc) {
+      iKeyS++;
+      int iKeyP = -1;
       FOREACHINSTATICARRAY(itbsc->bsc_abpoPolygons, CBrushPolygon, itbpo) {
+        iKeyP++;
         CBrushPolygon &bpo = *itbpo;
         const ULONG f = bpo.bpo_ulFlags;
         const bool bSolid = IsSolid(bpo);
@@ -472,6 +481,7 @@ void GI_Compute(void)
         memset(&gp, 0, sizeof(gp));
         gp.pbpo = &bpo;
         gp.iFirst = -1;
+        gp.key[0] = pen->en_ulID; gp.key[1] = iKeyS; gp.key[2] = iKeyP;
         const FLOATplane3D &pl = bpo.bpo_pbplPlane->bpl_plAbsolute;
         gp.vN = FLOAT3D(pl(1), pl(2), pl(3));
         // albedo: average of the base texture, tinted by the layer colour
@@ -606,11 +616,14 @@ void GI_Compute(void)
     ctTraced += traced;
     _ind.swap(indNew);
     Dilate();
+    CPrintF("GI: bounce %d/%d done, %.1f s\n", iB + 1, ctBounces, (emscripten_get_now() - t3) / 1000.0);
   }
   Blur();
   const double t4 = emscripten_get_now();
   _bComputing = FALSE;
   _pwoBaked = &wo;
+  _bLoadPending = FALSE;
+  _fBakeCell = gi_fCellSize; _iBakeRays = ctR; _iBakeBounces = ctBounces;
   UncacheAll();
 
   int ctRecv = 0, ctInvalid = 0;
@@ -631,10 +644,209 @@ void GI_Compute(void)
           t1 - t0, t2 - t1, t3 - t2, t4 - t3, ctThreadsUsed, ctTraced / std::max(1.0, (t4 - t3) * 1000.0), t4 - t0);
 }
 
+// ---------- bake files ----------
+// GI/<world path without extension>.gi in the game data, e.g. GI/Levels/12_Karnak.gi. Written by
+// GI_Save() (the page uploads the bytes: tools/gibake.mjs), read on the first lookup after a world
+// loads. Little-endian:
+//   "SGI1", u32 version, u32 reserved (0), f32 cell size, u32 rays, u32 bounces, u32 records, u32 cells,
+//   records x { u32 brush entity ID, u32 sector, u32 polygon, u32 mip | w << 8 | h << 20 },
+//   cells x u32 RGB9E5 (indirect irradiance, 1.0 = shadow byte 128)
+// Entity IDs come from the world file, so they survive FilterEntitiesBySpawnFlags (whose deletions
+// would shift brush indices). Records of entities missing in this session are skipped; a polygon
+// whose shadow map size differs from the bake means the world changed, and the file is refused.
+INDEX gi_bLoad = TRUE;   // load prebaked GI files when a world loads
+static const ULONG GI_FILE_VERSION = 1;
+
+static uint32_t ToRGB9E5(const float *c)
+{
+  const float fMax = 65408.0f;
+  float r = Clamp(c[0], 0.0f, fMax), g = Clamp(c[1], 0.0f, fMax), b = Clamp(c[2], 0.0f, fMax);
+  const float m = std::max(r, std::max(g, b));
+  if (m < 1e-7f) return 0;
+  int e = std::max(-16, (int)floorf(log2f(m))) + 16;
+  float denom = ldexpf(1.0f, e - 24);
+  if ((int)floorf(m / denom + 0.5f) == 512) { denom *= 2.0f; e++; }
+  const uint32_t rm = (uint32_t)floorf(r / denom + 0.5f), gm = (uint32_t)floorf(g / denom + 0.5f), bm = (uint32_t)floorf(b / denom + 0.5f);
+  return std::min(rm, 511u) | (std::min(gm, 511u) << 9) | (std::min(bm, 511u) << 18) | ((uint32_t)e << 27);
+}
+
+static void FromRGB9E5(uint32_t v, float *c)
+{
+  const float f = ldexpf(1.0f, (int)(v >> 27) - 24);
+  c[0] = (v & 511) * f; c[1] = ((v >> 9) & 511) * f; c[2] = ((v >> 18) & 511) * f;
+}
+
+static CTFileName BakeFileName(CWorld &wo)
+{
+  CTString str = wo.wo_fnmFileName.NoExt();
+  for (char *pch = (char *)(const char *)str; *pch; pch++) if (*pch == '/') *pch = '\\';
+  return CTFileName(CTString("GI\\") + str + ".gi");
+}
+
+static void Put32(ULONG ul) { for (int i = 0; i < 4; i++) _blob.push_back((unsigned char)(ul >> (i * 8))); }
+
+void GI_Save(void)
+{
+  CWorld &wo = _pNetwork->ga_World;
+  _blob.clear();
+  if (_pwoBaked != &wo || _ind.empty()) { CPrintF("GI: nothing baked to save\n"); return; }
+  ULONG ctRec = 0, ctCells = 0;
+  for (size_t ip = 0; ip < _polys.size(); ip++) if (_polys[ip].receiver) { ctRec++; ctCells += _polys[ip].w * _polys[ip].h; }
+  _blob.reserve(32 + ctRec * 16 + ctCells * 4);
+  _blob.push_back('S'); _blob.push_back('G'); _blob.push_back('I'); _blob.push_back('1');
+  Put32(GI_FILE_VERSION); Put32(0);
+  { FLOAT f = _fBakeCell; ULONG ul; memcpy(&ul, &f, 4); Put32(ul); }
+  Put32(_iBakeRays); Put32(_iBakeBounces); Put32(ctRec); Put32(ctCells);
+  for (size_t ip = 0; ip < _polys.size(); ip++) {
+    const GIPoly &gp = _polys[ip];
+    if (!gp.receiver) continue;
+    Put32(gp.key[0]); Put32(gp.key[1]); Put32(gp.key[2]);
+    Put32((ULONG)gp.iMip | ((ULONG)gp.w << 8) | ((ULONG)gp.h << 20));
+  }
+  for (size_t ip = 0; ip < _polys.size(); ip++) {
+    const GIPoly &gp = _polys[ip];
+    if (!gp.receiver) continue;
+    for (int i = 0; i < gp.w * gp.h; i++) Put32(ToRGB9E5(&_ind[(gp.iFirst + i) * 3]));
+  }
+  CPrintF("GI: saved %d bytes for %s (%d polygons, %d cells) -> %s\n", (int)_blob.size(),
+          (const char *)wo.wo_fnmFileName, (int)ctRec, (int)ctCells, (const char *)BakeFileName(wo));
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE unsigned char *SE1GI_BlobData(void) { return _blob.empty() ? NULL : &_blob[0]; }
+extern "C" EMSCRIPTEN_KEEPALIVE int SE1GI_BlobSize(void) { return (int)_blob.size(); }
+extern "C" EMSCRIPTEN_KEEPALIVE void SE1GI_BlobFree(void) { std::vector<unsigned char>().swap(_blob); }
+
+static void DropBake(void)
+{
+  _polys.clear(); _dir.clear(); _ind.clear(); _tmp.clear(); _valid.clear(); _map.clear();
+  _tris.clear(); _nodes.clear(); _right.clear();
+  _pwoBaked = NULL;
+}
+
+// returns an error, or NULL when the bake was taken
+static const char *LoadBake(CWorld &wo, const CTFileName &fnm)
+{
+  std::vector<unsigned char> buf;
+  try {
+    CTFileStream strm;
+    strm.Open_t(fnm);
+    const SLONG sl = strm.GetStreamSize();
+    if (sl < 32) return "file too short";
+    buf.resize(sl);
+    strm.Read_t(&buf[0], sl);
+    strm.Close();
+  } catch (const char *strError) {
+    static char ach[256]; snprintf(ach, sizeof(ach), "%s", strError); return ach;
+  }
+  size_t at = 0;
+  auto get = [&](void) -> ULONG {
+    if (at + 4 > buf.size()) { at = buf.size() + 1; return 0; }
+    ULONG ul = buf[at] | (buf[at + 1] << 8) | (buf[at + 2] << 16) | ((ULONG)buf[at + 3] << 24);
+    at += 4; return ul;
+  };
+  if (memcmp(&buf[0], "SGI1", 4) != 0) return "not a GI file";
+  at = 4;
+  if (get() != GI_FILE_VERSION) return "other version";
+  get();   // reserved
+  ULONG ulCell = get(); FLOAT fCell; memcpy(&fCell, &ulCell, 4);
+  const ULONG ctRays = get(), ctBounces = get(), ctRec = get(), ctCells = get();
+  if (buf.size() != 32 + (size_t)ctRec * 16 + (size_t)ctCells * 4) return "wrong size";
+  // index the world's brushes by their entity's ID; sectors of a brush's first mip on demand
+  std::unordered_map<ULONG, CBrush3D *> mapBrushes;
+  FOREACHINDYNAMICARRAY(wo.wo_baBrushes.ba_abrBrushes, CBrush3D, itbr) {
+    if (itbr->br_penEntity != NULL) mapBrushes[itbr->br_penEntity->en_ulID] = &*itbr;
+  }
+  std::unordered_map<ULONG, std::vector<CBrushSector *> > mapSectors;
+  DropBake();
+  _polys.reserve(ctRec);
+  std::vector<float> ind;
+  ind.reserve((size_t)ctCells * 3);
+  const size_t atCells = 32 + (size_t)ctRec * 16;
+  int iCellFile = 0, ctSkipped = 0;
+  for (ULONG ir = 0; ir < ctRec; ir++) {
+    const ULONG iB = get(), iS = get(), iP = get(), ulG = get();
+    const int w = (ulG >> 8) & 0xFFF, h = (ulG >> 20) & 0xFFF;
+    const int iFirstFile = iCellFile;
+    iCellFile += w * h;
+    auto itB = mapBrushes.find(iB);
+    if (itB == mapBrushes.end()) { ctSkipped++; continue; }   // entity not in this session
+    std::vector<CBrushSector *> &asc = mapSectors[iB];
+    if (asc.empty()) {
+      CBrushMip *pbm = itB->second->GetFirstMip();
+      if (pbm != NULL) { FOREACHINDYNAMICARRAY(pbm->bm_abscSectors, CBrushSector, itbsc) asc.push_back(&*itbsc); }
+    }
+    if (iS >= asc.size() || (INDEX)iP >= asc[iS]->bsc_abpoPolygons.Count()) { DropBake(); return "polygon out of range"; }
+    CBrushPolygon &bpo = asc[iS]->bsc_abpoPolygons[iP];
+    GIPoly gp;
+    memset(&gp, 0, sizeof(gp));
+    gp.pbpo = &bpo;
+    gp.iMip = ulG & 0xFF; gp.w = w; gp.h = h;
+    const CBrushShadowMap &bsm = bpo.bpo_smShadowMap;
+    if (gp.w != std::max(1, (int)(bsm.sm_mexWidth >> gp.iMip)) || gp.h != std::max(1, (int)(bsm.sm_mexHeight >> gp.iMip))) {
+      DropBake(); return "shadow map size differs";
+    }
+    gp.key[0] = iB; gp.key[1] = iS; gp.key[2] = iP;
+    gp.receiver = true;
+    gp.iFirst = (int)(ind.size() / 3);
+    if (atCells + (size_t)(iFirstFile + w * h) * 4 > buf.size()) { DropBake(); return "cells out of range"; }
+    for (int i = 0; i < w * h; i++) {
+      const unsigned char *pub = &buf[atCells + (size_t)(iFirstFile + i) * 4];
+      float c[3]; FromRGB9E5(pub[0] | (pub[1] << 8) | (pub[2] << 16) | ((ULONG)pub[3] << 24), c);
+      ind.push_back(c[0]); ind.push_back(c[1]); ind.push_back(c[2]);
+    }
+    _map[&bpo] = (int)_polys.size();
+    _polys.push_back(gp);
+  }
+  if ((ULONG)iCellFile != ctCells) { DropBake(); return "cell count differs"; }
+  if (ctSkipped > 0) CPrintF("GI: %d baked polygons belong to entities not in this session\n", ctSkipped);
+  _ind.swap(ind);
+  _pwoBaked = &wo;
+  _fBakeCell = fCell; _iBakeRays = ctRays; _iBakeBounces = ctBounces;
+  return NULL;
+}
+
+static void TryLoad(void)
+{
+  _bLoadPending = FALSE;
+  CWorld &wo = _pNetwork->ga_World;
+  if (!gi_bLoad || wo.wo_fnmFileName == "") return;
+  const CTFileName fnm = BakeFileName(wo);
+  if (!FileExists(fnm)) {
+    if (gi_bVerbose) CPrintF("GI: no bake %s\n", (const char *)fnm);
+    return;
+  }
+  const double t0 = emscripten_get_now();
+  const char *strError = LoadBake(wo, fnm);
+  if (strError != NULL) { CPrintF("GI: not using %s: %s\n", (const char *)fnm, strError); return; }
+  CPrintF("GI: loaded %s: %d polygons, %d cells (%.2f m, %d rays, %d bounces) in %.0f ms\n",
+          (const char *)fnm, (int)_polys.size(), (int)(_ind.size() / 3), _fBakeCell, _iBakeRays,
+          _iBakeBounces, emscripten_get_now() - t0);
+}
+
+void GI_Load(void)
+{
+  _bLoadPending = FALSE;
+  UncacheAll();
+  DropBake();
+  const BOOL bOld = gi_bVerbose; gi_bVerbose = TRUE;
+  TryLoad();
+  gi_bVerbose = bOld;
+  UncacheAll();
+}
+
+// World/World.cpp CWorld::Clear: the polygons are about to go away
+void SE1GI_WorldCleared(CWorld *pwo)
+{
+  if (pwo != &_pNetwork->ga_World) return;
+  DropBake();
+  _bLoadPending = TRUE;
+}
+
 // ---------- engine hooks ----------
 
 static inline const GIPoly *Lookup(CBrushPolygon *pbpo)
 {
+  if (_bLoadPending && !_bComputing) TryLoad();
   if (_bComputing || !gi_bEnable || _pwoBaked == NULL || _polys.empty()) return NULL;
   auto it = _map.find(pbpo);
   if (it == _map.end()) return NULL;
@@ -728,6 +940,9 @@ void GI_Pose(FLOAT fX, FLOAT fY, FLOAT fZ, FLOAT fHeading)
 void SE1GI_DeclareSymbols(void)
 {
   _pShell->DeclareSymbol("user INDEX gi_bEnable;", &gi_bEnable);
+  _pShell->DeclareSymbol("user INDEX gi_bLoad;", &gi_bLoad);
+  _pShell->DeclareSymbol("user void GI_Save(void);", (void *)&GI_Save);
+  _pShell->DeclareSymbol("user void GI_Load(void);", (void *)&GI_Load);
   _pShell->DeclareSymbol("user INDEX gi_iRays;", &gi_iRays);
   _pShell->DeclareSymbol("user INDEX gi_iBounces;", &gi_iBounces);
   _pShell->DeclareSymbol("user FLOAT gi_fCellSize;", &gi_fCellSize);

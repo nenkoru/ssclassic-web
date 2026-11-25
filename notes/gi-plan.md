@@ -228,6 +228,56 @@ the same cell count, and going from 1 m to 2 m cells only cut KarnakDemo's cells
 The tier only changes the bake parameters and two cvars, never gameplay. The cache key includes
 the tier, so switching tiers means another bake or another cached entry.
 
+## 7b. Prebaked files (done for the dev builds)
+
+`node tools/gibake.mjs [--cell 0.5] [--rays 256] [--bounces 3] Levels/<name>.wld ...` bakes each level in
+se1d against a dev server for a build with the level's data (`tools/devserver.py` takes the upload:
+`POST /__gi/Levels/<name>.gi` -> `data/gi/Levels/<name>.gi`). Copy the files to `<data dir>/GI/Levels/`
+and relink: on every world load (`CWorld::Clear` hook) the engine looks for `GI/<world path>.gi`
+on the first shadow-map mix and takes it if it matches (`GI: loaded ...` in the console; `gi_bLoad=0`
+turns it off, `GI_Load()` retries).
+
+- Format (`Se1GI.cpp`, "bake files"): a 32-byte header, one 16-byte record per lit polygon (brush
+  entity ID, sector, polygon, mip and grid size) and one RGB9E5 word per cell. Entity IDs come from
+  the world file, so spawn-flag filtering (difficulty, coop) doesn't shift the keys. A polygon whose
+  shadow-map size differs from the bake means the world changed, and the file is refused.
+- Big files go through lazy data like the rest of the data (fetched on demand when the level loads).
+- KarnakDemo at 1 m: 4.1 MB, loaded in 18 ms. The picture matches a live bake (mean pixel difference
+  1.4 against 9.4 for GI off).
+
+**Full bake of the retail data (2026-11-26, M3 Pro, build-gi, 4 threads, Chrome niced).**
+`node tools/gibake.mjs --cell 0.25 --rays 256 --bounces 3 --threads 4 <all 19 levels>`: cell 0.25 m
+puts every polygon on mip 0, one GI cell per shadow-map texel, the finest the shadow maps can show.
+All 19 levels baked: 27.8 M cells, 25 min of gather, 27 min wall clock with level loads, 112 MB of
+files. Chrome's RSS peaked at 1.01 GB and the system stayed at 78-88 % free memory. Installed in
+`data/tfe-full-web/GI/Levels/` (and `Deathmatch/`); loading takes 3-58 ms per level
+(`GI: loaded GI/Levels/12_Karnak.gi: 4882 polygons, 2905525 cells ... in 50 ms`).
+
+| Level | Cells | Gather | Mrays/s | File |
+|---|---|---|---|---|
+| 01_Hatshepsut | 0.15 M | 15 s | 7.8 | 0.6 MB |
+| 02_SandCanyon | 0.64 M | 28 s | 17.7 | 2.6 MB |
+| 03_TombOfRamses | 2.57 M | 132 s | 14.9 | 10.3 MB |
+| 04_ValleyOfTheKings | 1.81 M | 85 s | 16.4 | 7.3 MB |
+| 05_MoonMountains | 1.44 M | 76 s | 14.6 | 5.8 MB |
+| 06_Oasis | 0.80 M | 40 s | 15.4 | 3.2 MB |
+| 07_Dunes | 0.61 M | 19 s | 25.2 | 2.5 MB |
+| 08_Suburbs | 0.86 M | 37 s | 18.2 | 3.5 MB |
+| 09_Sewers | 0.96 M | 37 s | 19.9 | 3.9 MB |
+| 10_Metropolis | 1.50 M | 70 s | 16.4 | 6.0 MB |
+| 11_AlleyOfSphinxes | 1.24 M | 52 s | 18.5 | 5.0 MB |
+| 12_Karnak | 2.91 M | 194 s | 11.5 | 11.7 MB |
+| 13_Luxor | 1.70 M | 112 s | 11.6 | 6.9 MB |
+| 14_SacredYards | 2.16 M | 105 s | 15.8 | 8.7 MB |
+| 15_TheGreatPyramid | 1.10 M | 48 s | 17.6 | 4.4 MB |
+| Intro | 1.79 M | 116 s | 11.8 | 7.2 MB |
+| KarnakDemo | 3.54 M | 237 s | 11.5 | 14.2 MB |
+| TechTest | 1.91 M | 104 s | 14.1 | 7.7 MB |
+| Deathmatch/DesertTemple | 0.15 M | 7 s | 16.5 | 0.6 MB |
+
+Retail levels open NETRICSA at the start; for screenshots, close it first with a synthetic Escape
+(`se1d eval` dispatching `keydown`/`keyup` with `keyCode 27` on the canvas).
+
 ## 8. Toward shipping
 
 1. **Bake on level load, off the critical path.** Hook after `CWorld::Load_t` succeeds

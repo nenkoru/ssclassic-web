@@ -9,9 +9,11 @@ and accepts visual-regression frames:
   (bottom-up RGBA from glReadPixels; PNG written flipped upright when Pillow is available)
 and playtest recordings (port/web/playtest.js, ?rec=1):
   POST /__playtest/<session>/<file>[?append=1]  -> data/playtests/<session>/<file> (written or appended)
+and GI bakes (port/common/Se1GI.cpp GI_Save, tools/gibake.mjs):
+  POST /__gi/<dir>/<name>.gi  -> data/gi/<dir>/<name>.gi (e.g. /__gi/Levels/12_Karnak.gi)
 and single-range HTTP Range requests for regular files (the game fetches 1 MiB byte ranges):
   GET/HEAD with Range: bytes=A-B | bytes=A- | bytes=-N  -> 206 with Content-Range
-Usage: tools/devserver.py [--port 8090] [--no-isolate] [--shots-dir data/shots] [--playtests-dir data/playtests] <dir>
+Usage: tools/devserver.py [--port 8090] [--no-isolate] [--shots-dir data/shots] [--playtests-dir data/playtests] [--gi-dir data/gi] <dir>
 """
 import argparse
 import email.utils
@@ -45,6 +47,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     isolate = True
     shots_dir = "data/shots"
     playtests_dir = "data/playtests"
+    gi_dir = "data/gi"
     _range_re = re.compile(r"(\d*)-(\d*)")
 
     def end_headers(self):
@@ -98,6 +101,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         url = urllib.parse.urlsplit(self.path)
         if url.path.startswith("/__playtest/"):
             return self.playtest(url)
+        if url.path.startswith("/__gi/"):
+            return self.gi_bake(url)
         m = re.fullmatch(r"/__shots/([A-Za-z0-9_.-]+)/(t\d+_(\d+)x(\d+)\.rgba)", urllib.parse.unquote(self.path))
         if not m:
             self.send_error(404)
@@ -140,6 +145,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_response(204)
         self.end_headers()
 
+    def gi_bake(self, url):
+        # one baked GI file; path parts are restricted so nothing escapes the folder
+        rel = urllib.parse.unquote(url.path)[len("/__gi/"):]
+        parts = rel.split("/")
+        n = int(self.headers.get("Content-Length", 0))
+        if not rel.endswith(".gi") or not all(re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}", p) for p in parts):
+            self.send_error(404)
+            return
+        if n > 512 << 20:
+            self.send_error(413, "bake too big")
+            return
+        data = self.rfile.read(n)
+        out = os.path.join(self.gi_dir, *parts)
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with open(out + ".tmp", "wb") as f:
+            f.write(data)
+        os.replace(out + ".tmp", out)
+        self.send_response(204)
+        self.end_headers()
+
     def log_message(self, *a):
         pass
 
@@ -152,10 +177,12 @@ def main():
     ap.add_argument("--no-isolate", action="store_true", help="no COOP/COEP (e.g. to test coi-sw.js)")
     ap.add_argument("--shots-dir", default="data/shots")
     ap.add_argument("--playtests-dir", default="data/playtests")
+    ap.add_argument("--gi-dir", default="data/gi")
     a = ap.parse_args()
     Handler.isolate = not a.no_isolate
     Handler.shots_dir = os.path.abspath(a.shots_dir)
     Handler.playtests_dir = os.path.abspath(a.playtests_dir)
+    Handler.gi_dir = os.path.abspath(a.gi_dir)
     h = functools.partial(Handler, directory=a.dir)
     http.server.ThreadingHTTPServer(("127.0.0.1", a.port), h).serve_forever()
 
