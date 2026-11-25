@@ -2045,6 +2045,48 @@ public:
 };
 
 static CStaticStackArray<CSentEvent> _aseSentEvents;  // delayed events
+
+#ifdef __EMSCRIPTEN__
+// Web port (perf, notes/perf/frame4.md): SendEvent() copies each event onto the heap and
+// HandleSentEvents() deletes the copies; in a crowd that is thousands of ETouch a tick, and the
+// threaded build's malloc and free (with their lock) cost about 1% of a stress500 frame. Freed
+// events go to a free list per size (8-byte steps) instead, for the next event of that size. Only
+// where the memory comes from changes. The lists belong to the thread (the engine's).
+struct EventFreeBlock { EventFreeBlock *efb_pefbNext; };
+#define EVENT_FREE_BUCKETS 64   // events up to 504 bytes; larger ones use the heap
+#define EVENT_FREE_MAX 16384    // blocks kept per size
+static thread_local EventFreeBlock *_apefbEventFree[EVENT_FREE_BUCKETS];
+static thread_local INDEX _actEventFree[EVENT_FREE_BUCKETS];
+
+void *CEntityEvent::operator new(size_t size)
+{
+  const size_t iBucket = (size+7)/8;
+  if (iBucket>=EVENT_FREE_BUCKETS) {
+    return ::operator new(size);
+  }
+  EventFreeBlock *pefb = _apefbEventFree[iBucket];
+  if (pefb==NULL) {
+    return ::operator new(iBucket*8);
+  }
+  _apefbEventFree[iBucket] = pefb->efb_pefbNext;
+  _actEventFree[iBucket]--;
+  return pefb;
+}
+
+void CEntityEvent::operator delete(void *p, size_t size)
+{
+  if (p==NULL) return;
+  const size_t iBucket = (size+7)/8;
+  if (iBucket>=EVENT_FREE_BUCKETS || _actEventFree[iBucket]>=EVENT_FREE_MAX) {
+    ::operator delete(p);
+    return;
+  }
+  EventFreeBlock *pefb = (EventFreeBlock *)p;
+  pefb->efb_pefbNext = _apefbEventFree[iBucket];
+  _apefbEventFree[iBucket] = pefb;
+  _actEventFree[iBucket]++;
+}
+#endif
 /* Send an event to this entity. */
 void CEntity::SendEvent(const CEntityEvent &ee)
 {
