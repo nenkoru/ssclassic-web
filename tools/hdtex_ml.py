@@ -56,10 +56,21 @@ def peak_mem():
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, _peak_gpu
 
 
+def _headless_chromes():
+    ps = subprocess.run(["ps", "-axo", "command"], capture_output=True, text=True).stdout.splitlines()
+    return sum(1 for l in ps if "chrome" in l.lower() and "--headless" in l and "--type=" not in l)
+
+
 def wait_for_memory(min_free=40, max_swap_mb=2048, log=print):
-    """Block while the system is short of memory: free under min_free % or swap over max_swap_mb."""
+    """Block while the system is short of memory (free under min_free %, swap over max_swap_mb)
+    or a headless Chrome (a game test) is running: never a model next to the game."""
     t0 = time.time()
     while True:
+        if _headless_chromes():
+            if time.time() - t0 < 1:
+                log("  waiting: a headless Chrome is running")
+            time.sleep(30)
+            continue
         try:
             mp = subprocess.run(["memory_pressure"], capture_output=True, text=True).stdout.strip().splitlines()[-1]
             free = int(mp.rsplit(":", 1)[1].strip().rstrip("%"))
