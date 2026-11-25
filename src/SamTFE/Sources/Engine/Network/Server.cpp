@@ -699,7 +699,9 @@ ULONG CServer::MaskOfPlayersOnClient(INDEX iClient)
   ULONG ulClientPlayers = 0;
   for(INDEX ipl=0; ipl<srv_aplbPlayers.Count(); ipl++) {
     CPlayerBuffer &plb = srv_aplbPlayers[ipl];
-    if (plb.IsActive() && plb.plb_iClient==iClient) {
+    // web port: the chat masks are 32 bits: players from 32 on can't be chat sources or targets
+    // (1UL<<ipl wraps around in wasm and would alias player ipl%32)
+    if (ipl<32 && plb.IsActive() && plb.plb_iClient==iClient) {
       ulClientPlayers |= 1UL<<ipl;
     }
   }
@@ -817,12 +819,118 @@ void CServer::SetVirtualAction(INDEX iPlayer, const CPlayerAction &pa)
   while (plb.plb_abReceived.GetCount() > 2) plb.plb_abReceived.RemoveOldest();
 }
 
+#ifdef __EMSCRIPTEN__
+// web port (notes/perf/players.md): the all-actions block of a tick is the same for every client
+// but for the time tag of the client's own players, and an action's encoding is byte aligned (the
+// time tag is written with Write, which starts a new byte, then the rest with WriteBits). Upstream
+// encoded every player's action again for every client: N clients x N players per tick (256 x 256
+// = 65536 bit-by-bit encodings, ~10+ ms a tick). Each action is now encoded once per tick and its
+// bytes copied into each client's block, with the right time tag: the same bits as before (only
+// the unused bits of each action's last byte, uninitialized before, are now zero).
+struct EncodedAction {
+  INDEX iClient;        // the client that owns the player
+  __int64 llOwnerTag;   // the time tag delta the owner gets (others get 0)
+  INDEX iOffset;        // the encoding after the time tag, in _aubEncodedActions
+  INDEX ctBytes;
+};
+static CStaticStackArray<EncodedAction> _aEncodedActions;
+static CStaticStackArray<UBYTE> _aubEncodedActions;
+static void EncodeAllActions(CStaticArray<CPlayerBuffer> &aplb)
+{
+  _aEncodedActions.PopAll();
+  _aubEncodedActions.PopAll();
+  static CNetworkMessage *pnmScratch = NULL;
+  if (pnmScratch == NULL) pnmScratch = new CNetworkMessage(MSG_SEQ_ALLACTIONS);
+  CNetworkMessage &nm = *pnmScratch;
+  for (INDEX i=0; i<aplb.Count(); i++) {
+    CPlayerBuffer &plb = aplb[i];
+    if (!plb.IsActive()) continue;
+    CPlayerAction paDelta;
+    EncodedAction &ea = _aEncodedActions.Push();
+    plb.CreateActionDelta(paDelta, ea.llOwnerTag);
+    ea.iClient = plb.plb_iClient;
+    nm.Reinit();   // the type byte, then the action
+    memset(nm.nm_pubMessage+1, 0, 64);   // (WriteBits leaves a last byte's unused bits as they were)
+    nm<<paDelta;
+    const INDEX iSkip = 1+sizeof(paDelta.pa_llCreated);
+    ea.ctBytes = nm.nm_slSize-iSkip;
+    ea.iOffset = _aubEncodedActions.Count();
+    if (ea.ctBytes>0) memcpy(_aubEncodedActions.Push(ea.ctBytes), nm.nm_pubMessage+iSkip, ea.ctBytes);
+  }
+}
+
+// web port (notes/perf/players.md): sizes of one tick's all-actions block, for the network model.
+// Measured only with ser_bNetStats=1, read from the shell. Raw = as written; Packed = packed with
+// the net_iCompression packer, the way SendGameStreamBlocks sends it. "Own" is the block for the
+// server's own client (it owns the bots: their actions carry a time tag delta), "Remote" the block
+// for a client that owns none of the players (the common case: a client owns one of N players).
+INDEX ser_bNetStats = 0;
+INDEX ser_iStatPlayers = 0, ser_iStatOwnRaw = 0, ser_iStatOwnPacked = 0, ser_iStatRemoteRaw = 0, ser_iStatRemotePacked = 0;
+FLOAT ser_fStatPackUS = 0.0f, ser_fStatEncodeUS = 0.0f, ser_fStatCopyUS = 0.0f;
+INDEX ser_iStatMismatch = 0;   // actions decoded differently from the copied blocks (must stay 0)
+static CNetworkStreamBlock *_apnsbStatOld[2];
+static void NetStatsAllActions(CStaticArray<CPlayerBuffer> &aplb, TIME tm)
+{
+  for (INDEX iVariant=0; iVariant<2; iVariant++) {
+    // the upstream way: every action encoded for this client
+    delete _apnsbStatOld[iVariant];
+    _apnsbStatOld[iVariant] = new CNetworkStreamBlock(MSG_SEQ_ALLACTIONS, 0);
+    CNetworkStreamBlock &nsb = *_apnsbStatOld[iVariant];
+    CTimerValue tvE = _pTimer->GetHighPrecisionTimer();
+    nsb<<tm;
+    INDEX ct = 0;
+    for (INDEX i=0; i<aplb.Count(); i++) {
+      if (aplb[i].IsActive()) { aplb[i].CreateActionPacket(&nsb, iVariant==0 ? 0 : -1); ct++; }
+    }
+    if (iVariant==1) ser_fStatEncodeUS = (_pTimer->GetHighPrecisionTimer()-tvE).GetSeconds()*1e6f;
+    // the stream sends it inside a MSG_GAMESTREAMBLOCKS message: the block, then packed
+    CNetworkMessage nmBlocks(MSG_GAMESTREAMBLOCKS);
+    nsb.WriteToMessage(nmBlocks);
+    CNetworkMessage nmPacked(MSG_GAMESTREAMBLOCKS);
+    CTimerValue tv0 = _pTimer->GetHighPrecisionTimer();
+    nmBlocks.PackDefault(nmPacked);
+    FLOAT fUS = (_pTimer->GetHighPrecisionTimer()-tv0).GetSeconds()*1e6f;
+    ser_iStatPlayers = ct;
+    if (iVariant==0) { ser_iStatOwnRaw = nmBlocks.nm_slSize; ser_iStatOwnPacked = nmPacked.nm_slSize; }
+    else { ser_iStatRemoteRaw = nmBlocks.nm_slSize; ser_iStatRemotePacked = nmPacked.nm_slSize; ser_fStatPackUS = fUS; }
+  }
+}
+#endif
+
 // make allaction messages for one tick
 void CServer::MakeAllActions(void)
 {
   // increment tick counter and processed sequence
   srv_tmLastProcessedTick += _pTimer->TickQuantum;
   srv_iLastProcessedSequence++;
+#ifdef __EMSCRIPTEN__
+  if (ser_bNetStats) NetStatsAllActions(srv_aplbPlayers, srv_tmLastProcessedTick);
+  EncodeAllActions(srv_aplbPlayers);
+  if (ser_bNetStats) {
+    // the copied blocks must decode to the same actions as the upstream ones
+    for (INDEX iVariant=0; iVariant<2; iVariant++) {
+      CNetworkStreamBlock nsb(MSG_SEQ_ALLACTIONS, 0);
+      CTimerValue tvC = _pTimer->GetHighPrecisionTimer();
+      nsb<<srv_tmLastProcessedTick;
+      for (INDEX ia=0; ia<_aEncodedActions.Count(); ia++) {
+        const EncodedAction &ea = _aEncodedActions[ia];
+        __int64 llTag = (iVariant==0 && ea.iClient==0) ? ea.llOwnerTag : 0;
+        nsb.Write(&llTag, sizeof(llTag));
+        nsb.Write(&_aubEncodedActions[ea.iOffset], ea.ctBytes);
+      }
+      if (iVariant==1) ser_fStatCopyUS = (_pTimer->GetHighPrecisionTimer()-tvC).GetSeconds()*1e6f;
+      CNetworkStreamBlock &nsbOld = *_apnsbStatOld[iVariant];
+      if (nsb.nm_slSize!=nsbOld.nm_slSize) { ser_iStatMismatch++; continue; }
+      nsb.Rewind(); nsbOld.Rewind();
+      TIME tm0, tm1; nsb>>tm0; nsbOld>>tm1;
+      if (tm0!=tm1) ser_iStatMismatch++;
+      for (INDEX ia=0; ia<_aEncodedActions.Count(); ia++) {
+        CPlayerAction pa0, pa1; nsb>>pa0; nsbOld>>pa1;
+        if (memcmp(&pa0, &pa1, sizeof(pa0))!=0) ser_iStatMismatch++;
+      }
+    }
+  }
+#endif
 
   // for each active session
   for(INDEX iSession=0; iSession<srv_assoSessions.Count(); iSession++) {
@@ -837,6 +945,15 @@ void CServer::MakeAllActions(void)
     nsbAllActions<<srv_tmLastProcessedTick;
 
     // for all players in game
+#ifdef __EMSCRIPTEN__
+    // web port: the actions were encoded once above; copy each one's bytes (see EncodeAllActions)
+    for (INDEX ia=0; ia<_aEncodedActions.Count(); ia++) {
+      const EncodedAction &ea = _aEncodedActions[ia];
+      __int64 llTag = (iSession==ea.iClient) ? ea.llOwnerTag : 0;
+      nsbAllActions.Write(&llTag, sizeof(llTag));
+      nsbAllActions.Write(&_aubEncodedActions[ea.iOffset], ea.ctBytes);
+    }
+#else
 #ifndef NDEBUG
     INDEX iPlayer = 0;
 #endif // NDEBUG
@@ -853,6 +970,7 @@ void CServer::MakeAllActions(void)
       iPlayer++;
 #endif // NDEBUG
     }
+#endif
 
     // add the all-actions block to the buffer
     sso.sso_nsBuffer.AddBlock(nsbAllActions);

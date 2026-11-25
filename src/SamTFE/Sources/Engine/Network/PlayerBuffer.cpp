@@ -104,6 +104,19 @@ void CPlayerBuffer::ReceiveActionPacket(CNetworkMessage *pnm, INDEX iMaxBuffer)
 // (prepares lag info for given client number)
 void CPlayerBuffer::CreateActionPacket(CNetworkMessage *pnm, INDEX iClient)
 {
+  CPlayerAction paDelta;
+  __int64 llOwnerTag;
+  CreateActionDelta(paDelta, llOwnerTag);
+  // if the client that message is sent to owns the player, send delta of the timetag
+  if (iClient==plb_iClient) {
+    paDelta.pa_llCreated = llOwnerTag;
+  }
+  // send the delta packet
+  (*pnm)<<paDelta;
+}
+
+void CPlayerBuffer::CreateActionDelta(CPlayerAction &paDelta, __int64 &llOwnerTag)
+{
   ASSERT(plb_Active);
   CPlayerAction paCurrent;
 
@@ -121,21 +134,13 @@ void CPlayerBuffer::CreateActionPacket(CNetworkMessage *pnm, INDEX iClient)
   }
 
   // create a new delta action packet between last sent and current action
-  CPlayerAction paDelta;
   for (INDEX i = 0; i < static_cast<INDEX>(sizeof(CPlayerAction)); i++) {
     ((UBYTE*)&paDelta)[i] = ((UBYTE*)&paCurrent)[i] ^ ((UBYTE*)&plb_paLastAction)[i];
   }
-  // if the client that message is sent to owns the player
-  if (iClient==plb_iClient) {
-    // send delta of the timetag
-    paDelta.pa_llCreated = paCurrent.pa_llCreated-plb_paLastAction.pa_llCreated;
-  // if the client doesn't own the player
-  } else {
-    // no timetag information
-    paDelta.pa_llCreated = 0;
-  }
-  // send the delta packet
-  (*pnm)<<paDelta;
+  // the owner gets the delta of the timetag
+  llOwnerTag = paCurrent.pa_llCreated-plb_paLastAction.pa_llCreated;
+  // a client that doesn't own the player gets no timetag information
+  paDelta.pa_llCreated = 0;
 }
 
 /* Advance action buffer by one tick by removing oldest action. */

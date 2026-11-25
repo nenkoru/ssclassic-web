@@ -242,7 +242,8 @@ BOOL CEntity::IsEmptyBrush(void) const
 
 /* Return max Game Players */
 INDEX CEntity::GetMaxPlayers(void) {
-  return NET_MAXGAMEPLAYERS;
+  // web port: the slots in use (at least the original 16), not NET_MAXGAMEPLAYERS (SessionState.h)
+  return _pNetwork->ga_sesSessionState.ses_ctPlayerSlots;
 };
 
 /* Return Player Entity */

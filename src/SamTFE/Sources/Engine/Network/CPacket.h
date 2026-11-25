@@ -26,7 +26,20 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 // The total size of the UDP packet should be below 1450 bytes, to reduce the 
 // packet drop rate caused by routers dropping large UDP packets. UDP_BLOCK_SIZE is the
 // maximum length of real data, not counting the packet header (ulPacketSequence, bReliable,uwID)
+#ifdef __EMSCRIPTEN__
+// web port: a packet carries any whole network message (MAX_NETWORKMESSAGE_SIZE). An unreliable
+// message longer than one packet is split, and the receiver reads each piece as a whole message:
+// one tick's all-actions block passes 1400 bytes packed at ~138 players, and the game read garbage
+// ("Message over-reading", then a wasm out-of-bounds fault). The web transport is a WebSocket
+// switch, WebRTC data channels or memory, not a router, so the 1450-byte UDP advice doesn't apply.
+// NetLan.c, net.js and rust/se1-server carry frames of this size (notes/perf/players.md).
+// Reliable messages are still split at 1400 bytes (MAX_RELIABLE_BLOCK_SIZE), so games that never
+// make a big unreliable message send exactly what they did before.
+#define MAX_UDP_BLOCK_SIZE	16384
+#else
 #define MAX_UDP_BLOCK_SIZE	1400
+#endif
+#define MAX_RELIABLE_BLOCK_SIZE 1400   // web port: the piece size for reliable messages and acks
 #define MAX_HEADER_SIZE (sizeof(UBYTE) + sizeof(ULONG) + sizeof(UWORD) + sizeof(ULONG)) // pa_bReliable + pa_ulPacketSequence + pa_uwID + pa_ulTransferSize
 #define MAX_PACKET_SIZE (MAX_UDP_BLOCK_SIZE + MAX_HEADER_SIZE)
 

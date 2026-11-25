@@ -36,7 +36,7 @@ typedef struct sockaddr    SOCKADDR;
 #define WSAGetLastError() (INDEX) errno
 #endif
 
-#define SERVER_CLIENTS 16
+#define SERVER_CLIENTS 256   // web port: 256 computers (upstream 16, notes/perf/players.md)
 
 #include <Engine/Network/CPacket.h>
 

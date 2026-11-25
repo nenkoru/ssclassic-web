@@ -20,6 +20,11 @@
 //   demo       the timedemo (bench.ini, Auto-Demo0001) uncapped: rendering and demo playback
 //   stressN    Survivors with N monsters held around a god-mode player (?svstress=N), paced:
 //              AI, ray casts, collision, path-finding, model animation (KarnakDemo on the demo data)
+//   botsN[mM]  N co-op bots (server-side virtual players, rust/se1-mod/src/bots) and M Survivors
+//              monsters (default 100) around a god-mode player, paced: the per-player cost (CPlayer
+//              entities, weapons, actions, player models) on top of stressM; the bots' own AI (the
+//              mod) shows separately in the profile. Bots join one per tick, so the settle time
+//              grows with N (notes/perf/players.md)
 //   menu       the main menu, uncapped (fixed costs)
 //
 // Prints per scenario: mean and median ms per frame for each build, the ratio to the first build,
@@ -52,6 +57,11 @@ function scenarioSpec(name) {
   if (m) {
     const n = +m[1];
     return { q: `mute=1&spin=0&mode=survivors&svstress=${n}&svkind=${m[2] || 0}`, ready: `typeof Module !== 'undefined' && !!Module.se1SurvivorsLast && Module.se1SurvivorsLast.alive >= ${n}`, settle: 6000, timeout: 180000 };
+  }
+  const b = name.match(/^bots(\d+)(?:m(\d+))?$/);
+  if (b) {
+    const n = +b[1], mons = b[2] === undefined ? 100 : +b[2];
+    return { q: `mute=1&spin=0&mode=survivors&svstress=${Math.max(mons, 1)}&bots=${n}`, ready: `typeof Module !== 'undefined' && !!Module.se1SurvivorsLast && Module.se1SurvivorsLast.alive >= ${Math.max(mons, 1)}`, settle: 8000 + n * 60, timeout: 180000 };
   }
   throw new Error('unknown scenario ' + name);
 }

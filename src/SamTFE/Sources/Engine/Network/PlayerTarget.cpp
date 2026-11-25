@@ -18,6 +18,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <Engine/Base/Console.h>
 #include <Engine/Network/Network.h>
 #include <Engine/Network/PlayerTarget.h>
+#include <Engine/Network/SessionState.h>
 #include <Engine/Base/Stream.h>
 #include <Engine/Entities/InternalClasses.h>
 #include <Engine/Templates/StaticArray.cpp>
@@ -97,6 +98,7 @@ void CPlayerTarget::Activate(void)
   plt_abPrediction.Clear();
   plt_paPreLastAction.Clear();
   plt_paLastAction.Clear();
+  _pNetwork->ga_sesSessionState.UpdatePlayerSlots();   // web port: GetMaxPlayers()
 
 }
 
@@ -111,6 +113,7 @@ void CPlayerTarget::Deactivate(void)
   plt_abPrediction.Clear();
   plt_paPreLastAction.Clear();
   plt_paLastAction.Clear();
+  _pNetwork->ga_sesSessionState.UpdatePlayerSlots();   // web port: GetMaxPlayers()
 }
 
 /*

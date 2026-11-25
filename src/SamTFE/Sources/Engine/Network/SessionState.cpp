@@ -118,6 +118,7 @@ CSessionState::CSessionState(void)
   ResetRND();
 
   ses_apltPlayers.New(NET_MAXGAMEPLAYERS);
+  ses_ctPlayerSlots = NET_MAXGAMEPLAYERS_SE1;
 }
 
 /*
@@ -185,6 +186,7 @@ void CSessionState::Stop(void)
 
   ses_apltPlayers.Clear();
   ses_apltPlayers.New(NET_MAXGAMEPLAYERS);
+  ses_ctPlayerSlots = NET_MAXGAMEPLAYERS_SE1;
 }
 
 /*
@@ -537,7 +539,8 @@ void CSessionState::PrintChatMessage(ULONG ulFrom, const CTString &strFrom, cons
   // if there are sender players
   } else {
     // for each sender player
-    for(INDEX ipl=0; ipl<ses_apltPlayers.Count(); ipl++) {
+    // (web port: the mask has 32 bits, see CServer::MaskOfPlayersOnClient)
+    for(INDEX ipl=0; ipl<ses_apltPlayers.Count() && ipl<32; ipl++) {
       CPlayerTarget &plt = ses_apltPlayers[ipl];
       if (plt.IsActive() && (ulFrom & (1UL<<ipl)) ) {
         // add its name to the sender list
@@ -1718,14 +1721,33 @@ void CSessionState::ReadWorldAndState_t(CTStream *pstr)   // throw char *
   // read number of players
   INDEX ctPlayers;
   (*pstr)>>ctPlayers;
-  ASSERT(ctPlayers==ses_apltPlayers.Count());
-  // for all clients
-  FOREACHINSTATICARRAY(ses_apltPlayers, CPlayerTarget, itclt) {
-    // read from stream
-    itclt->Read_t(pstr);
+  // web port: a stream holds 16 player slots (the original format) unless a player from 17 on was
+  // in the game (WriteSessionState_t); slots past the stream's count are free
+  if (ctPlayers<0 || ctPlayers>ses_apltPlayers.Count()) {
+    ThrowF_t(TRANS("Saved game has %d player slots, this build supports %d"), ctPlayers, ses_apltPlayers.Count());
   }
+  // for all clients
+  {for(INDEX ipl=0; ipl<ses_apltPlayers.Count(); ipl++) {
+    CPlayerTarget &plt = ses_apltPlayers[ipl];
+    if (ipl<ctPlayers) {
+      // read from stream
+      plt.Read_t(pstr);
+    } else if (plt.IsActive()) {
+      plt.Deactivate();
+    }
+  }}
 
   _pNetwork->ga_World.UnlockAll();
+}
+
+// web port: see ses_ctPlayerSlots (called whenever a player target is (de)activated)
+void CSessionState::UpdatePlayerSlots(void)
+{
+  INDEX ct = NET_MAXGAMEPLAYERS_SE1;
+  for (INDEX ipl=ses_apltPlayers.Count()-1; ipl>=ct; ipl--) {
+    if (ses_apltPlayers[ipl].IsActive()) { ct = ipl+1; break; }
+  }
+  ses_ctPlayerSlots = ct;
 }
 
 void CSessionState::ReadRememberedLevels_t(CTStream *pstr)
@@ -1816,12 +1838,18 @@ void CSessionState::WriteWorldAndState_t(CTStream *pstr)   // throw char *
   }}
 
   // write number of clients
-  (*pstr)<<ses_apltPlayers.Count();
+  // web port: as many slots as the original 16, more only when a player from 17 on is active, so
+  // saved games and demos of up to 16 players keep the original format (ReadSessionState_t)
+  INDEX ctPlayers = NET_MAXGAMEPLAYERS_SE1;
+  {for(INDEX ipl=ctPlayers; ipl<ses_apltPlayers.Count(); ipl++) {
+    if (ses_apltPlayers[ipl].IsActive()) ctPlayers = ipl+1;
+  }}
+  (*pstr)<<ctPlayers;
   // for all clients
-  FOREACHINSTATICARRAY(ses_apltPlayers, CPlayerTarget, itclt) {
+  {for(INDEX ipl=0; ipl<ctPlayers; ipl++) {
     // write to stream
-    itclt->Write_t(pstr);
-  }
+    ses_apltPlayers[ipl].Write_t(pstr);
+  }}
 
   _pNetwork->ga_World.UnlockAll();
 }

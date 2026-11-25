@@ -104,8 +104,8 @@ pub const NAV_RADIUS: f32 = 150.0;
 const DOOR_CHECKS_PER_TICK: usize = 8;
 /// Bake mode logs its progress this often.
 const BAKE_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
-/// How many bots, at most.
-pub const MAX_BOTS: usize = 15;
+/// How many bots, at most: the engine's 256 player slots (NET_MAXGAMEPLAYERS) less the host's human.
+pub const MAX_BOTS: usize = 255;
 
 /// Enemies within this horizontal distance become `Sense.foes`.
 const FOE_RANGE: f32 = 60.0;
