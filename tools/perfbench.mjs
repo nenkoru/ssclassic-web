@@ -141,7 +141,7 @@ async function profileStop() {
         if (f && !seen.has(f)) { seen.add(f); incl[f] = (incl[f] || 0) + k; }
       }
     }
-    if (!best || tot > best.tot) best = { tot, self, incl, callers };
+    if (!best || tot > best.tot) best = { tot, self, incl, callers, raw: p };
   }
   return best;
 }
@@ -234,6 +234,7 @@ try {
         const r = await run(b, scen, true);
         const f = join(opt.profile, `${b.label}-${scen}.txt`);
         writeFileSync(f, `${b.label} ${scen} ${b.url}\nmean ${r.mean.toFixed(3)} ms (profiled)\n` + profileText(r.profile));
+        if (r.profile?.raw) writeFileSync(f.replace(/\.txt$/, '.cpuprofile'), JSON.stringify(r.profile.raw));
         console.error(`  profile -> ${f}`);
       }
     }
