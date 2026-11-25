@@ -699,7 +699,9 @@ ULONG CServer::MaskOfPlayersOnClient(INDEX iClient)
   ULONG ulClientPlayers = 0;
   for(INDEX ipl=0; ipl<srv_aplbPlayers.Count(); ipl++) {
     CPlayerBuffer &plb = srv_aplbPlayers[ipl];
-    if (plb.IsActive() && plb.plb_iClient==iClient) {
+    // web port: the chat masks are 32 bits: players from 32 on can't be chat sources or targets
+    // (1UL<<ipl wraps around in wasm and would alias player ipl%32)
+    if (ipl<32 && plb.IsActive() && plb.plb_iClient==iClient) {
       ulClientPlayers |= 1UL<<ipl;
     }
   }

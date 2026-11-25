@@ -76,6 +76,12 @@ public:
 class ENGINE_API CSessionState {
 public:
   CStaticArray<CPlayerTarget> ses_apltPlayers; // client targets for all players in game
+  // web port (notes/perf/players.md): 1 + the highest active player slot, at least the original 16.
+  // CEntity::GetMaxPlayers() returns it, so the game's loops over "all players" (each monster's
+  // Watcher, every few ticks) visit 16 slots, not NET_MAXGAMEPLAYERS (256), unless a player from 17
+  // on is in the game. A pure function of which slots are active, the same on every machine.
+  INDEX ses_ctPlayerSlots;
+  void UpdatePlayerSlots(void);
   CStaticStackArray<CPredictedEvent> ses_apeEvents; // for event prediction
 
   CTString ses_strMOTD;               // MOTD as sent from the server

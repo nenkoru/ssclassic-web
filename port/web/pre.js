@@ -12,7 +12,7 @@
   // ?quality=auto: the Rust mod layer lowers rendering cvars while frames keep missing
   if (q.get('quality') === 'auto') Module['se1QualityAuto'] = 1;
   // ?bots=N: N AI co-op bots on the host (rust/se1-mod/src/bots); ?botskill=0..1 their skill
-  if (q.get('bots')) Module['se1Bots'] = Math.min(15, Math.max(0, +q.get('bots') || 0));
+  if (q.get('bots')) Module['se1Bots'] = Math.min(255, Math.max(0, +q.get('bots') || 0));
   if (q.get('botskill')) Module['se1BotSkill'] = Math.min(1, Math.max(0, +q.get('botskill')));
   // ?navbake=1 (tools/navbake.mjs): bake the level's bot nav graph once a player is in it
   if (q.get('navbake')) Module['se1NavBake'] = 1;

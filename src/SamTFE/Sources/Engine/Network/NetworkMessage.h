@@ -114,7 +114,10 @@ class ENGINE_API CNetworkMessage {
 public:
   MESSAGETYPE nm_mtType;                  // type of this message
 
-#define MAX_NETWORKMESSAGE_SIZE 2048      // max. length of message buffer
+// web port: 16 KB (upstream 2048). One tick's all-actions block holds every player's action (about
+// 9-25 bytes each), so 2048 overflowed at ~80-200 players ("Message over-writing", then a stalled
+// game stream). Stream blocks are shrunk to their size when buffered (CNetworkStream::AddBlock).
+#define MAX_NETWORKMESSAGE_SIZE 16384     // max. length of message buffer
   UBYTE *nm_pubMessage;       // the message data itself
   SLONG nm_slMaxSize;         // size of message buffer
 

@@ -27,7 +27,10 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <Engine/Templates/StaticArray.h>
 
 #define NET_MAXGAMECOMPUTERS SERVER_CLIENTS    // max overall computers in game
-#define NET_MAXGAMEPLAYERS   16                // max overall players in game
+// web port: 256 players (bots and humans; notes/perf/players.md). Upstream had 16. Saved games and
+// demos with up to 16 players keep the original format (SessionState.cpp writes 16 slots then).
+#define NET_MAXGAMEPLAYERS   256               // max overall players in game
+#define NET_MAXGAMEPLAYERS_SE1 16              // the original limit: the saved-game slot count
 #define NET_MAXLOCALPLAYERS   4                // max players on a single machine
 
 #define NET_WAITMESSAGE_DELAY     50       // wait time between receive message attempts
