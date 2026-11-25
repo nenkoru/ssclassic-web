@@ -62,6 +62,12 @@ static inline void VectMulT(const FLOATmatrix3D &mM, const FLOAT3D &vV1, FLOAT3D
   vV2(3) = vV1(1)*mM(1,3)+vV1(2)*mM(2,3)+vV1(3)*mM(3,3);
 }
 
+#ifdef __EMSCRIPTEN__
+// WorldCollisionGrid.cpp
+extern void SE1_FindEntitiesTouchingBox(CWorld *pwo, const FLOATaabbox3D &boxNear,
+  CStaticStackArray<CEntity*> &apenNearEntities);
+#endif
+
 /////////////////////////////////////////////////////////////////////
 // CClipMove
 
@@ -1344,7 +1350,13 @@ void CClipMove::ClipMoveToModels(void)
 
   // find colliding entities near the box of movement path
   static CStaticStackArray<CEntity*> apenNearEntities;
+#ifdef __EMSCRIPTEN__
+  // web port perf: only the near entities whose box touches the movement box, in the same order
+  // (ClipMoveToModel() does nothing for the others); see WorldCollisionGrid.cpp
+  SE1_FindEntitiesTouchingBox(cm_pwoWorld, cm_boxMovementPath, apenNearEntities);
+#else
   cm_pwoWorld->FindEntitiesNearBox(cm_boxMovementPath, apenNearEntities);
+#endif
 
   // for each of the found entities
   {for(INDEX ienFound=0; ienFound<apenNearEntities.Count(); ienFound++) {
