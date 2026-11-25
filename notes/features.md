@@ -145,4 +145,15 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
     are already strictly increasing. `port/common/GpuAnim.cpp` puts a 16-entry cache in front of
     its model map.
 
+- **Baked global illumination (2026-11-26, prototype, branch `t3/prototype-global-illumination`).**
+  `notes/gi-plan.md`. Bounce light from the shadow maps, baked by `port/common/Se1GI.cpp`
+  (`GI_Compute()`), visual only. Four guarded (`__EMSCRIPTEN__`) calls into it:
+  - `Light/LayerMixer.cpp` `MixOneMipmap`: `SE1GI_AdjustAmbient` scales the sector ambient
+    (`gi_fAmbient`), and `SE1GI_AddIndirect` adds the indirect term before the gradient and filtering.
+  - `Brushes/BrushShadows.cpp` `IsShadowFlat`: `SE1GI_PreventsFlat`, so a baked polygon keeps a real
+    shadow map.
+  - `Rendering/RenderModels.cpp` `FindModelLights`: `SE1GI_AddModelAmbient` adds the indirect light
+    under a model to its ambient.
+  - `Engine.cpp`: `SE1GI_DeclareSymbols()` registers the `gi_*` cvars and `GI_*` functions.
+
 Update this list when an engine change lands.
