@@ -14,6 +14,10 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA. */
 
 
+#if defined(__EMSCRIPTEN__) && defined(__wasm_simd128__)
+#include <wasm_simd128.h>
+#endif
+
 extern INDEX mdl_iShadowQuality;
 // model shadow precision
 // 0 = no shadows
@@ -62,6 +66,264 @@ static inline FLOAT IntensityAtDistance( FLOAT fFallOff, FLOAT fHotSpot, FLOAT f
   return (fFallOff-fDistance)/(fFallOff-fHotSpot);
 }
 
+
+#ifdef __EMSCRIPTEN__
+// web port perf: FindModelLights() walks every shadow layer of the polygon under the model, and the
+// models of a crowd stand on a handful of polygons (stress500: 163 calls a frame on 8 polygons,
+// ~26 layers each, ~70% of them out of the light's falloff range). The per-layer values that don't
+// depend on the model (the light, its colours, flags, ranges and position) are gathered once per
+// polygon per RenderModels() pass into dense arrays, so each call reads those instead of chasing the
+// layer list and the light entities. Nothing that is cached can change during a pass: lights and
+// brushes don't move while models render, and animated light colours depend only on the render time.
+//
+// For an omni light with an entity, the falloff test (pure) runs before GetLightStrength() (pure);
+// either one rejects the layer, so testing them in the other order changes nothing. The falloff
+// test runs on four layers at once: Length()>fFallOff is (FLOAT)sqrt((DOUBLE)s)>fFallOff with s the
+// float sum of squares, which grows with s, so it holds exactly when s is above the largest float
+// that still passes (FallOffThreshold()). The SIMD lanes compute s with the same float operations
+// as Length(), and the layers that pass run the original code, in the original order, so the lights
+// pushed and the sums are the same bit for bit (checked against the original loop: notes/perf/render3.md).
+struct ModelLightLayer {
+  CBrushShadowLayer *mll_pbsl;
+  CLightSource *mll_pls;
+  FLOAT3D mll_vLight;           // light position (omni lights with an entity only)
+  FLOAT mll_fFallOff, mll_fHotSpot;
+  SLONG mll_slDAR, mll_slDAG, mll_slDAB;  // directional ambient of this layer and all before it
+  UBYTE mll_ubR, mll_ubG, mll_ubB;
+  UBYTE mll_bDistanceFirst;     // omni light with an entity: test the falloff before the shadow map
+};
+// four layers: light positions and the largest squared distance inside the falloff (+inf: no test)
+struct ModelLightQuad {
+  FLOAT mlq_afX[4], mlq_afY[4], mlq_afZ[4], mlq_afMaxSq[4];
+};
+struct ModelLightPolygon {
+  CBrushPolygon *mlp_pbpo;
+  ULONG mlp_ulPass;
+  INDEX mlp_iFirst, mlp_ctLayers, mlp_iFirstQuad;
+};
+#define MODELLIGHT_POLYGONS 256   // power of two
+static CStaticStackArray<ModelLightLayer> _amllLayers;
+static CStaticStackArray<ModelLightQuad> _amlqQuads;
+static ModelLightPolygon _amlpPolygons[MODELLIGHT_POLYGONS];
+static ULONG _ulModelLightPass = 0;
+
+// start of a RenderModels() pass: forget the layers gathered in the previous one
+static void ModelLights_NewPass(void)
+{
+  _amllLayers.PopAll();
+  _amlqQuads.PopAll();
+  _ulModelLightPass++;
+  if (_ulModelLightPass==0) {
+    memset(_amlpPolygons, 0, sizeof(_amlpPolygons));
+    _ulModelLightPass = 1;
+  }
+}
+
+// the largest float s with (FLOAT)sqrt((DOUBLE)s)<=fFallOff (as in Vector<FLOAT,3>::Length()),
+// or +inf to leave the test to the exact code (odd ranges)
+static FLOAT FallOffThreshold(FLOAT fFallOff)
+{
+  if (!(fFallOff>0.0f && fFallOff<1E18f)) return HUGE_VALF;
+  FLOAT fMax = (FLOAT)((DOUBLE)fFallOff*(DOUBLE)fFallOff);
+  while ((FLOAT)sqrt((DOUBLE)fMax)>fFallOff) fMax = nextafterf(fMax, 0.0f);
+  for (;;) {
+    const FLOAT fNext = nextafterf(fMax, HUGE_VALF);
+    if ((FLOAT)sqrt((DOUBLE)fNext)>fFallOff) break;
+    fMax = fNext;
+  }
+  return fMax;
+}
+
+// the layers of a polygon for this pass, gathered on first use; FALSE if the table is full
+static BOOL ModelLights_GetLayers(CBrushPolygon *pbpo, const ModelLightPolygon *&pmlpOut)
+{
+  ULONG ulHash = (ULONG)(size_t)pbpo;
+  ulHash = (ulHash>>4) ^ (ulHash>>12);
+  ModelLightPolygon *pmlp = NULL;
+  for (INDEX iProbe=0; iProbe<16; iProbe++) {
+    ModelLightPolygon &mlp = _amlpPolygons[(ulHash+iProbe)&(MODELLIGHT_POLYGONS-1)];
+    if (mlp.mlp_ulPass!=_ulModelLightPass) { pmlp = &mlp; break; }
+    if (mlp.mlp_pbpo==pbpo) { pmlpOut = &mlp; return TRUE; }
+  }
+  if (pmlp==NULL) return FALSE;
+
+  const INDEX iFirst = _amllLayers.Count();
+  const INDEX iFirstQuad = _amlqQuads.Count();
+  INDEX ct = 0;
+  SLONG slDAR=0, slDAG=0, slDAB=0;
+  {FOREACHINLIST(CBrushShadowLayer, bsl_lnInShadowMap, pbpo->bpo_smShadowMap.bsm_lhLayers, itbsl) {
+    CLightSource *plsLight = itbsl->bsl_plsLightSource;
+    ModelLightLayer &mll = _amllLayers.Push();
+    mll.mll_pbsl = itbsl;
+    mll.mll_pls = plsLight;
+    UBYTE ubDAR, ubDAG, ubDAB;
+    plsLight->GetLightColorAndAmbient(mll.mll_ubR, mll.mll_ubG, mll.mll_ubB, ubDAR, ubDAG, ubDAB);
+    slDAR += ubDAR;  slDAG += ubDAG;  slDAB += ubDAB;
+    mll.mll_slDAR = slDAR;  mll.mll_slDAG = slDAG;  mll.mll_slDAB = slDAB;
+    mll.mll_bDistanceFirst = !(plsLight->ls_ulFlags&LSF_DIRECTIONAL) && plsLight->ls_penEntity!=NULL;
+    if ((ct&3)==0) {
+      ModelLightQuad &mlq = _amlqQuads.Push();
+      for (INDEX i=0; i<4; i++) {
+        mlq.mlq_afX[i] = mlq.mlq_afY[i] = mlq.mlq_afZ[i] = 0.0f;
+        mlq.mlq_afMaxSq[i] = HUGE_VALF;
+      }
+    }
+    ModelLightQuad &mlq = _amlqQuads[_amlqQuads.Count()-1];
+    if (mll.mll_bDistanceFirst) {
+      mll.mll_vLight = plsLight->ls_penEntity->GetPlacement().pl_PositionVector;
+      mll.mll_fFallOff = plsLight->ls_rFallOff;
+      mll.mll_fHotSpot = plsLight->ls_rHotSpot;
+      mlq.mlq_afX[ct&3] = mll.mll_vLight(1);
+      mlq.mlq_afY[ct&3] = mll.mll_vLight(2);
+      mlq.mlq_afZ[ct&3] = mll.mll_vLight(3);
+      mlq.mlq_afMaxSq[ct&3] = FallOffThreshold(mll.mll_fFallOff);
+    }
+    ct++;
+  }}
+  pmlp->mlp_pbpo = pbpo;
+  pmlp->mlp_ulPass = _ulModelLightPass;
+  pmlp->mlp_iFirst = iFirst;
+  pmlp->mlp_ctLayers = ct;
+  pmlp->mlp_iFirstQuad = iFirstQuad;
+  pmlpOut = pmlp;
+  return TRUE;
+}
+
+// FindModelLights() for one cached layer that may light the model: the original per-layer code
+static inline void ModelLights_AddLayer(const ModelLightLayer &mll, CEntity &en, const CPlacement3D &plModel,
+  ULONG ulPolyFlags, SLONG slSAR, SLONG slSAG, SLONG slSAB, FLOAT &fTotalShadowIntensity)
+{
+  CShadingInfo *psi = en.en_psiShadingInfo;
+  CLightSource *plsLight = mll.mll_pls;
+  UBYTE ubR = mll.mll_ubR, ubG = mll.mll_ubG, ubB = mll.mll_ubB;
+  FLOAT fShadowFactor;
+  FLOAT3D vDirection;
+  FLOAT fDistance;
+  FLOAT fFallOffFactor;
+  if (mll.mll_bDistanceFirst) {
+    vDirection = plModel.pl_PositionVector-mll.mll_vLight;
+    fDistance = vDirection.Length();
+    if (fDistance>mll.mll_fFallOff) return;
+    if (en.en_ulFlags&ENF_CLUSTERSHADOWS) {
+      fShadowFactor = 1.0f;
+    } else {
+      fShadowFactor = mll.mll_pbsl->GetLightStrength( psi->si_pixShadowU, psi->si_pixShadowV,
+                                                      psi->si_fUDRatio,   psi->si_fLRRatio);
+    }
+    if (fShadowFactor<0.01f) return;
+    if (fDistance<mll.mll_fHotSpot) {
+      fFallOffFactor = 1.0f;
+    } else {
+      fFallOffFactor = (mll.mll_fFallOff-fDistance)/(mll.mll_fFallOff-mll.mll_fHotSpot);
+    }
+  } else {
+    if (en.en_ulFlags&ENF_CLUSTERSHADOWS) {
+      fShadowFactor = 1.0f;
+    } else {
+      fShadowFactor = mll.mll_pbsl->GetLightStrength( psi->si_pixShadowU, psi->si_pixShadowV,
+                                                      psi->si_fUDRatio,   psi->si_fLRRatio);
+    }
+    if (fShadowFactor<0.01f) return;
+    const CPlacement3D &plLight = plsLight->ls_penEntity->GetPlacement();
+    const FLOAT3D &vLight = plLight.pl_PositionVector;
+    if (plsLight->ls_ulFlags&LSF_DIRECTIONAL) {
+      fFallOffFactor = 1.0f;
+      AnglesToDirectionVector(plLight.pl_OrientationAngle, vDirection);
+      if (!(ulPolyFlags&BPOF_HASDIRECTIONALLIGHT)) {
+        ubR = ubG = ubB = 0;
+      }
+      fDistance = 1.0f;
+    } else {
+      vDirection = plModel.pl_PositionVector-vLight;
+      fDistance = vDirection.Length();
+      if (fDistance>plsLight->ls_rFallOff) {
+        return;
+      } else if (fDistance<plsLight->ls_rHotSpot) {
+        fFallOffFactor = 1.0f;
+      } else {
+        fFallOffFactor = (plsLight->ls_rFallOff-fDistance)/
+          (plsLight->ls_rFallOff-plsLight->ls_rHotSpot);
+      }
+    }
+  }
+  // add the light to active lights (as in FindModelLights())
+  struct ModelLight &ml = _amlLights.Push();
+  ml.ml_plsLight = plsLight;
+  if (fDistance>0.001f) {
+    ml.ml_vDirection = vDirection/fDistance;
+  } else {
+    ml.ml_vDirection = FLOAT3D(0.0f,0.0f,0.0f);
+  }
+  if (plsLight->ls_ulFlags&LSF_SUBSTRACTSECTORAMBIENT) {
+    ubR = (UBYTE)Clamp( (SLONG)ubR-slSAR, (SLONG)0, (SLONG)255);
+    ubG = (UBYTE)Clamp( (SLONG)ubG-slSAG, (SLONG)0, (SLONG)255);
+    ubB = (UBYTE)Clamp( (SLONG)ubB-slSAB, (SLONG)0, (SLONG)255);
+  }
+  FLOAT fShade = (ubR+ubG+ubB)*(2.0f/(3.0f*255.0f));
+  ml.ml_fShadowIntensity = fShade*fShadowFactor;
+  fTotalShadowIntensity += ml.ml_fShadowIntensity;
+  if (plsLight->ls_ulFlags&LSF_DARKLIGHT) {
+    ml.ml_fR = -ubR*fFallOffFactor;
+    ml.ml_fG = -ubG*fFallOffFactor;
+    ml.ml_fB = -ubB*fFallOffFactor;
+  } else {
+    ml.ml_fR = +ubR*fFallOffFactor;
+    ml.ml_fG = +ubG*fFallOffFactor;
+    ml.ml_fB = +ubB*fFallOffFactor;
+  }
+}
+
+// FindModelLights()' layer loop over the cached layers of the polygon
+static void ModelLights_AddLayers(const ModelLightPolygon &mlp, CEntity &en, const CPlacement3D &plModel,
+  SLONG &slSAR, SLONG &slSAG, SLONG &slSAB, FLOAT &fTotalShadowIntensity)
+{
+  const ULONG ulPolyFlags = en.en_psiShadingInfo->si_pbpoPolygon->bpo_ulFlags;
+  // the directional ambient is added for every layer, before the layer's tests
+  const BOOL bDirAmbient = (ulPolyFlags&BPOF_HASDIRECTIONALAMBIENT)!=0;
+  const SLONG slSAR0 = slSAR, slSAG0 = slSAG, slSAB0 = slSAB;
+  const INDEX ctLayers = mlp.mlp_ctLayers;
+  if (ctLayers==0) return;
+  const ModelLightLayer *amll = &_amllLayers[mlp.mlp_iFirst];
+  const ModelLightQuad *amlq = &_amlqQuads[mlp.mlp_iFirstQuad];
+#if defined(__wasm_simd128__)
+  const v128_t vX = wasm_f32x4_splat(plModel.pl_PositionVector(1));
+  const v128_t vY = wasm_f32x4_splat(plModel.pl_PositionVector(2));
+  const v128_t vZ = wasm_f32x4_splat(plModel.pl_PositionVector(3));
+#endif
+  for (INDEX iLayer0=0; iLayer0<ctLayers; iLayer0+=4) {
+    const ModelLightQuad &mlq = amlq[iLayer0>>2];
+#if defined(__wasm_simd128__)
+    // vDirection = plModel.pl_PositionVector-vLight, then x*x+y*y+z*z as in Length()
+    const v128_t vDX = wasm_f32x4_sub(vX, wasm_v128_load(mlq.mlq_afX));
+    const v128_t vDY = wasm_f32x4_sub(vY, wasm_v128_load(mlq.mlq_afY));
+    const v128_t vDZ = wasm_f32x4_sub(vZ, wasm_v128_load(mlq.mlq_afZ));
+    const v128_t vSq = wasm_f32x4_add(wasm_f32x4_add(wasm_f32x4_mul(vDX, vDX), wasm_f32x4_mul(vDY, vDY)),
+                                      wasm_f32x4_mul(vDZ, vDZ));
+    ULONG ulKeep = ~(ULONG)wasm_i32x4_bitmask(wasm_f32x4_gt(vSq, wasm_v128_load(mlq.mlq_afMaxSq))) & 15;
+#else
+    ULONG ulKeep = 15;
+#endif
+    while (ulKeep!=0) {
+      const INDEX iLayer = iLayer0 + __builtin_ctz(ulKeep);
+      ulKeep &= ulKeep-1;
+      if (iLayer>=ctLayers) break;
+      const ModelLightLayer &mll = amll[iLayer];
+      if (bDirAmbient) {
+        slSAR = slSAR0 + mll.mll_slDAR;
+        slSAG = slSAG0 + mll.mll_slDAG;
+        slSAB = slSAB0 + mll.mll_slDAB;
+      }
+      ModelLights_AddLayer(mll, en, plModel, ulPolyFlags, slSAR, slSAG, slSAB, fTotalShadowIntensity);
+    }
+  }
+  if (bDirAmbient) {
+    const ModelLightLayer &mllLast = amll[ctLayers-1];
+    slSAR = slSAR0 + mllLast.mll_slDAR;
+    slSAG = slSAG0 + mllLast.mll_slDAG;
+    slSAB = slSAB0 + mllLast.mll_slDAB;
+  }
+}
+#endif
 
 /* Find lights for one model. */
 BOOL CRenderer::FindModelLights( CEntity &en, const CPlacement3D &plModel,
@@ -153,6 +415,12 @@ BOOL CRenderer::FindModelLights( CEntity &en, const CPlacement3D &plModel,
       SLONG slSAR=ubAR, slSAG=ubAG, slSAB=ubAB;
 
       fTotalShadowIntensity = 0.0f;
+#ifdef __EMSCRIPTEN__
+      const ModelLightPolygon *pmlp;
+      if (ModelLights_GetLayers(en.en_psiShadingInfo->si_pbpoPolygon, pmlp)) {
+        ModelLights_AddLayers(*pmlp, en, plModel, slSAR, slSAG, slSAB, fTotalShadowIntensity);
+      } else
+#endif
       // for each shadow layer
       {FOREACHINLIST(CBrushShadowLayer, bsl_lnInShadowMap, bsm.bsm_lhLayers, itbsl)
       {
@@ -326,6 +594,24 @@ BOOL CRenderer::FindModelLights( CEntity &en, const CPlacement3D &plModel,
 }
 
 
+#ifdef __EMSCRIPTEN__
+// web port perf: IsOfClass(&en, "Player Weapons") without a strcmp per model. Class names are
+// static strings, so the answer for a name pointer never changes; a few entries cover the classes
+// of a frame.
+static BOOL IsPlayerWeapons(CEntity &en)
+{
+  const char *strName = en.GetClass()->ec_pdecDLLClass->dec_strName;
+  static const char *_astrName[16];
+  static BOOL _abWeapons[16];
+  const INDEX i = (INDEX)(((size_t)strName>>3)&15);
+  if (_astrName[i]!=strName) {
+    _abWeapons[i] = strcmp(strName, "Player Weapons")==0;
+    _astrName[i] = strName;
+  }
+  return _abWeapons[i];
+}
+#endif
+
 /*
  * Render one model with shadow (eventually)
  */
@@ -382,7 +668,11 @@ void CRenderer::RenderOneModel( CEntity &en, CModelObject &moModel, const CPlace
   }
 
   // TEMP: disable Truform usage on weapon models
+#ifdef __EMSCRIPTEN__
+  if( IsPlayerWeapons(en)) rm.rm_ulFlags |= RMF_WEAPON;
+#else
   if( IsOfClass( &en, "Player Weapons")) rm.rm_ulFlags |= RMF_WEAPON; 
+#endif
 
   // set tesselation level of models
   rm.rm_iTesselationLevel = (INDEX) (en.GetMaxTessellationLevel());
@@ -590,6 +880,9 @@ void CRenderer::RenderModels( BOOL bBackground)
 
   _pfRenderProfile.StartTimer(CRenderProfile::PTI_RENDERMODELS);
 
+#ifdef __EMSCRIPTEN__
+  ModelLights_NewPass();
+#endif
   // sort all the delayed models by distance
 #ifdef __EMSCRIPTEN__
   // web port perf (~3% of the timedemo frame went to this sort): the same introsort as the qsort
@@ -610,13 +903,20 @@ void CRenderer::RenderModels( BOOL bBackground)
         admk[idm].fDistance = apdm[idm]->dm_fDistance;
         admk[idm].pdm = apdm[idm];
       }
-      se1_qsort(admk, ctdm, [](const DelayedModelKey &k0, const DelayedModelKey &k1) {
+      auto cmp = [](const DelayedModelKey &k0, const DelayedModelKey &k1) {
         if (k0.iAlpha!=k1.iAlpha) return k0.iAlpha<k1.iAlpha ? -1 : +1;
         if (k0.fDistance<k1.fDistance) return -1;
         if (k0.fDistance>k1.fDistance) return +1;
         return 0;
-      });
-      for (INDEX idm=0; idm<ctdm; idm++) apdm[idm] = admk[idm].pdm;
+      };
+      // already in strictly increasing order (the second pass of a frame with a background pass):
+      // the sorted order is unique, so the sort could only leave it as it is
+      INDEX idm=1;
+      while (idm<ctdm && cmp(admk[idm-1], admk[idm])<0) idm++;
+      if (idm<ctdm) {
+        se1_qsort(admk, ctdm, cmp);
+        for (INDEX idm=0; idm<ctdm; idm++) apdm[idm] = admk[idm].pdm;
+      }
     }
   }
 #else

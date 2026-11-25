@@ -138,5 +138,11 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
   - `rays3.md`: a `TT_COLLISIONBOX` cast in `WorldRayCasting.cpp` takes the models it can hit from
     the collision grid (`WorldCollisionGrid.cpp` `SE1_FindEntitiesNearSegment`) and decides each
     sector's model hit from them; a sector with a terrain or a tie runs the original loop.
+  - `render3.md`: `RenderModels.cpp` `FindModelLights` gathers a polygon's shadow layers once per
+    `RenderModels()` pass and rejects out-of-range omni lights by a squared-distance threshold,
+    four at a time (wasm SIMD), before reading the shadow map; `RenderOneModel` caches the
+    "Player Weapons" class test per class name; the delayed-model sort is skipped when the keys
+    are already strictly increasing. `port/common/GpuAnim.cpp` puts a 16-entry cache in front of
+    its model map.
 
 Update this list when an engine change lands.
