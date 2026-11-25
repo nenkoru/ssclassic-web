@@ -280,8 +280,45 @@ static void host_close_computer(void) { if (_pSE1ModGameCall != NULL) _pSE1ModGa
 static volatile int32_t _iUiValue = -1;
 extern "C" EMSCRIPTEN_KEEPALIVE void SE1Mod_UiSend(int v) { _iUiValue = v; }   /* called from the page */
 #ifdef SE1_THREADS
-static double host_page_option(const char *name) { return MAIN_THREAD_EM_ASM_DOUBLE({ return +(Module[UTF8ToString($0)] || 0); }, name); }
-static void host_ui_post(const char *json) { MAIN_THREAD_EM_ASM({ if (Module.se1ModUi) Module.se1ModUi(UTF8ToString($0)); }, json); }
+/* Each read of Module[name] is a synchronous call to the page's main thread: the engine thread
+   waits until the main thread has finished its current task (~30 us at 60 fps, more when it is
+   replaying a frame). The bots read se1Bots and se1NavBake every tick, which cost ~2% of a
+   stress300 frame (notes/perf/frame4.md). The page sets these options at startup (pre.js), so a
+   value read here is kept for PAGE_OPTION_MS: a change the page makes later still reaches the mod,
+   within that time. */
+#define PAGE_OPTION_MS 500.0
+struct PageOption { char po_name[48]; double po_value, po_read; };
+static PageOption _apoPage[48];
+static int _ctPageOptions;
+static double page_option_read(const char *name) { return MAIN_THREAD_EM_ASM_DOUBLE({ return +(Module[UTF8ToString($0)] || 0); }, name); }
+static double host_page_option(const char *name)
+{
+  const double now = emscripten_get_now();
+  for (int i = 0; i < _ctPageOptions; i++) {
+    PageOption &po = _apoPage[i];
+    if (strcmp(po.po_name, name) == 0) {
+      if (!(now - po.po_read < PAGE_OPTION_MS)) { po.po_value = page_option_read(name); po.po_read = now; }
+      return po.po_value;
+    }
+  }
+  const double v = page_option_read(name);
+  if (_ctPageOptions < (int)(sizeof(_apoPage)/sizeof(_apoPage[0])) && strlen(name) < sizeof(_apoPage[0].po_name)) {
+    PageOption &po = _apoPage[_ctPageOptions++];
+    strcpy(po.po_name, name);
+    po.po_value = v;
+    po.po_read = now;
+  }
+  return v;
+}
+/* The page's UI handler only takes the string: post it without waiting (the main thread frees the
+   copy). Posts stay in order with the other calls to the main thread (one FIFO queue). */
+extern "C" EMSCRIPTEN_KEEPALIVE void SE1Mod_UiPostDone(char *json) { free(json); }
+static void host_ui_post(const char *json)
+{
+  char *copy = strdup(json);
+  if (copy == NULL) return;
+  MAIN_THREAD_ASYNC_EM_ASM({ try { if (Module.se1ModUi) Module.se1ModUi(UTF8ToString($0)); } finally { _SE1Mod_UiPostDone($0); } }, copy);
+}
 #else
 static double host_page_option(const char *name) { return EM_ASM_DOUBLE({ return +(Module[UTF8ToString($0)] || 0); }, name); }
 static void host_ui_post(const char *json) { EM_ASM({ if (Module.se1ModUi) Module.se1ModUi(UTF8ToString($0)); }, json); }
