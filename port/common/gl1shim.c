@@ -178,7 +178,10 @@ enum {
   OP_TEXIMAGE = 34, OP_PIXELSTORE = 35, OP_VSTREAMS = 36, OP_DEPTHPROBE = 37,
   OP_NEWPROG = 38, OP_NEWULOC = 39,
   /* GPU model animation (port/common/GpuAnim.cpp, ?gpuanim): WebGL2 replayer only */
-  OP_GA_TABLES = 40, OP_GA_FRAMES = 41, OP_GA_MESH = 42, OP_GA_DRAW = 43, OP_GA_FREE = 44
+  OP_GA_TABLES = 40, OP_GA_FRAMES = 41, OP_GA_MESH = 42, OP_GA_DRAW = 43, OP_GA_FREE = 44,
+  /* world/HUD split for the post-processing chain (see marker_draw below): p0 p5 p10 p14 of the
+     frame's first perspective projection; WORLDEND_VOID is a cancelled marker of the same size */
+  OP_WORLDEND = 45, OP_WORLDEND_VOID = 46
 };
 typedef union { int32_t i; float f; } Word;
 static Word *_cmd; static size_t _ncmd, _capcmd;
@@ -337,11 +340,48 @@ static void batch_close(void) {
   for (int l = 0; l < NSTREAMS; l++) { w[2 * l].i = (int32_t)(uintptr_t)_vs[l].p; w[2 * l + 1].i = (int32_t)_vs[l].n; }
 }
 static int batch_has_work(void) { return _batchOpen && (_ncmd > _vstreamsAt + 1 + 2 * NSTREAMS || _ia.n); }
+/* ---- world/HUD split marker ----
+   Post effects (bloom, grading, AO, AA: port/web/gfx.js) must apply to the 3D view, not the HUD.
+   The engine draws the world (perspective), lens flares (ortho), the weapon (perspective), then
+   the HUD (ortho), so the split is the LAST perspective->ortho switch of the frame. Each such switch
+   records OP_WORLDEND; a later perspective draw cancels it (OP_WORLDEND_VOID, same size) while it is
+   still in the unflushed buffer, and the next switch records a new one. A frame that ends while
+   still in perspective gets its marker at the end (SE1_GL1Shim_FrameMarker). */
+static int _mkPersp;            /* a perspective draw since the last marker */
+static long _mkAt = -1;         /* word index of the pending marker in _cmd, or -1 */
+static int _mkHaveProj;         /* _mkProj holds this frame's first perspective projection */
+static float _mkProj[4];
 static void batch_reset(void) {
   _ncmd = 0; _ia.n = 0; _da.n = 0;
   for (int l = 0; l < NSTREAMS; l++) _vs[l].n = 0;
   _batchOpen = 0;
   reuse_forget();   /* offsets into the old streams */
+  _mkAt = -1;       /* a handed-over marker can't be cancelled any more */
+}
+static void marker_emit(void) {
+  Word *w = cmd(OP_WORLDEND, 4);
+  for (int i = 0; i < 4; i++) w[i].f = _mkHaveProj ? _mkProj[i] : 0.0f;
+  _mkAt = (long)((w - 1) - _cmd);
+  _mkPersp = 0;
+}
+/* every draw: note whether it is perspective (projection m[11] != 0, glFrustum) or ortho */
+static void marker_draw(int persp) {
+  if (persp) {
+    if (!_mkHaveProj) {
+      _mkProj[0] = S.projection.m[0]; _mkProj[1] = S.projection.m[5];
+      _mkProj[2] = S.projection.m[10]; _mkProj[3] = S.projection.m[14];
+      _mkHaveProj = 1;
+    }
+    if (!_mkPersp) {
+      _mkPersp = 1;
+      if (_mkAt >= 0) { _cmd[_mkAt].i = OP_WORLDEND_VOID; _mkAt = -1; }
+    }
+  } else if (_mkPersp) marker_emit();
+}
+/* end of frame, before the final flush */
+static void marker_frame_end(void) {
+  if (_mkPersp) marker_emit();
+  _mkPersp = 0; _mkAt = -1; _mkHaveProj = 0;
 }
 
 #ifdef SE1_THREADS
@@ -411,6 +451,8 @@ EM_JS(void, gfx_pixel_store, (int p, int v), { Module['se1gfx'].pixelStore(p, v)
 
 #ifndef SE1_THREADS
 /* hand everything recorded so far to the replayer (exported: also called before every swap) */
+void SE1_GL1Shim_FrameMarker(void);   /* port/common/WebFrame.cpp, before the frame's last flush */
+void SE1_GL1Shim_FrameMarker(void) { marker_frame_end(); }
 void SE1_GL1Shim_Flush(void);
 void SE1_GL1Shim_Flush(void) {
   if (batch_has_work()) { batch_close(); gfx_replay(_cmd, (int)_ncmd, 0, 0, _ia.p, (int)_ia.n, _da.p, (int)_da.n); }
@@ -446,6 +488,7 @@ static void hand_off(int present) {
      is already simulating the next one (the ?shots= capture picks frames by demo time) */
   double tDemo = present ? SE1_DemoTime() : -1.0;
   if (present) SE1_GL1Shim_StaticReset();   /* the engine re-declares its static arrays every frame */
+  if (present) marker_frame_end();
   batch_close();
   emscripten_atomic_store_u32((void *)&b->busy, 1);
   MAIN_THREAD_ASYNC_EM_ASM({ Module['se1ReplayBatch']($0, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10); },
@@ -635,6 +678,7 @@ static void apply_program(void) {
   Prog *p = (key == _lastKey && _lastProg) ? _lastProg : get_prog(key);
   _lastKey = key; _lastProg = p;
   use_program(p->prog);
+  marker_draw(S.projection.m[11] != 0.0f);
   Mat4 mvp; mat_mul(&mvp, &S.projection, &S.modelview);
   if (UNIFORM_CHANGED(p, CV_MVP, p->cMVP, mvp.m, 16)) {
     if (p->uMVP >= 0) cmd_loc_fv(OP_UNIFORMMAT4, p->uMVP, mvp.m, 16); memcpy(p->cMVP, mvp.m, 64); p->cValid |= CV_MVP;
@@ -1343,6 +1387,7 @@ void SE1_GL1Shim_GADraw(int h, int instOff, int ctInst, int elemFirst, int ctEle
 void SE1_GL1Shim_GADraw(int h, int instOff, int ctInst, int elemFirst, int ctElem, int flags,
                         const float *texCorr, const float *offset, int ctSrf, const uint32_t *srf) {
   shim_init();
+  marker_draw(1);   /* GPU-animated models are always perspective */
   Word *w = cmd(OP_GA_DRAW, 29 + 4 * ctSrf);
   w[0].i = h; w[1].i = instOff; w[2].i = ctInst; w[3].i = elemFirst; w[4].i = ctElem; w[5].i = flags;
   w[6].f = S.alphaRef; w[7].f = texCorr[0]; w[8].f = texCorr[1];

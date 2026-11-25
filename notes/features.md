@@ -46,6 +46,7 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
 | WebGPU renderer | ✅ | port/web/gfx-webgpu.js | `?gfx=webgpu` | bench + shotdiff | shim |
 | Dynamic resolution and quality controller | ✅ | rust/se1-mod/src/quality.rs, gfx.js applyScale | `?quality=auto`, `?scale=` | qualitytest | mod |
 | Post-processing (FXAA, sharpen) | ✅ | gfx.js post pass | `?post=fxaa,sharpen` | posttest, shotdiff | gfx |
+| HD post: emissive bloom, grade, aniso/trilinear (WebGL2) | ✅ | gfx.js post chain (emissive MRT, world/HUD split by the shim's `OP_WORLDEND` marker), gl1shim.c marker | `?post=hq` (or `bloom,grade,aniso16,trilinear`), `?bloom=0..3`, `?pp=thr:0.93,sat:1.1` | posttest, shotdiff | gfx |
 | Input: mouse lock, keyboard | ✅ | port/web/input.js, SDLInput.cpp hooks | — | inputtest | — |
 | Touch controls | ✅ | port/web/touch.js, `SE1_TouchLook` | automatic on touch | touchtest | input |
 | Gamepad + aim assist + bullet magnetism | ✅ | port/web/gamepad.js, port/common/AimAssist.cpp, WorldRayCasting.cpp hook, Game.cpp hook | `?aimassist=0-3` | gamepadtest | input |

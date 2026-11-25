@@ -179,8 +179,10 @@ extern "C" void SE1_GL1Shim_FlushFrame(void);  // SE1_THREADS: hand the frame ov
 EM_JS(void, se1_capture_frame, (void), { if (Module['se1CaptureFrame']) Module['se1CaptureFrame'](); });
 EM_JS(void, se1_end_frame, (void), { if (Module['se1gfx'] && Module['se1gfx'].endFrame) Module['se1gfx'].endFrame(); });
 
+extern "C" void SE1_GL1Shim_FrameMarker(void);  // gl1shim.c: close the frame's world/HUD split
 extern "C" void SE1_BeforeSwap(void)
 {
+  SE1_GL1Shim_FrameMarker();
   SE1_GL1Shim_Flush();   // the frame must be drawn before it's captured or presented
   se1_capture_frame();
   se1_end_frame();       // e.g. apply a new render scale for the next frame

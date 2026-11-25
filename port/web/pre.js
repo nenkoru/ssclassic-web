@@ -32,13 +32,16 @@
   var sc = q.get('scale');
   if (sc === 'auto') Module['se1Drs'] = { min: 0.5 };
   else if (sc && +sc > 0) Module['se1Scale'] = Math.min(1, +sc);
-  // ?post=fxaa,sharpen enables the post-processing chain (gfx.js); ?postsharp=0..1 scales the
-  // sharpen strength (default 0.5)
+  // ?post=hq (or a list: bloom,grade,fxaa,sharpen,aniso[N],trilinear) enables the post-processing
+  // chain and texture filtering upgrades (gfx.js); ?postsharp=0..1 scales the sharpen strength
+  // (default 0.5), ?bloom=0..3 the bloom strength (default 1)
   var post = q.get('post');
   if (post) {
-    var ps = +q.get('postsharp');
+    var ps = +q.get('postsharp'), pb = q.get('bloom');
     Module['se1PostOpts'] = { effects: post.split(',').map(function (s) { return s.trim(); }).filter(Boolean),
-                              sharp: isNaN(ps) ? 0.5 : Math.min(1, Math.max(0, ps)) };
+                              sharp: isNaN(ps) ? 0.5 : Math.min(1, Math.max(0, ps)),
+                              bloom: pb === null || isNaN(+pb) ? undefined : Math.min(3, Math.max(0, +pb)),
+                              pp: q.get('pp') || '' };   // tuning: ?pp=thr:0.9,vig:0.2 (gfx.js PP)
   }
   // ?shots=<label>: deterministic demo replay, capture frames at fixed demo times and POST them
   // to the dev server (tools/devserver.py saves them under data/shots/<label>/). Starts at 3 s:

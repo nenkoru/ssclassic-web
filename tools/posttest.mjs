@@ -87,6 +87,19 @@ try {
   check('fxaa after resize', !!a2 && a2.w < 1024 && a2.colors > 8 && (await st()).err === 0, a2 ? `${a2.w}x${a2.h}, ${a2.colors} colours` : 'null');
   await ev('Module.se1Scale = 1');
 
+  // --- ?post=hq: bloom (emissive MRT), grade, fxaa, sharpen, aniso, trilinear; the world chain runs
+  // on frames with a world/HUD marker (gl1shim.c OP_WORLDEND) ---
+  await send('Page.navigate', { url: q('post=hq') });
+  s = await until((x) => x.frames > 60, 120000 * TIMEOUT_SCALE);
+  const want = ['bloom', 'grade', 'fxaa', 'sharpen', 'trilinear'];
+  check('hq expands', want.every((e) => s.effects.includes(e)) && s.err === 0, `effects=${JSON.stringify(s.effects)} err=${s.err}`);
+  const wfs = async () => JSON.parse(await ev('JSON.stringify({w: Module.se1Post.worldFrames, f: Module.se1Post.frames})'));
+  let w2 = await wfs();
+  for (let t = 0; t < 120 * TIMEOUT_SCALE && !(w2.w > 0); t++) { await sleep(250); w2 = await wfs(); }
+  check('hq: world chain runs', w2.w > 0 && (await st()).err === 0, `worldFrames=${w2.w} of ${w2.f}`);
+  const a3 = await grab();
+  check('hq: capture is a picture', !!a3 && a3.w === s.cw && a3.colors > 8, a3 ? `${a3.colors} colours` : 'null');
+
   // --- unknown effect name: warned, filtered out ---
   await send('Page.navigate', { url: q('post=fxaa,bogus') });
   s = await until((x) => x.frames > 60, 120000 * TIMEOUT_SCALE);

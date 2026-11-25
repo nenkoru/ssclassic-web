@@ -647,6 +647,7 @@
           case 42: c += 7; break;
           case 43: c += 30 + 4 * I[c + 29]; break;
           case 44: c += 2; break;
+          case 45: case 46: c += 5; break;                                    // WORLDEND marker (post chain: WebGL2 only)
           case 36: {                                                           // VSTREAMS (ptr len) x6
             var tot = 0, k;
             for (k = 0; k < 6; k++) { sb[k] = tot; tot += (I[c + 2 + 2 * k] + 15) & ~15; }
