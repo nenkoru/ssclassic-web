@@ -55,6 +55,9 @@ public:
   /* Create action packet for player target from oldest buffered action. */
   // (prepares lag info for given client number)
   void CreateActionPacket(CNetworkMessage *pnm, INDEX iClient);
+  // web port: the delta CreateActionPacket sends, with the time tag a client that doesn't own the
+  // player gets (0); llOwnerTag is the one the owner gets instead (Server.cpp MakeAllActions)
+  void CreateActionDelta(CPlayerAction &paDelta, __int64 &llOwnerTag);
   /* Advance action buffer by one tick by removing oldest action. */
   void AdvanceActionBuffer(void);
 };

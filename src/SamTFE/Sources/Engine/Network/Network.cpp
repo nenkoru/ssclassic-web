@@ -801,6 +801,23 @@ void CNetworkLibrary::Init(const CTString &strGameID)
   _pShell->DeclareSymbol("user FLOAT net_tmDisconnectTimeout;", (void *)&net_tmDisconnectTimeout);
   _pShell->DeclareSymbol("user INDEX net_bReportCRC;", (void *)&net_bReportCRC);
   _pShell->DeclareSymbol("user INDEX ser_iRememberBehind;", (void *)&ser_iRememberBehind);
+#ifdef __EMSCRIPTEN__
+  {  // web port: all-actions block sizes (Server.cpp NetStatsAllActions, notes/perf/players.md)
+    extern INDEX ser_bNetStats, ser_iStatPlayers, ser_iStatOwnRaw, ser_iStatOwnPacked, ser_iStatRemoteRaw, ser_iStatRemotePacked;
+    extern FLOAT ser_fStatPackUS, ser_fStatEncodeUS, ser_fStatCopyUS;
+    extern INDEX ser_iStatMismatch;
+    _pShell->DeclareSymbol("user FLOAT ser_fStatEncodeUS;", (void *)&ser_fStatEncodeUS);
+    _pShell->DeclareSymbol("user FLOAT ser_fStatCopyUS;", (void *)&ser_fStatCopyUS);
+    _pShell->DeclareSymbol("user INDEX ser_iStatMismatch;", (void *)&ser_iStatMismatch);
+    _pShell->DeclareSymbol("user INDEX ser_bNetStats;", (void *)&ser_bNetStats);
+    _pShell->DeclareSymbol("user INDEX ser_iStatPlayers;", (void *)&ser_iStatPlayers);
+    _pShell->DeclareSymbol("user INDEX ser_iStatOwnRaw;", (void *)&ser_iStatOwnRaw);
+    _pShell->DeclareSymbol("user INDEX ser_iStatOwnPacked;", (void *)&ser_iStatOwnPacked);
+    _pShell->DeclareSymbol("user INDEX ser_iStatRemoteRaw;", (void *)&ser_iStatRemoteRaw);
+    _pShell->DeclareSymbol("user INDEX ser_iStatRemotePacked;", (void *)&ser_iStatRemotePacked);
+    _pShell->DeclareSymbol("user FLOAT ser_fStatPackUS;", (void *)&ser_fStatPackUS);
+  }
+#endif
   _pShell->DeclareSymbol("user INDEX cli_bEmulateDesync;",  (void *)&cli_bEmulateDesync);
   _pShell->DeclareSymbol("user INDEX cli_bDumpSync;",       (void *)&cli_bDumpSync);
   _pShell->DeclareSymbol("user INDEX cli_bDumpSyncEachTick;", (void *)&cli_bDumpSyncEachTick);
