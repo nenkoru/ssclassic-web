@@ -90,6 +90,11 @@ struct GABatch {
 static int _iState = 0;      // 0: not initialised, 1: on, -1: unavailable (not WebGL2)
 static int _hNext = 1;
 static std::unordered_map<CModelData*, GAModel*> _models;
+// _models lookups of the last few model datas: a crowd draws a few models (and their attachments)
+// hundreds of times a frame; cleared whenever an entry leaves _models
+struct GAModelCache { CModelData *md; GAModel *pgm; };
+static GAModelCache _amcModels[16];
+static void ClearModelCache(void) { memset(_amcModels, 0, sizeof(_amcModels)); }
 static std::vector<GABatch> _batches;
 static INDEX _ctBatches = 0;  // used entries of _batches
 static INDEX _iLastBatch = -1;
@@ -141,6 +146,7 @@ void SE1_GpuAnim_Forget(CModelData *md)
   if (_iLastBatch >= 0 && _iLastBatch < _ctBatches && _batches[_iLastBatch].md == NULL) _iLastBatch = -1;
   auto it = _models.find(md);
   if (it == _models.end()) return;
+  ClearModelCache();
   if (it->second) FreeModel(it->second);
   _models.erase(it);
 }
@@ -159,7 +165,7 @@ static void Housekeeping(void)
   _blobs.resize(j);
   if ((iFrame & 63) == 0) {
     for (auto it = _models.begin(); it != _models.end(); ) {
-      if (iFrame - it->second->iLastUsed > GA_IDLE) { FreeModel(it->second); it = _models.erase(it); }
+      if (iFrame - it->second->iLastUsed > GA_IDLE) { ClearModelCache(); FreeModel(it->second); it = _models.erase(it); }
       else ++it;
     }
   }
@@ -361,8 +367,14 @@ BOOL GpuAnim_RenderModel(CModelObject &mo, CRenderModel &rm)
   CModelData *md = rm.rm_pmdModelData;
   const INDEX iMip = (INDEX)(rm.rm_pmmiMip - &md->md_MipInfos[0]);
   if (iMip < 0 || iMip >= MAX_MODELMIPS) return FALSE;
-  GAModel *&pgm = _models[md];
-  if (pgm == NULL) { pgm = new GAModel; memset(pgm, 0, sizeof(GAModel)); }
+  GAModelCache &mc = _amcModels[((size_t)md >> 4) & 15];
+  GAModel *pgm = mc.pgm;
+  if (mc.md != md) {
+    GAModel *&pgmMap = _models[md];
+    if (pgmMap == NULL) { pgmMap = new GAModel; memset(pgmMap, 0, sizeof(GAModel)); }
+    pgm = pgmMap;
+    mc.md = md; mc.pgm = pgm;
+  }
   pgm->iLastUsed = _pGfx->gl_iFrameNumber;
   if (!PrepareFrames(md, pgm)) return FALSE;
   GAMesh *pme = PrepareMesh(pgm, iMip, mmi);
