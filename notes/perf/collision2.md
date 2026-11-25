@@ -120,7 +120,7 @@ ClipMove inclusive share of the profile:
 | stress1000 | 29.1% | 44.2% | 37.5% |
 
 Check: `check r1: SAME simulation, 384 ticks` and `check new: SAME simulation, 384 ticks`
-(ref final hash 7d4eb99b). svtest, bottest and flowtest: see below.
+(ref final hash 7d4eb99b). svtest, bottest and flowtest all pass against the new build.
 
 ## Risks
 
