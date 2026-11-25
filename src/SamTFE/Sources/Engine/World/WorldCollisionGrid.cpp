@@ -20,6 +20,9 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <Engine/Templates/StaticStackArray.cpp>
 #include <Engine/Templates/AllocationArray.h>
 #include <Engine/Templates/AllocationArray.cpp>
+#ifdef __EMSCRIPTEN__
+#include <unordered_map>
+#endif
 
 #define DEBUG_COLLIDEWITHALL 0
 
@@ -126,7 +129,31 @@ class CGridEntry {
 public:
   CEntity *ge_penEntity;    // entity pointed to
   INDEX ge_iNextEntry;      // next entry in same cell
+#ifdef __EMSCRIPTEN__
+  INDEX ge_iObject;         // the entity's CGridObject
+#endif
 };
+
+#ifdef __EMSCRIPTEN__
+// web port perf: one compact record per entity in the grid, shared by all its entries. A search
+// visits ~110 entries for ~43 distinct entities in a stress500 crowd (each entity spans ~2x2 cells),
+// and the original deduplicates them by setting and clearing ENF_FOUNDINGRIDSEARCH in each entity,
+// a cache miss per entry. An entity occupies exactly the cells of its rectangle from BoxToGrid(), so
+// in the scan order (x outer, z inner) its first entry inside a searched rectangle is in the cell
+// (max(its min x, search min x), max(its min z, search min z)): taking an entity only there gives
+// the same entities in the same order without touching them. The box lets the collision query skip
+// entities whose box misses the movement box without touching them either.
+class CGridObject {
+public:
+  CEntity *go_penEntity;
+  FLOATaabbox3D go_box;     // the box last given to Add/MoveEntityInCollisionGrid (= ci_boxCurrent)
+  INDEX go_iMinX, go_iMinZ; // first cell of that box
+};
+static inline BOOL SameBox(const FLOATaabbox3D &box1, const FLOATaabbox3D &box2)
+{
+  return memcmp(&box1, &box2, sizeof(FLOATaabbox3D))==0;
+}
+#endif
 
 class CCollisionGrid {
 public:
@@ -147,6 +174,17 @@ public:
   void AddEntry(INDEX igc, CEntity *pen);
   // remove entry from a given cell
   void RemoveEntry(INDEX igc, CEntity *pen);
+#ifdef __EMSCRIPTEN__
+  CAllocationArray<CGridObject> cg_agoObjects;  // records of the entities in the grid
+  std::unordered_map<CEntity*, INDEX> cg_mapObjects; // entity -> its record
+  // set when the grid is used in a way that breaks the record invariants (an entity added twice,
+  // moved or removed with a box other than the one it was added with, an entry missing); the
+  // collision searches then use the original algorithm until the next Clear()
+  BOOL cg_bInconsistent;
+  INDEX cg_igoAdding;   // record for the entries AddEntry() creates
+  INDEX NewObject(CEntity *pen, const FLOATaabbox3D &box, INDEX iMinX, INDEX iMinZ);
+  INDEX GetObject(CEntity *pen, const FLOATaabbox3D &boxOld);
+#endif
 };
 
 
@@ -168,6 +206,13 @@ void CCollisionGrid::Clear(void)
   cg_aiFirstCells.Clear();
   cg_agcCells.Clear();
   cg_ageEntries.Clear();
+#ifdef __EMSCRIPTEN__
+  cg_agoObjects.Clear();
+  cg_agoObjects.SetAllocationStep(256);
+  cg_mapObjects.clear();
+  cg_bInconsistent = FALSE;
+  cg_igoAdding = -1;
+#endif
 
   cg_aiFirstCells.New(GRID_HASHTABLESIZE);
   cg_agcCells.SetAllocationStep(1024);
@@ -269,6 +314,9 @@ void CCollisionGrid::AddEntry(INDEX igc, CEntity *pen)
   // init the entry and link it in its cell
   GRID_CHANGED();
   ge.ge_penEntity = pen;
+#ifdef __EMSCRIPTEN__
+  ge.ge_iObject = cg_igoAdding;
+#endif
   CGridCell &gc = cg_agcCells[igc];
   ge.ge_iNextEntry = gc.gc_iFirstEntry;
   gc.gc_iFirstEntry = ige;
@@ -301,7 +349,45 @@ void CCollisionGrid::RemoveEntry(INDEX igc, CEntity *pen)
     pige = &ge.ge_iNextEntry;
   }
   ASSERT(FALSE);
+#ifdef __EMSCRIPTEN__
+  cg_bInconsistent = TRUE;
+#endif
 }
+
+#ifdef __EMSCRIPTEN__
+// make the record of an entity being added
+INDEX CCollisionGrid::NewObject(CEntity *pen, const FLOATaabbox3D &box, INDEX iMinX, INDEX iMinZ)
+{
+  GRID_CHANGED();
+  INDEX igo = cg_agoObjects.Allocate();
+  CGridObject &go = cg_agoObjects[igo];
+  go.go_penEntity = pen;
+  go.go_box = box;
+  go.go_iMinX = iMinX;
+  go.go_iMinZ = iMinZ;
+  std::pair<std::unordered_map<CEntity*, INDEX>::iterator, bool> res =
+    cg_mapObjects.insert(std::make_pair(pen, igo));
+  if (!res.second) {
+    // already in the grid
+    cg_bInconsistent = TRUE;
+    res.first->second = igo;
+  }
+  return igo;
+}
+// find the record of an entity in the grid, which must have the given box
+INDEX CCollisionGrid::GetObject(CEntity *pen, const FLOATaabbox3D &boxOld)
+{
+  std::unordered_map<CEntity*, INDEX>::iterator it = cg_mapObjects.find(pen);
+  if (it==cg_mapObjects.end()) {
+    cg_bInconsistent = TRUE;
+    return -1;
+  }
+  if (!SameBox(cg_agoObjects[it->second].go_box, boxOld)) {
+    cg_bInconsistent = TRUE;
+  }
+  return it->second;
+}
+#endif
 
 
 
@@ -330,6 +416,9 @@ void CWorld::AddEntityToCollisionGrid(CEntity *pen, const FLOATaabbox3D &boxEnti
   // find grid coordinates
   INDEX iMinX, iMaxX, iMinZ, iMaxZ;
   BoxToGrid(boxEntity, iMinX, iMaxX, iMinZ, iMaxZ);
+#ifdef __EMSCRIPTEN__
+  wo_pcgCollisionGrid->cg_igoAdding = wo_pcgCollisionGrid->NewObject(pen, boxEntity, iMinX, iMinZ);
+#endif
   // for each cell spanned by the entity
   for(INDEX iX=iMinX; iX<=iMaxX; iX++) {
     for(INDEX iZ=iMinZ; iZ<=iMaxZ; iZ++) {
@@ -350,6 +439,15 @@ void CWorld::RemoveEntityFromCollisionGrid(CEntity *pen, const FLOATaabbox3D &bo
   // find grid coordinates
   INDEX iMinX, iMaxX, iMinZ, iMaxZ;
   BoxToGrid(boxEntity, iMinX, iMaxX, iMinZ, iMaxZ);
+#ifdef __EMSCRIPTEN__
+  {CCollisionGrid *pcg = wo_pcgCollisionGrid;
+  INDEX igo = pcg->GetObject(pen, boxEntity);
+  if (igo>=0) {
+    GRID_CHANGED();
+    pcg->cg_agoObjects.Free(igo);
+    pcg->cg_mapObjects.erase(pen);
+  }}
+#endif
   // for each cell spanned by the entity
   for(INDEX iX=iMinX; iX<=iMaxX; iX++) {
     for(INDEX iZ=iMinZ; iZ<=iMaxZ; iZ++) {
@@ -360,6 +458,11 @@ void CWorld::RemoveEntityFromCollisionGrid(CEntity *pen, const FLOATaabbox3D &bo
       if (igc>=0) {
         wo_pcgCollisionGrid->RemoveEntry(igc, pen);
       }
+#ifdef __EMSCRIPTEN__
+      else {
+        wo_pcgCollisionGrid->cg_bInconsistent = TRUE;
+      }
+#endif
     }
   }
   _pfPhysicsProfile.StopTimer(CPhysicsProfile::PTI_REMENTITYFROMGRID);
@@ -376,6 +479,17 @@ void CWorld::MoveEntityInCollisionGrid(CEntity *pen,
   BoxToGrid(boxOld, iOldMinX, iOldMaxX, iOldMinZ, iOldMaxZ);
   INDEX iNewMinX, iNewMaxX, iNewMinZ, iNewMaxZ;
   BoxToGrid(boxNew, iNewMinX, iNewMaxX, iNewMinZ, iNewMaxZ);
+#ifdef __EMSCRIPTEN__
+  {CCollisionGrid *pcg = wo_pcgCollisionGrid;
+  INDEX igo = pcg->GetObject(pen, boxOld);
+  if (igo>=0) {
+    CGridObject &go = pcg->cg_agoObjects[igo];
+    go.go_box = boxNew;
+    go.go_iMinX = iNewMinX;
+    go.go_iMinZ = iNewMinZ;
+  }
+  pcg->cg_igoAdding = igo;}
+#endif
 
   // for each cell spanned by the entity before moving but not after moving
   {for(INDEX iX=iOldMinX; iX<=iOldMaxX; iX++) {
@@ -391,6 +505,11 @@ void CWorld::MoveEntityInCollisionGrid(CEntity *pen,
       if (igc>=0) {
         wo_pcgCollisionGrid->RemoveEntry(igc, pen);
       }
+#ifdef __EMSCRIPTEN__
+      else {
+        wo_pcgCollisionGrid->cg_bInconsistent = TRUE;
+      }
+#endif
     }
   }}
 
@@ -509,6 +628,77 @@ void CWorld::FindEntitiesNearBox(const FLOATaabbox3D &boxNear,
 }
 
 
+
+#ifdef __EMSCRIPTEN__
+// web port perf: the near entities for CClipMove::ClipMoveToModels(), which acts only on those whose
+// ci_boxCurrent touches its movement box (CClipMove::ClipMoveToModel() returns at once for the
+// others). In a stress500 crowd that is ~3 of the ~43 FindEntitiesNearBox() finds. Returns the same
+// entities in the same order as FindEntitiesNearBox() minus those that the box test in
+// ClipMoveToModel() rejects, tested on the records' copies of ci_boxCurrent (see CGridObject).
+// A movement retry (sliding, stairs) searches the same cells again, so the record list of the last
+// scan is kept while the grid doesn't change; the boxes are read anew each time.
+void SE1_FindEntitiesTouchingBox(CWorld *pwo, const FLOATaabbox3D &boxNear,
+  CStaticStackArray<CEntity*> &apenNearEntities)
+{
+  CCollisionGrid *pcg = pwo->wo_pcgCollisionGrid;
+  if (pcg->cg_bInconsistent) {
+    pwo->FindEntitiesNearBox(boxNear, apenNearEntities);
+    return;
+  }
+  _pfPhysicsProfile.StartTimer(CPhysicsProfile::PTI_FINDENTITIESNEARBOX);
+  _pfPhysicsProfile.IncrementCounter(CPhysicsProfile::PCI_FINDINGNEARENTITIES);
+
+  INDEX iMinX, iMaxX, iMinZ, iMaxZ;
+  BoxToGrid(boxNear, iMinX, iMaxX, iMinZ, iMaxZ);
+  apenNearEntities.PopAll();
+
+  static CStaticStackArray<INDEX> aigoLast;
+  static CCollisionGrid *pcgLast = NULL;
+  static ULONG ulLastChanges = 0;
+  static INDEX iLastMinX, iLastMaxX, iLastMinZ, iLastMaxZ;
+  if (!(pcgLast==pcg && ulLastChanges==_ulGridChanges
+    && iLastMinX==iMinX && iLastMaxX==iMaxX && iLastMinZ==iMinZ && iLastMaxZ==iMaxZ)) {
+    aigoLast.PopAll();
+    for(INDEX iX=iMinX; iX<=iMaxX; iX++) {
+      for(INDEX iZ=iMinZ; iZ<=iMaxZ; iZ++) {
+        INDEX igc = pcg->FindCell(iX, iZ, FALSE);
+        if (igc<0) {
+          continue;
+        }
+        for(INDEX iEntry = pcg->cg_agcCells[igc].gc_iFirstEntry; iEntry>=0;
+            iEntry = pcg->cg_ageEntries[iEntry].ge_iNextEntry) {
+          const CGridEntry &ge = pcg->cg_ageEntries[iEntry];
+          const CGridObject &go = pcg->cg_agoObjects[ge.ge_iObject];
+          if (Max(go.go_iMinX, iMinX)==iX && Max(go.go_iMinZ, iMinZ)==iZ) {
+            aigoLast.Push() = ge.ge_iObject;
+          }
+        }
+      }
+    }
+    pcgLast = pcg;
+    ulLastChanges = _ulGridChanges;
+    iLastMinX = iMinX; iLastMaxX = iMaxX; iLastMinZ = iMinZ; iLastMaxZ = iMaxZ;
+  }
+
+  // keep those whose box touches (the test in CClipMove::ClipMoveToModel())
+  const INDEX ct = aigoLast.Count();
+  for(INDEX i=0; i<ct; i++) {
+    const CGridObject &go = pcg->cg_agoObjects[aigoLast[i]];
+    const FLOATaabbox3D &boxModel = go.go_box;
+    if (
+      (boxNear.Min()(1)>boxModel.Max()(1)) ||
+      (boxNear.Max()(1)<boxModel.Min()(1)) ||
+      (boxNear.Min()(2)>boxModel.Max()(2)) ||
+      (boxNear.Max()(2)<boxModel.Min()(2)) ||
+      (boxNear.Min()(3)>boxModel.Max()(3)) ||
+      (boxNear.Max()(3)<boxModel.Min()(3))) {
+      continue;
+    }
+    apenNearEntities.Push() = go.go_penEntity;
+  }
+  _pfPhysicsProfile.StopTimer(CPhysicsProfile::PTI_FINDENTITIESNEARBOX);
+}
+#endif
 
 // get amount of memory used by this object
 extern SLONG GetCollisionGridMemory( CCollisionGrid *pcg)
