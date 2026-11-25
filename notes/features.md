@@ -112,5 +112,15 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
     `CWorkingPlane` field.
   - Shared hooks: a change counter on relation members (`Base/Relations.*`), a render-type change
     counter (`Entity.cpp`, `EntityCopying.cpp`) and sector temp flags (`Brush.h`, `BrushSector.cpp`).
+- **Players and GPU models (2026-11-25, round 2).**
+  - `players.md`: 256 players and computers in a game (`Network.h` `NET_MAXGAMEPLAYERS`, upstream
+    16). Saved games and demos with up to 16 players keep the old format (`SessionState.cpp`). Each
+    tick's actions are encoded once for all clients, and unreliable messages may be 16 KB in one
+    packet (`Server.cpp`, `PlayerBuffer.*`, `CPacket.h`, `ClientInterface.cpp`,
+    `CommunicationInterface.h`, `NetworkMessage.h`). `Entity.cpp` counts the slots in use, and
+    `Player.es` doesn't quicksave when a bot joins.
+  - `gpuanim.md`: plain opaque models are animated and instanced on the GPU (WebGL2;
+    `port/common/GpuAnim.cpp`, hooked from `RenderModel.cpp`; `?gpuanim=0` or `mdl_bGpuAnim=0`
+    turns it off). `CModelData::Clear` (`Model.cpp`) drops the model's GPU copy.
 
 Update this list when an engine change lands.
