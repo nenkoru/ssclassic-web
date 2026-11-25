@@ -37,6 +37,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <Engine/Templates/StaticStackArray.cpp>
 
 #include <algorithm>
+#include <functional>
 #include <unordered_map>
 #include <vector>
 
@@ -898,14 +899,284 @@ void CCastRay::TestWholeWorld(CWorld *pwoWorld)
   }}
 }
 
+#ifdef __EMSCRIPTEN__
+/////////////////////////////////////////////////////////////////////
+// Web port (perf, notes/perf/rays3.md). A TT_COLLISIONBOX cast (the enemies' IsVisibleCheckAll())
+// tests every model linked to every sector it visits: with thousands of monsters, thousands per
+// cast. Only models near the ray can take the hit, and the collision grid finds those without
+// touching the others. Exact (same hit entity, distance, polygon and sector, ties included):
+//  - TestModelCollisionBox() takes a model only at a sphere distance d with -testR < d < the hit
+//    distance, which only falls during a cast. The hit point is then on the segment from
+//    origin-testR to origin+hitDistance, within testR (plus rounding, bounded in rays3.md) of the
+//    model's ci_boxCurrent, which holds all its spheres and is the box the grid files it under.
+//  - Per model, the smallest such d (RayModelBoxBest(), the same arithmetic) decides the result:
+//    the sphere loop takes min(hit distance, those d's). Per sector the result is the first model
+//    in list order with the smallest best below the hit distance. The candidates are not in list
+//    order, so a sector where two models tie at the winning value runs the original loop.
+//  - The sector walk is unchanged: brush sectors, and brushes added in list order from the cached
+//    list (SectorBrushesAndTerrains()). A sector with a terrain runs the original loop (terrain and
+//    model tests interleave and both change the hit distance).
+//  - The grid query reaches only a few meters out at first (most of these casts hit a model there):
+//    it holds every model whose best is below that reach, so a sector with one of those is
+//    decided. A sector without one, while its hit distance is further, makes it reach further.
+
+extern BOOL SE1_FindEntitiesNearSegment(CWorld *pwo, const DOUBLE adO[3], const DOUBLE adDir[3],
+  DOUBLE dT0, DOUBLE dT1, DOUBLE dGrow, INDEX ctMaxCells, CStaticStackArray<CEntity*> &apenFound);
+extern INDEX SE1_CollisionGridRecordCount(CWorld *pwo);
+
+// a model that can take the hit of the current cast, once for each sector it is in
+struct RaySectorHit {
+  CBrushSector *rsh_pbsc;
+  CEntity *rsh_pen;
+  FLOAT rsh_fBest;   // see RayModelBoxBest()
+};
+static std::vector<RaySectorHit> _arshHits;   // sorted by sector
+static CStaticStackArray<CEntity*> _apenRayNear;
+
+// The smallest distance at which TestModelCollisionBox() takes penModel, whatever the hit distance
+// (FALSE: none). The same arithmetic as there, on the same values, so the same floats: that loop
+// takes each qualifying sphere distance below the running hit distance, which ends at the minimum
+// of the hit distance and those distances, and NaN distances qualify in neither.
+static BOOL RayModelBoxBest(const CCastRay &cr, CEntity *penModel, FLOAT &fBest)
+{
+  CCollisionInfo *pci = penModel->en_pciCollisionInfo;
+  if (pci==NULL) {
+    return FALSE;
+  }
+  FLOATaabbox3D &boxModel = pci->ci_boxCurrent;
+  FLOAT fSphereRadius = boxModel.Size().Length()/2.0f;
+  FLOAT3D vSphereCenter = boxModel.Center();
+  FLOAT fSphereHitDistance;
+  if (!RayHitsSphere(cr.cr_vOrigin, cr.cr_vTarget,
+    vSphereCenter, fSphereRadius+cr.cr_fTestR, fSphereHitDistance) ) {
+    return FALSE;
+  }
+  CStaticArray<CMovingSphere> &ams = pci->ci_absSpheres;
+  const FLOAT3D &vPosition = penModel->en_plPlacement.pl_PositionVector;
+  const FLOATmatrix3D &mRotation = penModel->en_mRotation;
+  BOOL bFound = FALSE;
+  FOREACHINSTATICARRAY(ams, CMovingSphere, itms) {
+    FLOAT3D vCenter = itms->ms_vCenter*mRotation + vPosition;
+    FLOAT fOneSphereHitDistance;
+    if (RayHitsSphere(cr.cr_vOrigin, cr.cr_vTarget,
+      vCenter, itms->ms_fR+cr.cr_fTestR, fOneSphereHitDistance) &&
+      fOneSphereHitDistance>-cr.cr_fTestR && (!bFound || fOneSphereHitDistance<fBest)) {
+      fBest = fOneSphereHitDistance;
+      bFound = TRUE;
+    }
+  }
+  return bFound;
+}
+
+// Does the sector loop in TestThroughSectors() call TestModelCollisionBox() for pen (TT_COLLISIONBOX)?
+// The gates of that loop, then of TestModel() or TestSkaModel().
+static BOOL RayTestsModelBox(const CCastRay &cr, CEntity *pen)
+{
+  if (pen==cr.cr_penOrigin || pen==cr.cr_penIgnore) {
+    return FALSE;
+  }
+  if (pen->en_ulFlags&ENF_SEETHROUGH) {
+    return FALSE;
+  }
+  const BOOL bModel = pen->en_RenderType==CEntity::RT_MODEL
+    || (pen->en_RenderType==CEntity::RT_EDITORMODEL && _wrpWorldRenderPrefs.IsEditorModelsOn());
+  const BOOL bSka = pen->en_RenderType==CEntity::RT_SKAMODEL
+    || (pen->en_RenderType==CEntity::RT_SKAEDITORMODEL && _wrpWorldRenderPrefs.IsEditorModelsOn());
+  if (!bModel && !bSka) {
+    return FALSE;
+  }
+  if (cr.cr_penOrigin!=NULL && cr.cr_penOrigin->IsPredictor() && pen->IsPredicted()) {
+    return FALSE;
+  }
+  if (pen->en_ulFlags&ENF_HIDDEN) {
+    return FALSE;
+  }
+  if (bModel && pen->en_pmoModelObject==NULL) {
+    return FALSE;
+  }
+  return TRUE;
+}
+
+static bool RaySectorHitLess(const RaySectorHit &a, const RaySectorHit &b)
+{
+  return std::less<CBrushSector *>()(a.rsh_pbsc, b.rsh_pbsc);
+}
+
+// Fill _arshHits with every model whose best is below fUpTo (<= the hit distance) and the hit
+// distance, and that the loop would test. FALSE: the grid can't be used for it.
+static BOOL PrepareRayModelHits(CCastRay &cr, FLOAT fUpTo)
+{
+  _arshHits.clear();
+  CWorld *pwo = cr.cr_penOrigin->en_pwoWorld;
+  if (pwo==NULL) {
+    return FALSE;
+  }
+  const FLOAT fH = cr.cr_fHitDistance, fR = cr.cr_fTestR;
+  if (!(fH>0.0f && fH<5000.0f && fR>=0.0f && fR<100.0f && fUpTo>0.0f && fUpTo<=fH)) {
+    return FALSE;
+  }
+  DOUBLE adO[3], adDir[3];
+  DOUBLE dLen2 = 0, dCoordMax = 0;
+  for (INDEX i=0; i<3; i++) {
+    adO[i] = cr.cr_vOrigin(i+1);
+    adDir[i] = DOUBLE(cr.cr_vTarget(i+1))-adO[i];
+    dLen2 += adDir[i]*adDir[i];
+    dCoordMax = Max(dCoordMax, Max(Abs(adO[i]), Abs(DOUBLE(cr.cr_vTarget(i+1)))));
+  }
+  const DOUBLE dLen = sqrt(dLen2);
+  if (!(dLen>=1.0 && dLen<1e5 && dCoordMax<5e4)) {
+    return FALSE;
+  }
+  for (INDEX i=0; i<3; i++) {
+    adDir[i] /= dLen;
+  }
+  // how far a hit point can be from the exact line and box (rays3.md, "Rounding"): the root of the
+  // sphere test (cancellation in the discriminant: < 0.004*(hit distance+testR) + 1e-5*radius),
+  // the float sphere centers (~1e-7*coordinates) and the float direction of the ray over the hit
+  // distance; each with a margin of several times its bound. A model whose best is below fUpTo has
+  // its hit point within fUpTo of the origin, so fUpTo stands for the hit distance in each.
+  const DOUBLE dH = fUpTo, dR = fR;
+  const DOUBLE dMargin = 0.1+0.01*(dH+dR)+1e-6*dCoordMax+1e-6*(dCoordMax+dH+dR)*(dH+dR+1.0)/dLen;
+  // with more cells than this the original walk is cheaper (it reads each model once)
+  const INDEX ctMaxCells = 64+SE1_CollisionGridRecordCount(pwo)/2;
+  CStaticStackArray<CEntity*> &apenNear = _apenRayNear;
+  if (!SE1_FindEntitiesNearSegment(pwo, adO, adDir, -dR, dH, dR+dMargin, ctMaxCells, apenNear)) {
+    return FALSE;
+  }
+  for (INDEX i=0; i<apenNear.Count(); i++) {
+    CEntity *pen = apenNear[i];
+    if (!RayTestsModelBox(cr, pen)) {
+      continue;
+    }
+    FLOAT fBest;
+    if (!RayModelBoxBest(cr, pen, fBest) || !(fBest<fH)) {
+      continue;
+    }
+    {FOREACHSRCOFDST(pen->en_rdSectors, CBrushSector, bsc_rsEntities, pbsc)
+      RaySectorHit rsh;
+      rsh.rsh_pbsc = pbsc;
+      rsh.rsh_pen = pen;
+      rsh.rsh_fBest = fBest;
+      _arshHits.push_back(rsh);
+    ENDFOR}
+  }
+  if (_arshHits.size()>1) {
+    std::sort(_arshHits.begin(), _arshHits.end(), RaySectorHitLess);
+  }
+  return TRUE;
+}
+
+// What TestSectorModelHits() did.
+enum RayHitsResult {
+  RHR_LOOP,   // nothing: the caller runs the original loop
+  RHR_DONE,   // the sector is done
+  RHR_MORE,   // nothing: _arshHits doesn't reach far enough for this sector (see below)
+};
+
+// The sector loop of TestThroughSectors() for TT_COLLISIONBOX, with the models from _arshHits
+// (every model with a best below fUpTo, see PrepareRayModelHits()) and the brushes from the cached
+// list. A model with a best below fUpTo decides the sector; without one, a hit distance above
+// fUpTo leaves models it doesn't know about, and the caller fills _arshHits further.
+static RayHitsResult TestSectorModelHits(CCastRay &cr, CBrushSector *pbsc, FLOAT fUpTo)
+{
+  const std::vector<CEntity *> &apen = SectorBrushesAndTerrains(pbsc);
+  for (size_t ien=0; ien<apen.size(); ien++) {
+    if (apen[ien]->en_RenderType==CEntity::RT_TERRAIN) {
+      return RHR_LOOP;
+    }
+  }
+  // the first model in list order with the smallest best below the hit distance; with two
+  // different ones at that value the order decides, which only the loop knows
+  CEntity *penWin = NULL;
+  FLOAT fWin = cr.cr_fHitDistance;
+  BOOL bTie = FALSE;
+  if (!_arshHits.empty()) {
+    RaySectorHit rshKey;
+    rshKey.rsh_pbsc = pbsc;
+    std::vector<RaySectorHit>::const_iterator it =
+      std::lower_bound(_arshHits.begin(), _arshHits.end(), rshKey, RaySectorHitLess);
+    for (; it!=_arshHits.end() && it->rsh_pbsc==pbsc; ++it) {
+      if (it->rsh_fBest<fWin) {
+        fWin = it->rsh_fBest;
+        penWin = it->rsh_pen;
+        bTie = FALSE;
+      } else if (penWin!=NULL && it->rsh_fBest==fWin && it->rsh_pen!=penWin) {
+        bTie = TRUE;
+      }
+    }
+  }
+  if (penWin==NULL || !(fWin<fUpTo)) {
+    // a model not in _arshHits may have a best below the hit distance (and below fWin)
+    if (cr.cr_fHitDistance>fUpTo) {
+      return RHR_MORE;
+    }
+    // (fUpTo >= the hit distance > fWin: this is only penWin==NULL)
+  }
+  if (bTie) {
+    return RHR_LOOP;
+  }
+  if (penWin!=NULL) {
+    cr.cr_fHitDistance = fWin;
+    cr.cr_penHit = penWin;
+    cr.cr_pbscBrushSector = NULL;
+    cr.cr_pbpoBrushPolygon = NULL;
+  }
+  // the brushes, in list order
+  for (size_t ien=0; ien<apen.size(); ien++) {
+    CEntity *pen = apen[ien];
+    if (pen==cr.cr_penOrigin || pen==cr.cr_penIgnore) {
+      continue;
+    }
+    if (pen->en_RenderType==CEntity::RT_BRUSH && !(pen->en_ulFlags&ENF_HIDDEN)) {
+      cr.AddAllSectorsOfBrush(pen->en_pbrBrush);
+    }
+  }
+  return RHR_DONE;
+}
+
+// how far the first PrepareRayModelHits() of a cast reaches, and by how much each next one grows:
+// most of these casts hit a model a few meters out
+#define RAYHITS_FIRST 4.0f
+#define RAYHITS_GROW  4.0f
+
+#endif  // __EMSCRIPTEN__
+
 /* Test active sectors recusively. */
 void CCastRay::TestThroughSectors(void)
 {
+#ifdef __EMSCRIPTEN__
+  // web port: the models a collision box cast can hit, from the collision grid (see above), first
+  // those with a hit nearer than fUpTo, then further when a sector needs it
+  BOOL bModelHits = FALSE;
+  FLOAT fUpTo = 0.0f;
+  if (cr_ttHitModels==TT_COLLISIONBOX) {
+    fUpTo = cr_fHitDistance<2.0f*RAYHITS_FIRST ? cr_fHitDistance : RAYHITS_FIRST;
+    bModelHits = PrepareRayModelHits(*this, fUpTo);
+  }
+#endif
   // for each active sector (sectors are added during iteration!)
   for(INDEX ias=0; ias<_aas.Count(); ias++) {
     CBrushSector *pbsc = _aas[ias].as_pbsc;
     // test the ray against the sector
     TestBrushSector(pbsc);
+
+#ifdef __EMSCRIPTEN__
+    // web port: the models from the grid (see above)
+    if (bModelHits) {
+      RayHitsResult rhr;
+      while ((rhr = TestSectorModelHits(*this, pbsc, fUpTo))==RHR_MORE) {
+        fUpTo = fUpTo*RAYHITS_GROW<0.5f*cr_fHitDistance ? fUpTo*RAYHITS_GROW : cr_fHitDistance;
+        if (!PrepareRayModelHits(*this, fUpTo)) {
+          // the original loop from here on (it gives the same result in any sector)
+          bModelHits = FALSE;
+          break;
+        }
+      }
+      if (rhr==RHR_DONE) {
+        continue;
+      }
+    }
+#endif
 
     // web port: a brushes-only cast does something only for brush and terrain entities, the same
     // as the loop below does for them, in the same order (see the top of the file)

@@ -22,6 +22,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <Engine/Templates/AllocationArray.cpp>
 #ifdef __EMSCRIPTEN__
 #include <unordered_map>
+#include <vector>
+#include <algorithm>
 #endif
 
 #define DEBUG_COLLIDEWITHALL 0
@@ -712,6 +714,128 @@ void SE1_FindEntitiesTouchingBox(CWorld *pwo, const FLOATaabbox3D &boxNear,
     apenNearEntities.Push() = go.go_penEntity;
   }
   _pfPhysicsProfile.StopTimer(CPhysicsProfile::PTI_FINDENTITIESNEARBOX);
+}
+
+// web port perf (notes/perf/rays3.md): how many entities the grid holds
+INDEX SE1_CollisionGridRecordCount(CWorld *pwo)
+{
+  CCollisionGrid *pcg = pwo->wo_pcgCollisionGrid;
+  return pcg==NULL ? 0 : (INDEX)pcg->cg_mapObjects.size();
+}
+
+// web port perf (notes/perf/rays3.md): the entities in the grid whose box, grown by dGrow on every
+// side, meets the segment X(t) = adO + t*adDir, t in [dT0, dT1] (double). Each once, in no
+// particular order. A point of a box lies in a cell the entity occupies (BoxToGrid() spans
+// floor(min/cell) .. ceil(max/cell)), and a point within dGrow of the segment in x and z lies in a
+// column of cells this scans; per column only the z range the grown segment covers in that column's
+// x slab is scanned, so a long diagonal ray scans a thin band of cells, not its bounding rectangle.
+// Returns FALSE (and nothing) if the grid can't answer: its records are inconsistent, or the scan
+// would visit more than ctMaxCells cells. The caller then does what it would do without the grid.
+BOOL SE1_FindEntitiesNearSegment(CWorld *pwo, const DOUBLE adO[3], const DOUBLE adDir[3],
+  DOUBLE dT0, DOUBLE dT1, DOUBLE dGrow, INDEX ctMaxCells, CStaticStackArray<CEntity*> &apenFound)
+{
+  apenFound.PopAll();
+  CCollisionGrid *pcg = pwo->wo_pcgCollisionGrid;
+  if (pcg==NULL || pcg->cg_bInconsistent || !(dT0<=dT1) || !(dGrow>=0)) {
+    return FALSE;
+  }
+  const DOUBLE dLimit = (GRID_MAX-2)*GRID_CELLSIZE;
+  const DOUBLE dX0 = adO[0]+dT0*adDir[0], dX1 = adO[0]+dT1*adDir[0];
+  const DOUBLE dZ0 = adO[2]+dT0*adDir[2], dZ1 = adO[2]+dT1*adDir[2];
+  // a little more than dGrow, so that rounding in the slab arithmetic can only add cells
+  const DOUBLE dG = dGrow*(1.0+1e-9)+1e-6;
+  const DOUBLE dXLo = Min(dX0, dX1)-dG, dXHi = Max(dX0, dX1)+dG;
+  const DOUBLE dZLo = Min(dZ0, dZ1)-dG, dZHi = Max(dZ0, dZ1)+dG;
+  if (!(dXLo>-dLimit && dXHi<dLimit && dZLo>-dLimit && dZHi<dLimit)) {
+    return FALSE;   // (also catches NaN)
+  }
+  const INDEX iX0 = INDEX(floor(dXLo/GRID_CELLSIZE)), iX1 = INDEX(floor(dXHi/GRID_CELLSIZE));
+  // z cells of each column: those that a point within dG of the segment, with x in the column, can be in
+  static CStaticStackArray<INDEX> aiZ;
+  aiZ.PopAll();
+  INDEX ctCells = 0;
+  const BOOL bAlongZ = Abs(adDir[0])<1e-12;
+  for (INDEX iX=iX0; iX<=iX1; iX++) {
+    DOUBLE dTa = dT0, dTb = dT1;
+    if (!bAlongZ) {
+      const DOUBLE dTs = (iX*GRID_CELLSIZE-dG-adO[0])/adDir[0];
+      const DOUBLE dTe = ((iX+1)*GRID_CELLSIZE+dG-adO[0])/adDir[0];
+      dTa = Max(dT0, Min(dTs, dTe));
+      dTb = Min(dT1, Max(dTs, dTe));
+      // the slab arithmetic can round a touching column to empty; keep it as a point then
+      if (dTa>dTb) {
+        dTa = dTb = (dTa+dTb)*0.5;
+      }
+    }
+    const DOUBLE dZa = adO[2]+dTa*adDir[2], dZb = adO[2]+dTb*adDir[2];
+    const INDEX iZa = INDEX(floor((Min(dZa, dZb)-dG)/GRID_CELLSIZE));
+    const INDEX iZb = INDEX(floor((Max(dZa, dZb)+dG)/GRID_CELLSIZE));
+    aiZ.Push() = iZa;
+    aiZ.Push() = iZb;
+    ctCells += iZb-iZa+1;
+    if (ctCells>ctMaxCells) {
+      return FALSE;
+    }
+  }
+
+  // each record once: a stamp per record index
+  static std::vector<ULONG> aulStamp;
+  static ULONG ulStamp = 0;
+  // (the pool size: CAllocationArray::Count() is the number in use, and indices go past it)
+  const INDEX ctRecords = pcg->cg_agoObjects.sa_Count;
+  if ((INDEX)aulStamp.size()<ctRecords) {
+    aulStamp.resize(ctRecords+256, 0);
+  }
+  if (++ulStamp==0) {
+    std::fill(aulStamp.begin(), aulStamp.end(), 0);
+    ulStamp = 1;
+  }
+  static CStaticStackArray<INDEX> aigo;
+  aigo.PopAll();
+  for (INDEX iX=iX0; iX<=iX1; iX++) {
+    const INDEX iZa = aiZ[2*(iX-iX0)], iZb = aiZ[2*(iX-iX0)+1];
+    for (INDEX iZ=iZa; iZ<=iZb; iZ++) {
+      const INDEX igc = pcg->FindCell(iX, iZ, FALSE);
+      if (igc<0) {
+        continue;
+      }
+      for (INDEX iEntry = pcg->cg_agcCells[igc].gc_iFirstEntry; iEntry>=0;
+          iEntry = pcg->cg_ageEntries[iEntry].ge_iNextEntry) {
+        const INDEX igo = pcg->cg_ageEntries[iEntry].ge_iObject;
+        if (aulStamp[igo]!=ulStamp) {
+          aulStamp[igo] = ulStamp;
+          aigo.Push() = igo;
+        }
+      }
+    }
+  }
+
+  // keep those whose grown box meets the segment (slab test, in double, with the margin dG)
+  for (INDEX i=0; i<aigo.Count(); i++) {
+    const CGridObject &go = pcg->cg_agoObjects[aigo[i]];
+    DOUBLE dTa = dT0, dTb = dT1;
+    INDEX iAxis = 0;
+    for (; iAxis<3; iAxis++) {
+      const DOUBLE dLo = DOUBLE(go.go_box.Min()(iAxis+1))-dG;
+      const DOUBLE dHi = DOUBLE(go.go_box.Max()(iAxis+1))+dG;
+      const DOUBLE dO = adO[iAxis], dD = adDir[iAxis];
+      if (Abs(dD)<1e-12) {
+        // (nearly) parallel: the coordinate changes by at most 1e-12*|t| along the segment
+        const DOUBLE dSlack = 1e-12*Max(Abs(dT0), Abs(dT1));
+        if (!(dO+dSlack>=dLo && dO-dSlack<=dHi)) break;
+        continue;
+      }
+      const DOUBLE dTs = (dLo-dO)/dD, dTe = (dHi-dO)/dD;
+      dTa = Max(dTa, Min(dTs, dTe));
+      dTb = Min(dTb, Max(dTs, dTe));
+      // (a relative slack for the division: keeps boxes the segment just touches)
+      if (!(dTa<=dTb+1e-9*(1.0+Abs(dTb)))) break;
+    }
+    if (iAxis==3) {
+      apenFound.Push() = go.go_penEntity;
+    }
+  }
+  return TRUE;
 }
 #endif
 
