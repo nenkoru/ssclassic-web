@@ -2442,6 +2442,11 @@ void CLayerMixer::MixOneMipmap(CBrushShadowMap *pbsm, INDEX iMipmap)
       }}
     }
   } // set initial color
+#ifdef __EMSCRIPTEN__
+  // baked indirect light (port/common/Se1GI.cpp) may scale the sector ambient down
+  extern void SE1GI_AdjustAmbient(CBrushPolygon *pbpo, COLOR &colAmbient);
+  if( !bDynamicOnly) SE1GI_AdjustAmbient( lm_pbpoPolygon, colAmbient);
+#endif
 
 #if (defined __MSVC_INLINE__) && (defined  PLATFORM_32BIT) 
   __asm {
@@ -2541,6 +2546,13 @@ void CLayerMixer::MixOneMipmap(CBrushShadowMap *pbsm, INDEX iMipmap)
       }
     }
   }}
+
+#ifdef __EMSCRIPTEN__
+  // baked indirect light (port/common/Se1GI.cpp)
+  extern void SE1GI_AddIndirect(CBrushShadowMap *pbsm, INDEX iMip, ULONG *pul, PIX pixSizeU, PIX pixSizeV, PIX pixCanvasU);
+  if( !bDynamicOnly) SE1GI_AddIndirect( lm_pbsmShadowMap, lm_iMipLevel, lm_pulShadowMap,
+                                        lm_pixPolygonSizeU, lm_pixPolygonSizeV, lm_pixCanvasSizeU);
+#endif
 
   // if gradient is dark, substract gradient
   if( bHasGradient && gpGradient.gp_bDark) AddOneLayerGradient( gpGradient);

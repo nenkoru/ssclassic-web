@@ -920,6 +920,9 @@ ENGINE_API void SE_InitEngine(CTString strGameID)
   extern INDEX fil_bPreferZips;
   extern FLOAT mth_fCSGEpsilon;
   _pShell->DeclareSymbol("user INDEX con_bNoWarnings;", (void *) &con_bNoWarnings);
+#ifdef __EMSCRIPTEN__
+  { extern void SE1GI_DeclareSymbols(void); SE1GI_DeclareSymbols(); }  // port/common/Se1GI.cpp
+#endif
   _pShell->DeclareSymbol("user INDEX wld_bFastObjectOptimization;", (void *) &wld_bFastObjectOptimization);
   _pShell->DeclareSymbol("user FLOAT mth_fCSGEpsilon;", (void *) &mth_fCSGEpsilon);
   _pShell->DeclareSymbol("persistent user INDEX fil_bPreferZips;", (void *) &fil_bPreferZips);
