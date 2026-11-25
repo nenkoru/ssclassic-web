@@ -645,9 +645,54 @@ void CClipMove::ClipMoveToBrushPolygon(CBrushPolygon *pbpoPolygon)
 /*
  * Project spheres of moving entity to standing entity space.
  */
+#if defined(__EMSCRIPTEN__) && defined(__wasm_simd128__)
+static_assert(sizeof(CMovingSphere)==16*sizeof(FLOAT), "CMovingSphere layout");
+#endif
 void CClipMove::ProjectASpheresToB(void)
 {
   _pfPhysicsProfile.StartTimer(CPhysicsProfile::PTI_PROJECTASPHERESTOB);
+#if defined(__EMSCRIPTEN__) && defined(__wasm_simd128__)
+  // web port perf (round 3): at stress4000 every ClipMove projects the mover's spheres for ~13
+  // neighbours. The same IEEE single precision operations per lane, in the same order as the
+  // scalar code: Vector*Matrix is row i = (m(i,1)*x + m(i,2)*y) + m(i,3)*z, then + the offset;
+  // the box takes Min(a,b) = a>b ? b : a and Max(a,b) = a<b ? b : a per axis (wasm pmin/pmax),
+  // then Expand() adds the radius to the max and subtracts it from the min. A CMovingSphere is
+  // 16 floats (centre, R, centre 0, centre 1, box min, box max); each 4-lane store's spare lane
+  // lands on the next field, which the next store then overwrites, and the last store ends at the
+  // struct's last float.
+  {
+    const FLOATmatrix3D &m0 = cm_mAToB0, &m1 = cm_mAToB1;
+    const v128_t vC01 = wasm_f32x4_make(m0(1,1), m0(2,1), m0(3,1), 0.0f);
+    const v128_t vC02 = wasm_f32x4_make(m0(1,2), m0(2,2), m0(3,2), 0.0f);
+    const v128_t vC03 = wasm_f32x4_make(m0(1,3), m0(2,3), m0(3,3), 0.0f);
+    const v128_t vT0  = wasm_f32x4_make(cm_vAToB0(1), cm_vAToB0(2), cm_vAToB0(3), 0.0f);
+    const v128_t vC11 = wasm_f32x4_make(m1(1,1), m1(2,1), m1(3,1), 0.0f);
+    const v128_t vC12 = wasm_f32x4_make(m1(1,2), m1(2,2), m1(3,2), 0.0f);
+    const v128_t vC13 = wasm_f32x4_make(m1(1,3), m1(2,3), m1(3,3), 0.0f);
+    const v128_t vT1  = wasm_f32x4_make(cm_vAToB1(1), cm_vAToB1(2), cm_vAToB1(3), 0.0f);
+    const INDEX ct = cm_pamsA->Count();
+    CMovingSphere *pms = ct>0 ? &(*cm_pamsA)[0] : NULL;
+    for (INDEX i=0; i<ct; i++) {
+      FLOAT *pf = (FLOAT *)&pms[i];
+      const v128_t vX = wasm_f32x4_splat(pf[0]);
+      const v128_t vY = wasm_f32x4_splat(pf[1]);
+      const v128_t vZ = wasm_f32x4_splat(pf[2]);
+      const v128_t vR = wasm_f32x4_splat(pf[3]);
+      const v128_t vP0 = wasm_f32x4_add(wasm_f32x4_add(wasm_f32x4_add(
+        wasm_f32x4_mul(vC01, vX), wasm_f32x4_mul(vC02, vY)), wasm_f32x4_mul(vC03, vZ)), vT0);
+      const v128_t vP1 = wasm_f32x4_add(wasm_f32x4_add(wasm_f32x4_add(
+        wasm_f32x4_mul(vC11, vX), wasm_f32x4_mul(vC12, vY)), wasm_f32x4_mul(vC13, vZ)), vT1);
+      const v128_t vMin = wasm_f32x4_sub(wasm_f32x4_pmin(vP0, vP1), vR);
+      const v128_t vMax = wasm_f32x4_add(wasm_f32x4_pmax(vP0, vP1), vR);
+      wasm_v128_store(pf+4, vP0);    // ms_vRelativeCenter0 (lane 3 -> centre 1 x)
+      wasm_v128_store(pf+7, vP1);    // ms_vRelativeCenter1 (lane 3 -> box min x)
+      wasm_v128_store(pf+10, vMin);  // box min (lane 3 -> box max x)
+      wasm_v128_store(pf+12, wasm_i32x4_shuffle(vMin, vMax, 2, 4, 5, 6)); // min z, box max
+    }
+  }
+  _pfPhysicsProfile.StopTimer(CPhysicsProfile::PTI_PROJECTASPHERESTOB);
+  return;
+#endif
   // for each sphere
   FOREACHINSTATICARRAY(*cm_pamsA, CMovingSphere, itmsA) {
     // project it in start point

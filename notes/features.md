@@ -132,6 +132,7 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
     arrays (and the GPU copy) when a model's data changes.
   - `collision3.md`: the SIMD pre-test in `WorldCollision.cpp` also rejects pairs that already
     overlap, as the scalar test does; `WorldCollisionGrid.cpp` doesn't scan the last row and column
-    when they hold only records that the box test rejects.
+    when they hold only records that the box test rejects, and box-tests the records without
+    branches; `ProjectASpheresToB()` (`WorldCollision.cpp`) runs in wasm SIMD.
 
 Update this list when an engine change lands.

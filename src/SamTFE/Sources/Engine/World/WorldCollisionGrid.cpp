@@ -22,6 +22,9 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <Engine/Templates/AllocationArray.cpp>
 #ifdef __EMSCRIPTEN__
 #include <unordered_map>
+#if defined(__EMSCRIPTEN__) && defined(__wasm_simd128__)
+#include <wasm_simd128.h>
+#endif
 #endif
 
 #define DEBUG_COLLIDEWITHALL 0
@@ -697,6 +700,36 @@ void SE1_FindEntitiesTouchingBox(CWorld *pwo, const FLOATaabbox3D &boxNear,
 
   // keep those whose box touches (the test in CClipMove::ClipMoveToModel())
   const INDEX ct = aigoLast.Count();
+#if defined(__wasm_simd128__)
+  // Round 3: at stress4000 every search box-tests ~112 records to keep ~14, and the scalar test's
+  // six data-dependent branches mispredict. The same six float comparisons, branch-free: a box is
+  // (min x, y, z, max x, y, z) in memory, loaded as [mnx mny mnz mxx] and [mnz mxx mxy mxz]. A lane
+  // that holds NaN in the query vector compares false, as an unused test would. "a > b" is
+  // computed as "b < a", which is the same IEEE comparison (false for NaN as well).
+  {
+    const FLOAT fNaN = __builtin_nanf("");
+    const FLOAT *pfQ = &boxNear.Min()(1);
+    // reject when the query's max < the box's min (x, y, z) ...
+    const v128_t vQMax = wasm_f32x4_make(pfQ[3], pfQ[4], pfQ[5], fNaN);
+    // ... or the box's max x < the query's min x (lane 3 of the first load) ...
+    const v128_t vQMinX = wasm_f32x4_make(fNaN, fNaN, fNaN, pfQ[0]);
+    // ... or the box's max y, z < the query's min y, z (lanes 2, 3 of the second load)
+    const v128_t vQMinYZ = wasm_f32x4_make(fNaN, fNaN, pfQ[1], pfQ[2]);
+    for(INDEX i=0; i<ct; i++) {
+      const CGridObject &go = pcg->cg_agoObjects[aigoLast[i]];
+      const FLOAT *pfB = &go.go_box.Min()(1);
+      const v128_t v0 = wasm_v128_load(pfB);
+      const v128_t v1 = wasm_v128_load(pfB+2);
+      const v128_t vOut = wasm_v128_or(wasm_v128_or(
+        wasm_f32x4_lt(vQMax, v0), wasm_f32x4_lt(v0, vQMinX)), wasm_f32x4_lt(v1, vQMinYZ));
+      if (wasm_v128_any_true(vOut)) {
+        continue;
+      }
+      apenNearEntities.Push() = go.go_penEntity;
+    }
+  }
+  if (0)
+#endif
   for(INDEX i=0; i<ct; i++) {
     const CGridObject &go = pcg->cg_agoObjects[aigoLast[i]];
     const FLOATaabbox3D &boxModel = go.go_box;

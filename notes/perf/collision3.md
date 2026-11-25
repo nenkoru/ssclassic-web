@@ -44,6 +44,32 @@ scan at `floor(max/cell)` on x and z. The entities it returns, and their order, 
 - Verify build (stress4000): 1,048,576 queries, 0 mismatches, 6.47 cells per query before and
   2.42 after.
 
+## 3. The grid's box test without branches (WorldCollisionGrid.cpp)
+
+Counters at stress4000, per search: 28% of the searches scan cells (the others reuse the last
+scan's record list, round 2), 2.5 cells and 167 entries per scan, and every search box-tests
+112 records to keep 14 (13 after the mover itself). The scalar test has six data-dependent
+branches that mispredict. It is now the same six float comparisons on two 4-lane loads of the
+box, `(min x, y, z, max x)` and `(min z, max x, y, z)`, with NaN in the query lanes that have no
+test, so they compare false.
+
+- Verify build (stress4000): 167,772,160 box tests, 0 mismatches against the scalar test.
+
+## 4. ProjectASpheresToB() in SIMD (WorldCollision.cpp)
+
+Each pair a ClipMove tests projects the mover's spheres into the other entity's space at the
+start and the end of the move, and boxes the path. That was 11.3% self at stress4000. The SIMD
+version does the scalar code's operations per lane in its order: `Vector*Matrix` row i is
+`(m(i,1)*x + m(i,2)*y) + m(i,3)*z`, then the offset is added. `Min`/`Max` are the template's
+`a>b ? b : a` and `a<b ? b : a`, which are wasm `pmin`/`pmax`. `Expand()` adds R to the max and
+subtracts it from the min. The web build doesn't use `-ffast-math`, and wasm has no fused
+multiply-add, so the scalar code isn't contracted either. A `CMovingSphere` is 16 floats
+(`static_assert`); each 4-lane store's spare lane lands on the next field, which the next store
+overwrites.
+
+- Verify build (stress4000): 81,423,885 projections, 0 byte mismatches in the two centres and
+  the box.
+
 ## Results
 
 perfbench `--check` (demo: SAME simulation, 384 ticks), mean engine ms per frame, 2 reps:
@@ -52,6 +78,13 @@ perfbench `--check` (demo: SAME simulation, 384 ticks), mean engine ms per frame
 |---|---|---|---|
 | stress2000 | 13.35 | 11.97 | 1.12x |
 | stress4000 | 60.77 | 47.49 | 1.28x |
+
+Then 3 and 4 (r3a is 1 and 2; r3b adds 3; r3c adds 4), mean ms, 2 reps, all SAME on the demo:
+
+| Scenario | r3a | r3b | r3c | r3c vs r3a |
+|---|---|---|---|---|
+| stress2000 | 11.99 | 11.53 | 11.23 | 1.07x |
+| stress4000 | 52.71 | 48.09 | 45.74 | 1.15x |
 
 The pre-test change was already in r2b. Against the reference engine, r2b measured 1.74x at
 stress500, 7.69x at stress1000 and 3.07x at stress2000. The reference engine can't run
