@@ -361,6 +361,34 @@ CPlayerEntity *CWorld::FindEntityWithCharacter(CPlayerCharacter &pcCharacter)
   return NULL;
 }
 
+#if defined(__EMSCRIPTEN__)
+// Web port (perf, round 2): a hint per time bucket for AddTimer (see there)
+#define SE1_TIMER_HINT_SLOTS_LOG2 10
+#define SE1_TIMER_HINT_MASK ((1<<SE1_TIMER_HINT_SLOTS_LOG2)-1)
+#define SE1_TIMER_HINT_SCALE 64.0f      // buckets of 1/64 s: 16 s of due times before slots alias
+#ifndef SE1_TIMER_VERIFY
+#define SE1_TIMER_VERIFY 0
+#endif
+static CRationalEntity *_apenTimerHint[1<<SE1_TIMER_HINT_SLOTS_LOG2];
+#if SE1_TIMER_VERIFY
+static __int64 _ctTimerSteps = 0, _ctTimerHinted = 0;
+#endif
+static inline INDEX TimerBucket(TIME tm)
+{
+  return INDEX(floorf(tm*SE1_TIMER_HINT_SCALE));
+}
+// an entity is being destroyed: forget it (Entity.cpp, ~CRationalEntity)
+void SE1_TimerEntityGone(CRationalEntity *pen)
+{
+  for (INDEX i=0; i<(1<<SE1_TIMER_HINT_SLOTS_LOG2); i++) {
+    if (_apenTimerHint[i]==pen) {
+      _apenTimerHint[i] = NULL;
+    }
+  }
+}
+#define TIMER_PEN(pln) ((CRationalEntity *)((UBYTE *)(pln) - _offsetof(CRationalEntity, en_lnInTimers)))
+#endif
+
 /*
  * Add an entity to list of thinkers.
  */
@@ -389,12 +417,82 @@ void CWorld::AddTimer(CRationalEntity *penThinker)
     _bTimerNaN = TRUE;
   }
   if (!_bTimerNaN) {
+    // Round 2: the tail scan still stepped back over every timer due at or after the new one,
+    // ~170 timers per insert with 1000 monsters: enemies re-arm to random delays (attack move
+    // frequency, wait() in the AI), so a new time usually lands deep inside the list. Now the scan
+    // starts from a hint: for each 1/64 s bucket of due times, the timer last inserted with a time
+    // in it (_apenTimerHint). A hint is used only after checking, on the list as it is now, that
+    // it is linked in this world's timer list and that its time is in the bucket it is filed
+    // under, which is the new time's bucket or one near it. The list being sorted, the insert
+    // point (the last node with t < x) is then found from the hint: walking forward while the
+    // next node is below x if the hint is below x, else walking back while the node is >= x, as
+    // the tail scan does. Either walk ends on the node the tail scan finds. Entries are cleared
+    // when their entity is destroyed (~CRationalEntity), so they never dangle; a stale or
+    // colliding entry fails the check, and with no usable hint the tail scan runs as before.
+    // Measured with SE1_TIMER_VERIFY at stress1000: see notes/perf/rays2.md.
     CListNode *pln = &wo_lhTimers.IterationTail();
-    while (!pln->IsHeadMarker() &&
-      ((CRationalEntity *)((UBYTE *)pln - _offsetof(CRationalEntity, en_lnInTimers)))->en_timeTimer>=tmNew) {
-      pln = &pln->IterationPred();
+    BOOL bHinted = FALSE;
+    if (!pln->IsHeadMarker() && TIMER_PEN(pln)->en_timeTimer>=tmNew
+      && tmNew>=0.0f && tmNew<1e6f) {
+      const INDEX iBucket = TimerBucket(tmNew);
+      // the new time's bucket, then the ones before it, then the ones after it
+      static const INDEX aiNear[] = {0, -1, -2, -3, 1, 2, 3};
+      for (INDEX iNear=0; iNear<INDEX(sizeof(aiNear)/sizeof(aiNear[0])); iNear++) {
+        const INDEX iHintBucket = iBucket+aiNear[iNear];
+        CRationalEntity *penH = _apenTimerHint[iHintBucket&SE1_TIMER_HINT_MASK];
+        if (penH==NULL || penH->en_pwoWorld!=this || !penH->en_lnInTimers.IsLinked()
+          || TimerBucket(penH->en_timeTimer)!=iHintBucket) {
+          continue;
+        }
+        pln = &penH->en_lnInTimers;
+        if (penH->en_timeTimer<tmNew) {
+          for (;;) {
+            CListNode &lnSucc = pln->IterationSucc();
+            if (lnSucc.IsTailMarker() || TIMER_PEN(&lnSucc)->en_timeTimer>=tmNew) {
+              break;
+            }
+            pln = &lnSucc;
+#if SE1_TIMER_VERIFY
+            _ctTimerSteps++;
+#endif
+          }
+        }
+        bHinted = TRUE;
+        break;
+      }
     }
+    // from the tail, or back from a hint at or after the new time
+    while (!pln->IsHeadMarker() && TIMER_PEN(pln)->en_timeTimer>=tmNew) {
+      pln = &pln->IterationPred();
+#if SE1_TIMER_VERIFY
+      _ctTimerSteps++;
+#endif
+    }
+#if SE1_TIMER_VERIFY
+    {
+      static __int64 _ctAdds = 0, _ctBad = 0, _ctPlainSteps = 0;
+      CListNode *plnPlain = &wo_lhTimers.IterationTail();
+      while (!plnPlain->IsHeadMarker() && TIMER_PEN(plnPlain)->en_timeTimer>=tmNew) {
+        plnPlain = &plnPlain->IterationPred();
+        _ctPlainSteps++;
+      }
+      if (plnPlain!=pln) {
+        _ctBad++;
+      }
+      if (bHinted) {
+        _ctTimerHinted++;
+      }
+      if ((++_ctAdds&8191)==0) {
+        CPrintF("TIMERHINT adds %lld bad %lld hinted %lld plainsteps %lld steps %lld\n",
+          _ctAdds, _ctBad, _ctTimerHinted, _ctPlainSteps, _ctTimerSteps);
+      }
+    }
+#endif
     pln->IterationInsertAfter(penThinker->en_lnInTimers);
+    // the new timer is the latest hint for its bucket
+    if (tmNew>=0.0f && tmNew<1e6f) {
+      _apenTimerHint[TimerBucket(tmNew)&SE1_TIMER_HINT_MASK] = penThinker;
+    }
     return;
   }
 #endif

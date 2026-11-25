@@ -805,6 +805,10 @@ public:
 public:
   /* Constructor. */
   CRationalEntity(void);
+#if defined(__EMSCRIPTEN__)
+  /* Destructor (web port: World.cpp's timer-run table must forget this entity). */
+  ~CRationalEntity(void);
+#endif
 
   /* Handle an event - return false if event was not handled. */
   virtual BOOL HandleEvent(const CEntityEvent &ee);
