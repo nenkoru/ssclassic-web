@@ -127,5 +127,11 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
   - `collision2.md`: `WorldCollision.cpp` pre-tests four sphere pairs at once (wasm SIMD) and skips
     polygon edges outside the path's box; `WorldCollisionGrid.cpp` keeps one compact record per
     entity for the movers a ClipMove can touch, in the original order.
+  - `models2.md`: `RenderModel_View.cpp` unpacks and shades frames with wasm SIMD and lets the GL1
+    shim reuse the arrays instances share; `Model.cpp` `MODEL_DATA_CHANGED()` drops those cached
+    arrays (and the GPU copy) when a model's data changes.
+  - `collision3.md`: the SIMD pre-test in `WorldCollision.cpp` also rejects pairs that already
+    overlap, as the scalar test does; `WorldCollisionGrid.cpp` doesn't scan the last row and column
+    when they hold only records that the box test rejects.
 
 Update this list when an engine change lands.

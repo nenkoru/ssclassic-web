@@ -650,6 +650,21 @@ void SE1_FindEntitiesTouchingBox(CWorld *pwo, const FLOATaabbox3D &boxNear,
 
   INDEX iMinX, iMaxX, iMinZ, iMaxZ;
   BoxToGrid(boxNear, iMinX, iMaxX, iMinZ, iMaxZ);
+  // Round 3: BoxToGrid() rounds the max edges up (ceil), so a box inside one cell scans 2x2 cells.
+  // A record is taken in the cell of its first entry inside the rectangle, (max(go_iMinX, iMinX),
+  // max(go_iMinZ, iMinZ)); one with go_iMinX > floor(max x/cell) has floor(min x/cell) >= that + 1,
+  // so its min x > the query's max x (exact: a float halved, floored, in double) and the box test
+  // below rejects it. The same holds for z. So the last column and row, when ceil and floor differ,
+  // hold first entries of rejected records only and are not scanned; the order of the others is
+  // unchanged. Non-finite edges convert as in BoxToGrid() (both give GRID_MIN), and clamping only
+  // keeps more. Measured at stress4000: see notes/perf/collision3.md.
+  {
+    const FLOAT fMaxX = boxNear.Max()(1), fMaxZ = boxNear.Max()(3);
+    const INDEX iFloorMaxX = Clamp(SE1_X86FloatToIndex(floor(fMaxX/GRID_CELLSIZE)), (INDEX)GRID_MIN, (INDEX)GRID_MAX);
+    const INDEX iFloorMaxZ = Clamp(SE1_X86FloatToIndex(floor(fMaxZ/GRID_CELLSIZE)), (INDEX)GRID_MIN, (INDEX)GRID_MAX);
+    if (iFloorMaxX<iMaxX) iMaxX = iFloorMaxX;
+    if (iFloorMaxZ<iMaxZ) iMaxZ = iFloorMaxZ;
+  }
   apenNearEntities.PopAll();
 
   static CStaticStackArray<INDEX> aigoLast;
