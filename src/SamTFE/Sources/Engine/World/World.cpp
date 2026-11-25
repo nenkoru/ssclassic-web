@@ -148,6 +148,10 @@ CWorld::~CWorld()
  */
 void CWorld::Clear(void)
 {
+#ifdef __EMSCRIPTEN__
+  // baked GI (port/common/Se1GI.cpp) points into the polygons: drop it, look for the next world's bake
+  { extern void SE1GI_WorldCleared(CWorld *); SE1GI_WorldCleared(this); }
+#endif
   // detach worldbase class
   if (wo_pecWorldBaseClass!=NULL) {
     if ( wo_pecWorldBaseClass->ec_pdecDLLClass!=NULL

@@ -155,5 +155,8 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
   - `Rendering/RenderModels.cpp` `FindModelLights`: `SE1GI_AddModelAmbient` adds the indirect light
     under a model to its ambient.
   - `Engine.cpp`: `SE1GI_DeclareSymbols()` registers the `gi_*` cvars and `GI_*` functions.
+  - `World/World.cpp` `CWorld::Clear`: `SE1GI_WorldCleared` drops the GI that points into the old
+    polygons; the next world's prebaked file (`GI/<world>.gi`, `tools/gibake.mjs`) is loaded on the
+    first shadow-map mix.
 
 Update this list when an engine change lands.

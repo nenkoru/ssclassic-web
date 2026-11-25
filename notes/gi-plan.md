@@ -228,6 +228,23 @@ the same cell count, and going from 1 m to 2 m cells only cut KarnakDemo's cells
 The tier only changes the bake parameters and two cvars, never gameplay. The cache key includes
 the tier, so switching tiers means another bake or another cached entry.
 
+## 7b. Prebaked files (done for the dev builds)
+
+`node tools/gibake.mjs [--cell 0.5] [--rays 256] [--bounces 3] Levels/<name>.wld ...` bakes each level in
+se1d against a dev server for a build with the level's data (`tools/devserver.py` takes the upload:
+`POST /__gi/Levels/<name>.gi` -> `data/gi/Levels/<name>.gi`). Copy the files to `<data dir>/GI/Levels/`
+and relink: on every world load (`CWorld::Clear` hook) the engine looks for `GI/<world path>.gi`
+on the first shadow-map mix and takes it if it matches (`GI: loaded ...` in the console; `gi_bLoad=0`
+turns it off, `GI_Load()` retries).
+
+- Format (`Se1GI.cpp`, "bake files"): a 32-byte header, one 16-byte record per lit polygon (brush
+  entity ID, sector, polygon, mip and grid size) and one RGB9E5 word per cell. Entity IDs come from
+  the world file, so spawn-flag filtering (difficulty, coop) doesn't shift the keys. A polygon whose
+  shadow-map size differs from the bake means the world changed, and the file is refused.
+- Big files go through lazy data like the rest of the data (fetched on demand when the level loads).
+- KarnakDemo at 1 m: 4.1 MB, loaded in 18 ms. The picture matches a live bake (mean pixel difference
+  1.4 against 9.4 for GI off).
+
 ## 8. Toward shipping
 
 1. **Bake on level load, off the critical path.** Hook after `CWorld::Load_t` succeeds
