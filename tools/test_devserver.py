@@ -15,6 +15,9 @@ import devserver
 
 SIZE = 3_000_000
 
+# talk to the local server directly, not through a system or env HTTP proxy
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 
 def free_port():
     s = socket.socket()
@@ -54,7 +57,7 @@ class RangeTest(unittest.TestCase):
         if range_header is not None:
             req.add_header("Range", range_header)
         try:
-            return urllib.request.urlopen(req)
+            return _OPENER.open(req)
         except urllib.error.HTTPError as e:
             return e
 
