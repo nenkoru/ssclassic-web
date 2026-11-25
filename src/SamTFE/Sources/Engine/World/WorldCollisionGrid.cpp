@@ -187,6 +187,18 @@ public:
   // collision searches then use the original algorithm until the next Clear()
   BOOL cg_bInconsistent;
   INDEX cg_igoAdding;   // record for the entries AddEntry() creates
+  // round 5: each cell's entries as their records, oldest first (the cell's list read backwards:
+  // AddEntry() links at the head and RemoveEntry() unlinks the first match), and each record's
+  // first cell, so the search scans two dense arrays instead of following the entry links and
+  // loading the records
+  struct CGridMin { INDEX gm_iMinX, gm_iMinZ; };
+  std::vector<std::vector<INDEX> > cg_aaigoCells; // by cell index
+  std::vector<CGridMin> cg_agmMins;               // by record index
+  inline void SetObjectMin(INDEX igo, INDEX iMinX, INDEX iMinZ) {
+    if ((size_t)igo>=cg_agmMins.size()) cg_agmMins.resize(igo+256);
+    cg_agmMins[igo].gm_iMinX = iMinX;
+    cg_agmMins[igo].gm_iMinZ = iMinZ;
+  }
   INDEX NewObject(CEntity *pen, const FLOATaabbox3D &box, INDEX iMinX, INDEX iMinZ);
   INDEX GetObject(CEntity *pen, const FLOATaabbox3D &boxOld);
 #endif
@@ -217,6 +229,7 @@ void CCollisionGrid::Clear(void)
   cg_mapObjects.clear();
   cg_bInconsistent = FALSE;
   cg_igoAdding = -1;
+  for (size_t i=0; i<cg_aaigoCells.size(); i++) cg_aaigoCells[i].clear();
 #endif
 
   cg_aiFirstCells.New(GRID_HASHTABLESIZE);
@@ -239,6 +252,10 @@ INDEX CCollisionGrid::CreateCell(INDEX iKey, ULONG ulCode)
   // set up the cell
   gc.gc_ulCode = ulCode;
   gc.gc_iFirstEntry = -1;
+#ifdef __EMSCRIPTEN__
+  if ((size_t)igc>=cg_aaigoCells.size()) cg_aaigoCells.resize(igc+1024);
+  cg_aaigoCells[igc].clear();
+#endif
 
   // link it by hash key
   gc.gc_iNextCell = cg_aiFirstCells[iKey];
@@ -264,6 +281,9 @@ void CCollisionGrid::RemoveCell(INDEX igc)
       gc.gc_iNextCell = -2;
       gc.gc_iFirstEntry = -1;
       gc.gc_ulCode = 0x12345678;
+#ifdef __EMSCRIPTEN__
+      cg_aaigoCells[igc].clear();
+#endif
       cg_agcCells.Free(igc);
       return;
     }
@@ -321,6 +341,7 @@ void CCollisionGrid::AddEntry(INDEX igc, CEntity *pen)
   ge.ge_penEntity = pen;
 #ifdef __EMSCRIPTEN__
   ge.ge_iObject = cg_igoAdding;
+  cg_aaigoCells[igc].push_back(cg_igoAdding);
 #endif
   CGridCell &gc = cg_agcCells[igc];
   ge.ge_iNextEntry = gc.gc_iFirstEntry;
@@ -339,6 +360,14 @@ void CCollisionGrid::RemoveEntry(INDEX igc, CEntity *pen)
     CGridEntry &ge = cg_ageEntries[*pige];
     if (ge.ge_penEntity==pen) {
       GRID_CHANGED();
+#ifdef __EMSCRIPTEN__
+      // the same entry in the dense copy: the last one of its record (the first in the list)
+      {std::vector<INDEX> &aigo = cg_aaigoCells[igc];
+      INDEX i = (INDEX)aigo.size()-1;
+      while (i>=0 && aigo[i]!=ge.ge_iObject) i--;
+      if (i>=0) aigo.erase(aigo.begin()+i);
+      else cg_bInconsistent = TRUE;}
+#endif
       // remove the entry from the list
       cg_ageEntries.Free(*pige);
       *pige = ge.ge_iNextEntry;
@@ -370,6 +399,7 @@ INDEX CCollisionGrid::NewObject(CEntity *pen, const FLOATaabbox3D &box, INDEX iM
   go.go_box = box;
   go.go_iMinX = iMinX;
   go.go_iMinZ = iMinZ;
+  SetObjectMin(igo, iMinX, iMinZ);
   std::pair<std::unordered_map<CEntity*, INDEX>::iterator, bool> res =
     cg_mapObjects.insert(std::make_pair(pen, igo));
   if (!res.second) {
@@ -492,6 +522,7 @@ void CWorld::MoveEntityInCollisionGrid(CEntity *pen,
     go.go_box = boxNew;
     go.go_iMinX = iNewMinX;
     go.go_iMinZ = iNewMinZ;
+    pcg->SetObjectMin(igo, iNewMinX, iNewMinZ);
   }
   pcg->cg_igoAdding = igo;}
 #endif
@@ -685,14 +716,42 @@ void SE1_FindEntitiesTouchingBox(CWorld *pwo, const FLOATaabbox3D &boxNear,
         if (igc<0) {
           continue;
         }
+        // round 5: the cell's records newest first, as its entry list (see cg_aaigoCells)
+        const std::vector<INDEX> &aigoCell = pcg->cg_aaigoCells[igc];
+        const INDEX *pigo = aigoCell.data();
+        const CCollisionGrid::CGridMin *agm = pcg->cg_agmMins.data();
+        for (INDEX i=(INDEX)aigoCell.size()-1; i>=0; i--) {
+          const INDEX igo = pigo[i];
+          if (Max(agm[igo].gm_iMinX, iMinX)==iX && Max(agm[igo].gm_iMinZ, iMinZ)==iZ) {
+            aigoLast.Push() = igo;
+          }
+        }
+#ifdef SE1_VERIFYDENSE
+        {static INDEX _ctScans=0, _ctBad=0, _ctEntries=0;
+        INDEX iOut = aigoLast.Count();
+        INDEX iCheck = iOut;
+        {INDEX ctThis=0;
+        for (INDEX i=(INDEX)aigoCell.size()-1; i>=0; i--) {
+          const INDEX igo = pigo[i];
+          if (Max(agm[igo].gm_iMinX, iMinX)==iX && Max(agm[igo].gm_iMinZ, iMinZ)==iZ) ctThis++;
+        }
+        iCheck = iOut-ctThis;}
+        INDEX ctEnt = 0;
         for(INDEX iEntry = pcg->cg_agcCells[igc].gc_iFirstEntry; iEntry>=0;
             iEntry = pcg->cg_ageEntries[iEntry].ge_iNextEntry) {
           const CGridEntry &ge = pcg->cg_ageEntries[iEntry];
           const CGridObject &go = pcg->cg_agoObjects[ge.ge_iObject];
+          if (ctEnt>=(INDEX)aigoCell.size() || pigo[aigoCell.size()-1-ctEnt]!=ge.ge_iObject) _ctBad++;
+          ctEnt++;
           if (Max(go.go_iMinX, iMinX)==iX && Max(go.go_iMinZ, iMinZ)==iZ) {
-            aigoLast.Push() = ge.ge_iObject;
+            if (iCheck>=iOut || aigoLast[iCheck]!=ge.ge_iObject) _ctBad++;
+            iCheck++;
           }
         }
+        if (ctEnt!=(INDEX)aigoCell.size() || iCheck!=iOut) _ctBad++;
+        _ctEntries += ctEnt;
+        if ((++_ctScans & 0xFFFFF)==0) CPrintF("VERIFYDENSE cellscans %d MISMATCH %d entries %d\n", _ctScans, _ctBad, _ctEntries);}
+#endif
       }
     }
     pcgLast = pcg;
