@@ -172,6 +172,69 @@ mapping gradients per polygon, models need per-vertex tangents from the UVs. The
 per polygon is already known to the engine (shadow maps for brushes, the model light vector), so
 a per-pixel N·L on top of the shadow map, or parallax from the height channel, is the cheap win.
 
+## Results (01_Hatshepsut + 08_Suburbs)
+
+**Build:** `build --levels 01_Hatshepsut,08_Suburbs --maps` made 304 new 4x masters (308 planned,
+the rest cached from the sheets) in 37.4 min, one model process, niced, 4 threads. Output:
+`ZZ_HD_Textures.gro` 321 textures, 345 MB (23.4 → 189.8 Mpx); `ZZ_HD_Maps.gro` 274 normal+height
+maps, 430 MB; cache 783 MB. Peak for the build: RSS 2.33 GB (`time -l` 2.50 GB), MPS allocations
+4.34 GB, process footprint 6.18 GB. The whole project's worst peak was the SD sheet run (footprint
+6.6 GB, RSS 1.47 GB); the machine stayed under the 8 GB budget throughout.
+
+**In game** (same binary, `hd` build, HD vs `?hd=0`; headless Chrome, 844x633 canvas, same pose
+via `GI_Pose`, same level time so the weather matches). Shots in `data/hdtex/shots/`:
+`<level>_<pose>_{1x,hd}.png`, side by side `pair_<level>_<pose>.png`, both levels on one page
+`sheet_hat.png` / `sheet_sub.png`, 2x crops `zoom_*.png`. Poses `e` and `f` are at FOV 25
+(`plr_fFOV`), which shows what a 4K screen or a wall up close sees.
+
+| pose | what | fine detail, HD / 1x |
+|---|---|---:|
+| hat_a | start, temple ahead | 1.06 |
+| hat_b / hat_c | colonnade, relief pillars | 0.94 / 0.84 (less moiré on the patterned base, not less detail) |
+| hat_d | floor tiles, sky | 1.15 |
+| hat_e (FOV 25) | relief wall | 1.11 |
+| sub_a / sub_b | start, street | 1.00 / 0.98 |
+| sub_c / sub_d | mural + mud walls, a wall up close | 0.98 / 1.07 |
+| sub_e (FOV 25) | house wall and door | **1.28** |
+| sub_f (FOV 25) | door + temple mural | 1.14 |
+
+"Fine detail" is the mean absolute Laplacian of the frame. It also counts aliasing, which the
+HD mips reduce, so a value under 1 can be the better picture. Up close and at FOV 25 the HD
+textures are clearly sharper: wood grain, cracks, stone edges and relief outlines. At 844 px and
+a normal distance the difference is small. The retail textures already come close to one texel
+per pixel there, and the plan's 1024 cap means many world textures only got 2x (e.g.
+`HouseWall03_1` goes from 512x256 to 1024x512). The gain grows with screen resolution: at 1440p
+or 4K fullscreen a wall covers 2–4x more pixels than in these shots.
+
+| | 1x (`?hd=0`) | HD |
+|---|---:|---:|
+| 01_Hatshepsut: page open → `level started` | 1.8 s | 3.8 s |
+| 08_Suburbs: page open → `level started` | 1.8 s | 3.6 s |
+| wasm heap after load, Hatshepsut | 315 MB | 436 MB (+121) |
+| wasm heap after load, Suburbs | 307 MB | 441 MB (+134) |
+| GPU textures (estimate, table above) | 77 / 66 MB | ~700 / ~580 MB |
+
+Load times are with a warm HTTP cache from the local dev server. Over a network add the
+archive's download: the level's share of the 345 MB deflate archive (lazy data fetches per file).
+The heap only grows (Emscripten), so +120–135 MB is the transient decode and mip peak. It stays
+allocated, but the engine frees the pixels after the upload.
+
+**Open problems**
+- Only two levels are built. Everything takes ~1.5 h of PBRify (`build` without `--levels`),
+  then `mkdata` and a relink.
+- GPU memory is ~10x per level at the plan. That is fine on a desktop GPU, but laptops and
+  phones need either `tex_iNormalSize = 9` (the console knob above) or KTX2 (next steps).
+- The 1024 cap limits big walls to 2x. `tex_iNormalSize = 11` (2048) together with a 4x plan for
+  large world textures would show more, but costs ~4x the GPU memory for those textures.
+- The normal and height maps are built but not rendered (needs the shim, which belongs to another
+  agent's work).
+- There is no per-texture method override yet (UltraSharpV2 for metal and weapons).
+- TextureDAT2 colour drift rules it out; it is not a pipeline issue.
+- `Initial.ini(88): Identifier 'gfx_fProbeRatio' is not declared` comes from line 88 of the retail
+  `Initial.ini`, which sets a variable this engine doesn't declare. It is harmless and isn't from
+  this branch: the copy only appends the `include`.
+- SDXL, SUPIR and Flux weren't tried (resource limits on the shared Mac).
+
 ## Next steps
 
 - **Normal maps in the renderer** (above): biggest visual gain after the colour upscale.
