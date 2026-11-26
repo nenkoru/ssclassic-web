@@ -26,6 +26,7 @@ const devserver = (port, dir) => ({ cmd: ['python3', 'tools/devserver.py', '--po
   url: `http://127.0.0.1:${port}/serioussam.html`, ready: 15 });
 const SERVICES = {
   full: devserver(8096, 'build-web-tfe-full'),   // full TFE data, threaded: what is played
+  hd: devserver(8097, 'build-web-tfe-hd'),       // full data + HD textures (notes/hd-textures.md); ?hd=0 = retail
   mt: devserver(8094, 'build-web-tfe-mt'),       // demo data, threaded: what the tests use
   rel: devserver(8092, 'build-web-tfe-rel'),
   web: devserver(8090, 'build-web-tfe'),         // single-threaded (JSPI)
@@ -34,7 +35,7 @@ const SERVICES = {
   switch: { cmd: ['cargo', 'run', '-p', 'se1-server', '--release'], cwd: 'rust', port: 9002, url: 'ws://127.0.0.1:9002', ready: 300 },
   se1d: { cmd: ['node', 'tools/se1d.mjs', 'serve'], port: 9230, url: 'http://127.0.0.1:9230/status', ready: 15 },
 };
-const BUILDS = ['build-web-tfe-full', 'build-web-tfe-mt', 'build-web-tfe-rel', 'build-web-tfe', 'build-test-mt', 'build-test-st', 'build-pub-mt/byod', 'build-pub-st/byod'];
+const BUILDS = ['build-web-tfe-full', 'build-web-tfe-hd', 'build-web-tfe-mt', 'build-web-tfe-rel', 'build-web-tfe', 'build-test-mt', 'build-test-st', 'build-pub-mt/byod', 'build-pub-st/byod'];
 const RUN = join(ROOT, 'data/dev/run'), LOGS = join(ROOT, 'data/dev/logs');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
