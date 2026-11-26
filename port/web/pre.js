@@ -43,6 +43,10 @@
                               bloom: pb === null || isNaN(+pb) ? undefined : Math.min(3, Math.max(0, +pb)),
                               pp: q.get('pp') || '' };   // tuning: ?pp=thr:0.9,vig:0.2 (gfx.js PP)
   }
+  // ?nm=1: normal-mapped lighting on brushes with HD normal maps (port/common/Se1NormalMaps.cpp;
+  // WebGL2 only). Console: gfx_bNormalMaps, gfx_fNormalStrength, gfx_fNormalFlipY
+  // (?nm=2 also logs each texture checked)
+  if ((q.get('nm') === '1' || q.get('nm') === '2') && q.get('gfx') !== 'webgpu') Module['se1NormalMaps'] = +q.get('nm');
   // ?shots=<label>: deterministic demo replay, capture frames at fixed demo times and POST them
   // to the dev server (tools/devserver.py saves them under data/shots/<label>/). Starts at 3 s:
   // lens flares fade on wall-clock time, so the first second varies run to run.

@@ -160,4 +160,14 @@ Status: ✅ landed and tested · 🧪 landed, partly tested · 🚧 in progress 
     polygons; the next world's prebaked file (`GI/<world>.gi`, `tools/gibake.mjs`) is loaded on the
     first shadow-map mix.
 
+- **Normal-mapped lighting (2026-11-26, opt-in `?nm=1`).** `notes/hd-textures.md` "Normal maps in
+  the renderer". `port/common/Se1NormalMaps.cpp` loads `<texture>_nh.tex` next to each texture and
+  bakes a dominant-light direction map per shadow map; the GL shim (`gl1shim.c`, bit 21 of the
+  state key) shades brush draws with them. Three guarded (`__EMSCRIPTEN__`) calls:
+  - `Graphics/Texture.cpp` `CTextureData::SetAsCurrent`: `SE1NM_TextureCreated` when the GL objects
+    are made (the name is not set yet inside `Read_t`, so the file resolves it later).
+  - `Light/LayerMixer.cpp` `MixOneMipmap`: `SE1NM_MixDirections` after the static layers.
+  - `Graphics/ShadowMap.cpp` `CShadowMap::SetAsCurrent`: `SE1NM_UploadShadowDirs` after the upload.
+  `Se1GI.cpp` forwards `SE1NM_DeclareSymbols` and `SE1NM_WorldCleared`.
+
 Update this list when an engine change lands.

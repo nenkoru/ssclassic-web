@@ -637,6 +637,11 @@ void CShadowMap::SetAsCurrent(void)
       MarkDrawn(); // mark that shadowmap has been referenced
       gfxSetTexture( sm_ulObject, sm_tpLocal);
       gfxUploadTexture( pulShadowMap, pixWidth, pixHeight, ulInternalFormat, bUseSubImage);
+#ifdef __EMSCRIPTEN__
+      // light direction map for normal-mapped lighting (port/common/Se1NormalMaps.cpp)
+      extern void SE1NM_UploadShadowDirs(CShadowMap *psm, PIX pixWidth, PIX pixHeight);
+      SE1NM_UploadShadowDirs( this, pixWidth, pixHeight);
+#endif
     }
     // paranoid android
     ASSERT( sm_iFirstCachedMipLevel<31 && sm_pulCachedShadowMap!=NULL);

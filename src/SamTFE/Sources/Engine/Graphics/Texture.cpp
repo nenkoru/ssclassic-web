@@ -1351,6 +1351,11 @@ void CTextureData::SetAsCurrent( INDEX iFrameNo/*=0*/, BOOL bForceUpload/*=FALSE
     // must do initial uploading
     bNeedUpload = TRUE;
     bNoDiscard  = FALSE;
+#ifdef __EMSCRIPTEN__
+    // HD normal map next to the texture (port/common/Se1NormalMaps.cpp)
+    extern void SE1NM_TextureCreated(CTextureData *ptd);
+    SE1NM_TextureCreated(this);
+#endif
   }
 
   // constant textures cannot be probed either

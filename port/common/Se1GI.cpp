@@ -838,6 +838,7 @@ void GI_Load(void)
 void SE1GI_WorldCleared(CWorld *pwo)
 {
   if (pwo != &_pNetwork->ga_World) return;
+  { extern void SE1NM_WorldCleared(void); SE1NM_WorldCleared(); }
   DropBake();
   _bLoadPending = TRUE;
 }
@@ -939,6 +940,7 @@ void GI_Pose(FLOAT fX, FLOAT fY, FLOAT fZ, FLOAT fHeading)
 
 void SE1GI_DeclareSymbols(void)
 {
+  { extern void SE1NM_DeclareSymbols(void); SE1NM_DeclareSymbols(); }
   _pShell->DeclareSymbol("user INDEX gi_bEnable;", &gi_bEnable);
   _pShell->DeclareSymbol("user INDEX gi_bLoad;", &gi_bLoad);
   _pShell->DeclareSymbol("user void GI_Save(void);", (void *)&GI_Save);

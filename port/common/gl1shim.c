@@ -554,9 +554,9 @@ static __attribute__((noinline)) void shim_init_once(void) {
 /* ---- shader cache ---- */
 typedef struct {
   uint32_t key; int prog;
-  GLint uMVP, uMV, uTexMat[MAXUNITS], uSampler[MAXUNITS], uEnvColor[MAXUNITS], uAlphaRef, uClip;
+  GLint uMVP, uMV, uTexMat[MAXUNITS], uSampler[MAXUNITS], uEnvColor[MAXUNITS], uAlphaRef, uClip, uNm;
   /* last values sent, so unchanged uniforms are skipped */
-  float cMVP[16], cMV[16], cClip[4], cAlphaRef, cTexMat[MAXUNITS][16], cEnv[MAXUNITS][4];
+  float cMVP[16], cMV[16], cClip[4], cAlphaRef, cTexMat[MAXUNITS][16], cEnv[MAXUNITS][4], cNm[4];
   uint32_t cValid;
 } Prog;
 static Prog _progs[256]; static int _ctProgs;
@@ -585,6 +585,60 @@ static uint32_t state_key(void) {
   k |= af << 16;
   k |= (uint32_t)(S.clipPlane ? 1 : 0) << 20;
   return k;
+}
+
+/* ---- normal-mapped lighting (port/common/Se1NormalMaps.cpp) ----
+   A texture handle can have a companion: a base texture its HD normal map, a shadow map its light
+   direction map. When a draw has a base texture on unit 0 (MODULATE) and a shadow map on a later
+   COMBINE-MODULATE unit, and both have companions, the companions go to units 4 and 5 and the key
+   gets bit 21 (bits 22-23: the shadow unit). */
+#define NM_UNIT_N 4
+#define NM_UNIT_D 5
+extern int gfx_bNormalMaps;            /* INDEX/FLOAT console vars, 32-bit on wasm32 */
+extern float gfx_fNormalStrength, gfx_fNormalFlipY, gfx_fNormalMaxBoost;
+static GLuint *_comp; static uint8_t *_compTarget; static uint32_t _compCap;
+static GLuint _nmBound[2];
+static int _nmAllowed = -1;            /* not with ?gfx=webgpu (its WGSL comes from the key) */
+#ifdef __cplusplus
+extern "C"
+#endif
+void SE1_GL1Shim_SetCompanion(unsigned int tex, unsigned int comp) {
+  uint32_t need = (tex > comp ? tex : comp) + 1;
+  if (need > _compCap) {
+    uint32_t n = _compCap ? _compCap : 4096; while (n < need) n *= 2;
+    _comp = (GLuint *)realloc(_comp, n * sizeof(GLuint)); _compTarget = (uint8_t *)realloc(_compTarget, n);
+    memset(_comp + _compCap, 0, (n - _compCap) * sizeof(GLuint)); memset(_compTarget + _compCap, 0, n - _compCap);
+    _compCap = n;
+  }
+  _comp[tex] = comp; if (comp) _compTarget[comp] = 1;
+}
+static inline GLuint companion(GLuint t) { return t < _compCap ? _comp[t] : 0; }
+static void nm_forget(GLuint t) {   /* a deleted texture: no longer a companion or bound */
+  if (t < _compCap) {
+    _comp[t] = 0;
+    if (_compTarget[t]) { _compTarget[t] = 0; for (uint32_t i = 0; i < _compCap; i++) if (_comp[i] == t) _comp[i] = 0; }
+  }
+  if (_nmBound[0] == t) _nmBound[0] = 0;
+  if (_nmBound[1] == t) _nmBound[1] = 0;
+}
+static void nm_bind(int unit, GLuint t) {
+  if (_nmBound[unit - NM_UNIT_N] == t) return;
+  _nmBound[unit - NM_UNIT_N] = t;
+  cmd_i(OP_ACTIVETEX, (int)(GL_TEXTURE0 + unit)); cmd_ii(OP_BINDTEX, (int)GL_TEXTURE_2D, (int)t);
+  cmd_i(OP_ACTIVETEX, (int)(GL_TEXTURE0 + _activeTexUnit));
+}
+static uint32_t nm_key(uint32_t k) {
+  if (!gfx_bNormalMaps || _compCap == 0) return k;
+  if (_nmAllowed < 0) _nmAllowed = MAIN_THREAD_EM_ASM_INT({ return new URLSearchParams(location.search).get('gfx') === 'webgpu' ? 0 : 1; });
+  if (!_nmAllowed) return k;
+  if ((k & 0xF) != (1u | (ENV_MODULATE << 1))) return k;
+  int su = -1;
+  for (int i = MAXUNITS - 1; i >= 1; i--) if (S.u[i].enabled) { su = i; break; }
+  if (su < 1 || ((k >> (su * 4)) & 0xF) != (1u | (ENV_COMBINE_MOD << 1))) return k;
+  GLuint n = companion(S.boundTex[0]), d = companion(S.boundTex[su]);
+  if (!n || !d) return k;
+  nm_bind(NM_UNIT_N, n); nm_bind(NM_UNIT_D, d);
+  return k | (1u << 21) | ((uint32_t)su << 22);
 }
 /* in the threaded build uniform locations are worker-allocated handles defined at create time
    (the replayer resolves missing uniforms to -1); in the single-threaded build -1 means absent */
@@ -615,14 +669,37 @@ static Prog *get_prog(uint32_t key) {
     "in vec4 vCol; in vec4 vTex0; in vec4 vTex1; in vec4 vTex2; in vec4 vTex3; in float vClip;\n"
     "uniform sampler2D uS0; uniform sampler2D uS1; uniform sampler2D uS2; uniform sampler2D uS3;\n"
     "uniform vec4 uEnv0; uniform vec4 uEnv1; uniform vec4 uEnv2; uniform vec4 uEnv3; uniform float uAlphaRef;\n"
+    "%s"
     "out vec4 oColor;\n"
-    "void main(){ vec4 c = vCol; vec4 t;\n");
+    "void main(){ vec4 c = vCol; vec4 t;\n",
+    (key & (1u << 21)) ? "uniform sampler2D uS4; uniform sampler2D uS5; uniform vec4 uNm;\n" : "");
   if (key & (1u << 20)) n += snprintf(fs + n, sizeof fs - n, " if (vClip < 0.0) discard;\n");
   for (int i = 0; i < MAXUNITS; i++) {
     uint32_t e = (key >> (i * 4)) & 0xF;
     if (!(e & 1)) continue;
     int env = (int)(e >> 1);
     n += snprintf(fs + n, sizeof fs - n, " t = texture(uS%d, vTex%d.xy / vTex%d.w);\n", i, i, i);
+    if ((key & (1u << 21)) && i == (int)((key >> 22) & 3)) {
+      /* normal-mapped shadow: n from the HD normal map at uv0, light direction l from the
+         direction map in the shadow map's frame; the Jacobian of the shadow uv (in texels) over
+         uv0 gives the texture's tangent axes in that frame */
+      n += snprintf(fs + n, sizeof fs - n,
+        " { vec2 u0 = vTex0.xy / vTex0.w; vec2 us = vTex%d.xy / vTex%d.w;\n"
+        "   vec4 dm = texture(uS5, us); vec3 nn = texture(uS4, u0).xyz * 2.0 - 1.0;\n"
+        "   nn.y *= uNm.y; nn = normalize(mix(vec3(0.0, 0.0, 1.0), nn, uNm.x));\n"
+        "   vec2 ust = us * vec2(textureSize(uS%d, 0));\n"
+        "   mat2 B = mat2(dFdx(u0), dFdy(u0)); mat2 A = mat2(dFdx(ust), dFdy(ust));\n"
+        "   float f = 1.0; float det = determinant(B);\n"
+        "   if (dm.a > 0.004 && abs(det) > 1e-14) {\n"
+        "     mat2 J = A * inverse(B); float lt = length(J[0]), lb = length(J[1]);\n"
+        "     if (lt > 0.0 && lb > 0.0) {\n"
+        "       vec3 L = dm.xyz * 2.0 - 1.0;\n"
+        "       vec3 l = normalize(vec3(dot(L.xy, J[0] / lt), dot(L.xy, J[1] / lb), L.z));\n"
+        "       f = min((1.0 - dm.a) + dm.a * max(dot(nn, l), 0.0) / max(l.z, 0.25), uNm.z);\n"
+        "     } }\n"
+        "   c.rgb = min(c.rgb * t.rgb * f * uEnv%d.w, 1.0); c.a *= t.a; }\n", i, i, i, i);
+      continue;
+    }
     switch (env) {
     case ENV_REPLACE: n += snprintf(fs + n, sizeof fs - n, " c = t;\n"); break;
     case ENV_DECAL: n += snprintf(fs + n, sizeof fs - n, " c.rgb = mix(c.rgb, t.rgb, t.a);\n"); break;
@@ -652,6 +729,7 @@ static Prog *get_prog(uint32_t key) {
   pr->uMV = gfx_uniform_location(p, "uMV");
   pr->uClip = gfx_uniform_location(p, "uClip");
   pr->uAlphaRef = gfx_uniform_location(p, "uAlphaRef");
+  pr->uNm = (key & (1u << 21)) ? gfx_uniform_location(p, "uNm") : -1;
   char name[32];
   for (int i = 0; i < MAXUNITS; i++) {
     snprintf(name, sizeof name, "uTexMat[%d]", i); pr->uTexMat[i] = gfx_uniform_location(p, name);
@@ -665,16 +743,21 @@ static Prog *get_prog(uint32_t key) {
      resolves a missing uniform to -1 and no-ops the set, so record all. */
   for (int i = 0; i < MAXUNITS; i++)
     if (defined_on_create() || pr->uSampler[i] >= 0) cmd_ii(OP_UNIFORM1I, pr->uSampler[i], i);
+  if (key & (1u << 21)) {
+    GLint l4 = gfx_uniform_location(p, "uS4"), l5 = gfx_uniform_location(p, "uS5");
+    if (defined_on_create() || l4 >= 0) cmd_ii(OP_UNIFORM1I, l4, NM_UNIT_N);
+    if (defined_on_create() || l5 >= 0) cmd_ii(OP_UNIFORM1I, l5, NM_UNIT_D);
+  }
   return pr;
 }
 
-enum { CV_MVP = 1, CV_MV = 2, CV_CLIP = 4, CV_ALPHA = 8, CV_TEX = 16, CV_ENV = 16 << MAXUNITS };
+enum { CV_MVP = 1, CV_MV = 2, CV_CLIP = 4, CV_ALPHA = 8, CV_TEX = 16, CV_ENV = 16 << MAXUNITS, CV_NM = 16 << (2 * MAXUNITS) };
 #define UNIFORM_CHANGED(p, bit, cache, val, n) \
   (!((p)->cValid & (bit)) || memcmp((cache), (val), (n) * sizeof(float)) != 0)
 
 static Prog *_lastProg; static uint32_t _lastKey = 0xFFFFFFFFu;
 static void apply_program(void) {
-  uint32_t key = state_key();
+  uint32_t key = nm_key(state_key());
   Prog *p = (key == _lastKey && _lastProg) ? _lastProg : get_prog(key);
   _lastKey = key; _lastProg = p;
   use_program(p->prog);
@@ -689,6 +772,12 @@ static void apply_program(void) {
     }
     if (UNIFORM_CHANGED(p, CV_CLIP, p->cClip, S.clipEye, 4)) {
       if (p->uClip >= 0) cmd_loc_fv(OP_UNIFORM4F, p->uClip, S.clipEye, 4); memcpy(p->cClip, S.clipEye, 16); p->cValid |= CV_CLIP;
+    }
+  }
+  if (key & (1u << 21)) {
+    float nm[4] = { gfx_fNormalStrength, gfx_fNormalFlipY < 0.0f ? -1.0f : 1.0f, gfx_fNormalMaxBoost, 0.0f };
+    if (UNIFORM_CHANGED(p, CV_NM, p->cNm, nm, 4)) {
+      if (p->uNm >= 0) cmd_loc_fv(OP_UNIFORM4F, p->uNm, nm, 4); memcpy(p->cNm, nm, 16); p->cValid |= CV_NM;
     }
   }
   if (S.alphaTest && UNIFORM_CHANGED(p, CV_ALPHA, &p->cAlphaRef, &S.alphaRef, 1)) {
@@ -890,6 +979,7 @@ static void shim_glDeleteTextures(GLsizei n, const GLuint *t) {
   for (int i = 0; i < n; i++) {
     TexInfo *ti = tex_info(t[i], 0); if (ti) *ti = _texInfo[--_ctTexInfo];
     for (int u = 0; u < MAXUNITS; u++) if (S.boundTex[u] == t[i]) S.boundTex[u] = 0; /* GL unbinds deleted textures */
+    nm_forget(t[i]);
     if (t[i]) cmd_i(OP_DELTEX, (int)t[i]);
   }
 }

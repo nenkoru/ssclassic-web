@@ -2552,6 +2552,13 @@ void CLayerMixer::MixOneMipmap(CBrushShadowMap *pbsm, INDEX iMipmap)
   extern void SE1GI_AddIndirect(CBrushShadowMap *pbsm, INDEX iMip, ULONG *pul, PIX pixSizeU, PIX pixSizeV, PIX pixCanvasU);
   if( !bDynamicOnly) SE1GI_AddIndirect( lm_pbsmShadowMap, lm_iMipLevel, lm_pulShadowMap,
                                         lm_pixPolygonSizeU, lm_pixPolygonSizeV, lm_pixCanvasSizeU);
+  // light direction per texel for normal-mapped lighting (port/common/Se1NormalMaps.cpp)
+  extern void SE1NM_MixDirections(CBrushShadowMap *pbsm, INDEX iMip, ULONG *pul, PIX pixPolyU, PIX pixPolyV,
+                                  PIX pixCanvasU, PIX pixCanvasV, const FLOAT3D &vO, const FLOAT3D &vStepU,
+                                  const FLOAT3D &vStepV);
+  if( !bDynamicOnly) SE1NM_MixDirections( lm_pbsmShadowMap, lm_iMipLevel, lm_pulShadowMap, lm_pixPolygonSizeU,
+                                          lm_pixPolygonSizeV, lm_pixCanvasSizeU, lm_pixCanvasSizeV,
+                                          lm_vO, lm_vStepU, lm_vStepV);
 #endif
 
   // if gradient is dark, substract gradient

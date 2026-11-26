@@ -163,14 +163,31 @@ its shipped HD size (wrap-padded for tileable ones) and stores **normal in RGB, 
 cost nothing until a renderer uses them). Roughness was skipped (another model, little gain on a
 renderer without specular).
 
-How they would be fed to the renderer (not wired): the engine binds one texture per layer in
-`RenderPolygons` / model rendering; the GL shim (`port/common/gl1shim.c`) sees the bound texture
-id per draw. A lighting pass would need (1) the engine to load `<name>_nh.tex` next to each HD
-texture (one `CTextureData` per base texture, looked up by name in `Texture.cpp`), (2) the shim to
-bind it as a second sampler for the base layer, and (3) a tangent frame: brushes have one from the
-mapping gradients per polygon, models need per-vertex tangents from the UVs. The light direction
-per polygon is already known to the engine (shadow maps for brushes, the model light vector), so
-a per-pixel N·L on top of the shadow map, or parallax from the height channel, is the cheap win.
+### Normal maps in the renderer (`?nm=1`)
+
+Wired for brushes, WebGL only (WebGPU and models are not done). `port/common/Se1NormalMaps.cpp`:
+
+- **Loading.** When a texture's GL objects are made (`Texture.cpp` hook) it looks for
+  `<name>_nh.tex` and, if found, binds it once and registers it with the shim as the texture's
+  *companion* (`SE1_GL1Shim_SetCompanion`, for every frame object of an animated texture).
+- **Light direction.** The engine's light maps are scalar, so `SE1NM_MixDirections` (LayerMixer
+  hook) bakes a second RGBA map per shadow map: per texel the luminance-weighted sum of the static
+  lights' directions (point lights with the hotspot/falloff ramp, directional lights by their
+  angle, each masked by its layer shadow bits) in the frame (StepU, StepV, normal), and in A the
+  directional share `k = |sum w*L| / max(texel luminance, sum w)`, so ambient and GI stay flat.
+  It is uploaded with the shadow map and is the shadow texture's companion. 01_Hatshepsut: 217
+  maps in 7.6 ms.
+- **Shading.** `gl1shim.c` `nm_key`: a draw with a base texture (unit 0, MODULATE) and the shadow
+  map on a COMBINE-MODULATE unit, both with companions, binds them on units 4 and 5 and sets
+  bit 21 of the program key. The shader takes the tangent axes from the Jacobian of the shadow uv
+  over the base uv (`dFdx`/`dFdy`), turns the light direction into texture space and scales the
+  shadow by `f = (1-k) + k*max(n.l, 0)/max(l.z, 0.25)`, capped at `gfx_fNormalMaxBoost` (2.5).
+- **Cvars.** `gfx_bNormalMaps`, `gfx_fNormalStrength` (2; the PBRify normals are flat, mean
+  n.z 0.97), `gfx_fNormalFlipY` (+1: green points along +v, image rows down; checked against the
+  height channel's slope, correlation 0.6–0.8 on both axes), `NM_Refresh()` re-mixes the light
+  maps, `NM_Stats()`. `?nm=2` logs every texture it looks up.
+
+Off (`?nm` absent) it costs nothing: no lookups, no direction maps, the shim keys are unchanged.
 
 ## Results (01_Hatshepsut + 08_Suburbs)
 
@@ -237,7 +254,8 @@ allocated, but the engine frees the pixels after the upload.
 
 ## Next steps
 
-- **Normal maps in the renderer** (above): biggest visual gain after the colour upscale.
+- **Normal maps**: brushes are done (above); models need per-vertex tangents and the model light
+  vector, WebGPU needs the same variant in `gfx-webgpu.js`. Parallax from the height channel.
 - **Client-side upscaling for BYOD** (the public bundle imports the player's own data, so no
   retail-derived archive can ship): run a small SR model (SPAN class, ~0.2 s per 256² on desktop
   GPUs) in WebGPU at texture load, or once at import, caching the results in OPFS.
